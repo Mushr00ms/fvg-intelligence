@@ -1,0 +1,68 @@
+{
+  "market_name": "ES",
+  "description": "E-mini S&P 500 Configuration",
+  "fvg_parameters": {
+    "min_fvg_size": 0.25,
+    "min_fvg_sizes_range": {
+      "start": 0.25,
+      "end": 5.25,
+      "step": 0.25
+    },
+    "min_expansion_size": 1,
+    "min_fvg_size_3min": 0.25,
+    "min_fvg_sizes_range_3min": {
+      "start": 0.25,
+      "end": 5.25,
+      "step": 0.25
+    },
+    "min_expansion_size_3min": 1,
+    "min_fvg_size_15min": 0.25,
+    "min_fvg_sizes_range_15min": {
+      "start": 1.0,
+      "end": 10.0,
+      "step": 0.5
+    },
+    "min_expansion_size_15min": 1
+  },
+  "session_config": {
+    "us_session": {
+      "start": "09:30",
+      "end": "16:00"
+    },
+    "asian_session": {
+      "start": "18:00", 
+      "end": "02:00"
+    },
+    "london_session": {
+      "start": "03:00",
+      "end": "09:00"
+    },
+    "extended_hours": {
+      "start": "06:00",
+      "end": "17:00"
+    },
+    "primary_session": "us_session"
+  },
+  "contract_specifications": {
+    "point_value": 50,
+    "tick_size": 0.25,
+    "symbol_prefix": "ES"
+  },
+  "analysis_parameters": {
+    "lookback_period": 10,
+    "min_search_bars_1min": 300,
+    "min_search_bars_5min": 100,
+    "min_search_bars_3min": 150,
+    "min_search_bars_1min_mitigation_3min": 300,
+    "roll_days": 8,
+    "mitigation_same_day": true,
+    "session_period_minutes": 30,
+    "session_period_minutes_3min": 30,
+    "size_filtering_method": "cumulative",
+    "size_filtering_method_3min": "cumulative",
+    "size_filtering_method_15min": "cumulative",
+    "min_search_bars_15min": 60,
+    "min_search_bars_5min_mitigation": 180,
+    "session_period_minutes_15min": 60
+  }
+} 

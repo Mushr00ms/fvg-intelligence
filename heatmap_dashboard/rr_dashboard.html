@@ -1,0 +1,2213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FVG RR Expectancy Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0a0a; --bg1: #111111; --bg2: #1a1a1a; --bg3: #222222;
+    --amber: #f5a623; --amber-dim: #c4841c;
+    --green: #4caf7d; --red: #e05252; --blue: #5b9cf6;
+    --text: #e8e8e8; --text-dim: #888; --text-dimmer: #555;
+    --border: #2a2a2a; --border-bright: #3a3a3a;
+    --mono: 'IBM Plex Mono', monospace;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; }
+
+  .shell { display: grid; grid-template-rows: 38px auto 1fr 28px; height: 100vh; overflow: hidden; }
+
+  /* Topbar */
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg1); border-bottom: 1px solid var(--border-bright);
+    padding: 0 14px;
+  }
+  .logo { color: var(--amber); font-weight: 600; font-size: 13px; letter-spacing: .05em; }
+  .logo span { color: var(--text-dim); font-weight: 300; }
+  .topbar-spacer { flex: 1; }
+  .topbar-tag { font-size: 10px; color: var(--text-dim); border: 1px solid var(--border-bright); padding: 1px 6px; border-radius: 2px; cursor: pointer; user-select: none; }
+  .topbar-tag:hover { color: var(--text); border-color: var(--amber-dim); }
+  .topbar-tag.active { color: var(--amber); border-color: var(--amber); background: rgba(245,166,35,.08); }
+
+  /* Controls bar */
+  .controls {
+    display: flex; align-items: center; gap: 0;
+    background: var(--bg1); border-bottom: 1px solid var(--border);
+    padding: 0; flex-wrap: nowrap; overflow: hidden;
+  }
+  .ctrl-group {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    border-right: 1px solid var(--border);
+  }
+  .ctrl-group:last-child { border-right: none; }
+  .ctrl-label { font-size: 9px; color: var(--text-dimmer); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+
+  select, input[type=number] {
+    background: var(--bg2); color: var(--text);
+    border: 1px solid var(--border-bright); border-radius: 2px;
+    font-family: var(--mono); font-size: 11px;
+    padding: 4px 6px; outline: none;
+  }
+  select:focus, input[type=number]:focus { border-color: var(--amber-dim); }
+  input[type=number] { width: 80px; }
+
+  /* Setup tabs */
+  .setup-tabs { display: flex; gap: 0; }
+  .setup-tab {
+    padding: 5px 12px; cursor: pointer;
+    font-size: 10px; color: var(--text-dim);
+    border: 1px solid var(--border-bright); border-right: none;
+    background: var(--bg2); white-space: nowrap; transition: all .15s;
+  }
+  .setup-tab:first-child { border-radius: 2px 0 0 2px; }
+  .setup-tab:last-child  { border-radius: 0 2px 2px 0; border-right: 1px solid var(--border-bright); }
+  .setup-tab:hover { color: var(--text); background: var(--bg3); }
+  .setup-tab.active { color: var(--amber); border-color: var(--amber); background: rgba(245,166,35,.08); }
+  .setup-tab.active + .setup-tab { border-left-color: var(--amber); }
+
+  /* Metric toggle */
+  .metric-tabs { display: flex; gap: 0; }
+  .metric-tab {
+    padding: 5px 10px; cursor: pointer;
+    font-size: 10px; color: var(--text-dim);
+    border: 1px solid var(--border-bright); border-right: none;
+    background: var(--bg2); transition: all .15s;
+  }
+  .metric-tab:first-child { border-radius: 2px 0 0 2px; }
+  .metric-tab:last-child  { border-radius: 0 2px 2px 0; border-right: 1px solid var(--border-bright); }
+  .metric-tab:hover { color: var(--text); }
+  .metric-tab.active { color: var(--amber); border-color: var(--amber); background: rgba(245,166,35,.08); }
+
+  /* Slider */
+  .slider-wrap { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 200px; }
+  .slider-value { font-size: 14px; font-weight: 600; color: var(--amber); min-width: 36px; text-align: center; }
+  input[type=range] {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    height: 4px; background: var(--border-bright); border-radius: 2px; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--amber); cursor: pointer; border: 2px solid var(--bg1);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--amber); cursor: pointer; border: 2px solid var(--bg1);
+  }
+  .slider-bounds { font-size: 9px; color: var(--text-dimmer); }
+  .breakeven { font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+  .breakeven b { color: var(--text); }
+
+  /* Strategy builder */
+  .strat-cell-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 6px; margin: 2px 0;
+    background: var(--bg2); border: 1px solid var(--border-bright); border-radius: 2px;
+    font-size: 10px;
+  }
+  .strat-cell-item .cell-label { flex: 1; color: var(--text); line-height: 1.4; }
+  .strat-cell-item .cell-ev { color: var(--green); font-weight: 500; white-space: nowrap; }
+  .strat-cell-item .cell-remove {
+    cursor: pointer; color: var(--text-dimmer); font-size: 14px;
+    line-height: 1; padding: 0 2px;
+  }
+  .strat-cell-item .cell-remove:hover { color: var(--red); }
+  #select-btn.active { color: var(--amber); border-color: var(--amber); background: rgba(245,166,35,.08); }
+
+  /* Chart area + views */
+  .chart-area { background: var(--bg); overflow: hidden; position: relative; display: flex; }
+  .view { position: absolute; inset: 0; display: none !important; }
+  .view.active { display: flex !important; }
+  .views-container { position: relative; flex: 1; min-width: 0; }
+
+  #heatmap { flex: 1; min-height: 0; }
+
+  /* MC view */
+  .mc-view { flex-direction: row; }
+  .mc-sidebar {
+    width: 240px; flex-shrink: 0;
+    background: var(--bg1); border-right: 1px solid var(--border);
+    padding: 12px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .mc-sidebar .sec-label {
+    font-size: 9px; letter-spacing: .1em; font-weight: 600;
+    color: var(--text-dimmer); text-transform: uppercase;
+    padding-bottom: 4px; border-bottom: 1px solid var(--border); margin-bottom: 2px;
+  }
+  .mc-field { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+  .mc-field label { font-size: 9px; color: var(--text-dim); letter-spacing: .06em; }
+  .mc-field input { width: 100%; }
+  .mc-param {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 3px 0; font-size: 10px;
+  }
+  .mc-param .k { color: var(--text-dim); }
+  .mc-param .v { color: var(--text); font-weight: 500; }
+  .mc-param .v.pos { color: var(--green); }
+  .mc-param .v.neg { color: var(--red); }
+  .btn-run {
+    background: var(--amber); color: #000; border: none; cursor: pointer;
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 8px 10px; border-radius: 2px; letter-spacing: .04em;
+    width: 100%; transition: background .15s; margin-top: 4px;
+  }
+  .btn-run:hover { background: #f0b84e; }
+  .btn-run:disabled { opacity: .3; cursor: not-allowed; }
+
+  /* Strategy Builder */
+  .sb-sidebar {
+    width: 0; min-width: 0; flex-shrink: 0; background: var(--bg1);
+    overflow: hidden; padding: 0;
+  }
+  .sb-sidebar.open { width: 300px; padding: 10px; overflow-y: auto; }
+  .sb-meta input, .sb-meta textarea { width: 100%; background: var(--bg2); border: 1px solid var(--border-bright); color: var(--text); font-family: var(--mono); font-size: 11px; padding: 4px 6px; border-radius: 2px; margin-top: 2px; }
+  .sb-meta textarea { resize: vertical; min-height: 36px; }
+  .sb-cell-list { margin: 6px 0; }
+  .sb-cell {
+    display: flex; align-items: center; gap: 6px; padding: 5px 6px;
+    border: 1px solid var(--border); border-radius: 3px; margin-bottom: 3px;
+    font-size: 10px; background: var(--bg2); transition: border-color .15s;
+  }
+  .sb-cell:hover { border-color: var(--border-bright); }
+  .sb-cell.disabled { opacity: .45; }
+  .sb-cell .sb-check { width: 14px; height: 14px; accent-color: var(--amber); cursor: pointer; }
+  .sb-cell .sb-info { flex: 1; line-height: 1.4; }
+  .sb-cell .sb-tp { color: var(--text); font-weight: 500; }
+  .sb-cell .sb-detail { color: var(--text-dim); font-size: 9px; }
+  .sb-cell .sb-ev { font-weight: 500; white-space: nowrap; min-width: 56px; text-align: right; }
+  .sb-cell .sb-ev.pos { color: var(--green); }
+  .sb-cell .sb-ev.neg { color: var(--red); }
+  .sb-cell .sb-rr-sel { background: var(--bg); border: 1px solid var(--border-bright); color: var(--text); font-family: var(--mono); font-size: 10px; padding: 2px 3px; border-radius: 2px; width: 56px; }
+  .sb-cell .sb-rm { cursor: pointer; color: var(--text-dimmer); font-size: 14px; line-height: 1; }
+  .sb-cell .sb-rm:hover { color: var(--red); }
+  .sb-stats { padding: 6px 0; border-top: 1px solid var(--border); margin-top: 4px; }
+  .sb-stat { display: flex; justify-content: space-between; padding: 2px 0; font-size: 10px; }
+  .sb-stat .k { color: var(--text-dim); }
+  .sb-stat .v { color: var(--text); font-weight: 500; }
+  .sb-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .sb-btn { flex: 1; min-width: 80px; padding: 6px 8px; font-family: var(--mono); font-size: 10px; cursor: pointer; border: 1px solid var(--border-bright); border-radius: 3px; background: var(--bg2); color: var(--text); text-align: center; transition: all .15s; }
+  .sb-btn:hover { border-color: var(--amber-dim); color: var(--amber); }
+  .sb-btn.primary { background: var(--amber); color: #000; border-color: var(--amber); font-weight: 600; }
+  .sb-btn.primary:hover { background: #f0b84e; }
+  .sb-btn.active-badge { background: rgba(76,175,125,.15); border-color: var(--green); color: var(--green); }
+  .sb-warn { font-size: 9px; color: #c4841c; padding: 2px 0; }
+  .sb-load-dropdown { position: relative; display: inline-block; width: 100%; }
+  .sb-load-list { position: absolute; bottom: 100%; left: 0; right: 0; background: var(--bg1); border: 1px solid var(--border-bright); border-radius: 3px; max-height: 200px; overflow-y: auto; z-index: 100; display: none; }
+  .sb-load-list.open { display: block; }
+  .sb-load-item { padding: 6px 8px; cursor: pointer; font-size: 10px; border-bottom: 1px solid var(--border); }
+  .sb-load-item:hover { background: var(--bg2); color: var(--amber); }
+  .sb-load-item .active-dot { color: var(--green); font-size: 8px; }
+
+  /* Backtest view */
+  .bt-view { display: flex; flex-direction: column; width: 100%; height: 100%; overflow-y: auto; }
+  .bt-controls { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--bg1); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .bt-controls input, .bt-controls select { background: var(--bg2); border: 1px solid var(--border-bright); color: var(--text); font-family: var(--mono); font-size: 11px; padding: 4px 6px; border-radius: 2px; }
+  .bt-controls input[type=date] { width: 120px; }
+  .bt-controls input[type=number] { width: 80px; }
+  .bt-run { padding: 5px 16px; background: var(--amber); color: #000; border: none; border-radius: 3px; font-family: var(--mono); font-size: 11px; font-weight: 600; cursor: pointer; }
+  .bt-run:hover { background: #f0b84e; }
+  .bt-run:disabled { opacity: .3; cursor: not-allowed; }
+  .bt-stats { display: flex; gap: 0; padding: 4px 14px; background: var(--bg1); border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
+  .bt-stat { padding: 3px 12px; font-size: 11px; border-right: 1px solid var(--border); }
+  .bt-stat:last-child { border-right: none; }
+  .bt-stat .label { color: var(--text-dim); font-size: 9px; display: block; }
+  .bt-stat .value { font-weight: 500; }
+  .bt-stat .value.pos { color: var(--green); }
+  .bt-stat .value.neg { color: var(--red); }
+  .bt-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 4px; flex-shrink: 0; min-height: 340px; }
+  .bt-charts > div { background: var(--bg1); border-radius: 3px; min-height: 160px; }
+  .bt-tables { flex: 1; padding: 4px 14px; min-height: 200px; }
+  .bt-tab-bar { display: flex; gap: 0; margin-bottom: 6px; }
+  .bt-tab { padding: 5px 12px; cursor: pointer; font-size: 10px; color: var(--text-dim); border: 1px solid var(--border-bright); border-right: none; background: var(--bg2); }
+  .bt-tab:first-child { border-radius: 2px 0 0 2px; }
+  .bt-tab:last-child { border-radius: 0 2px 2px 0; border-right: 1px solid var(--border-bright); }
+  .bt-tab.active { color: var(--amber); border-color: var(--amber); background: rgba(245,166,35,.08); }
+  .bt-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+  .bt-table th { text-align: left; padding: 4px 8px; color: var(--text-dim); font-size: 9px; text-transform: uppercase; border-bottom: 1px solid var(--border-bright); position: sticky; top: 0; background: var(--bg); }
+  .bt-table td { padding: 3px 8px; border-bottom: 1px solid var(--border); }
+  .bt-table tr.win td { color: var(--green); }
+  .bt-table tr.loss td { color: var(--red); }
+  .bt-table tr.eod td { color: #c4841c; }
+  .bt-log-wrap { max-height: 400px; overflow-y: auto; }
+  .bt-progress { padding: 20px; text-align: center; color: var(--text-dim); font-size: 11px; }
+  .bt-progress pre { text-align: left; margin-top: 10px; font-size: 10px; color: var(--text-dimmer); max-height: 200px; overflow-y: auto; }
+  .mc-stats {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 2px;
+    padding: 8px; font-size: 10px;
+  }
+  .mc-chart-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #mc-chart { flex: 1; min-height: 0; }
+  .mc-no-cell {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dimmer); font-size: 12px;
+  }
+
+  /* Statusbar */
+  .statusbar {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg1); border-top: 1px solid var(--border);
+    padding: 0 14px; font-size: 10px; color: var(--text-dim);
+  }
+  .status-item { display: flex; gap: 4px; }
+  .status-item b { color: var(--text-dimmer); }
+  .statusbar .spacer { flex: 1; }
+
+  /* Notebook */
+  /* Period checkboxes */
+  #period-checks input[type=checkbox] { width: 12px; height: 12px; accent-color: var(--amber); cursor: pointer; margin: 0; }
+  #period-checks label { display: flex; align-items: center; justify-content: center; }
+
+  .nb-nav:hover { color: var(--text); background: rgba(255,255,255,0.02); }
+  .nb-nav.active { color: var(--amber); border-left-color: var(--amber) !important; background: rgba(245,166,35,0.05); }
+
+  [id^="nb-page-"] h1 { font-size: 16px; color: var(--amber); font-weight: 600; margin: 0 0 16px 0; letter-spacing: .05em; }
+  [id^="nb-page-"] h2 { font-size: 13px; color: var(--amber-dim); font-weight: 600; margin: 20px 0 8px 0; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  [id^="nb-page-"] h3 { font-size: 12px; color: var(--text); font-weight: 600; margin: 14px 0 6px 0; }
+  [id^="nb-page-"] p { margin: 6px 0; color: var(--text-dim); }
+  [id^="nb-page-"] strong { color: var(--text); }
+  [id^="nb-page-"] table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+  [id^="nb-page-"] th { text-align: left; font-size: 10px; color: var(--text-dimmer); letter-spacing: .06em; text-transform: uppercase; padding: 4px 8px; border-bottom: 1px solid var(--border-bright); }
+  [id^="nb-page-"] td { font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  [id^="nb-page-"] .pos { color: var(--green); }
+  [id^="nb-page-"] .neg { color: var(--red); }
+  [id^="nb-page-"] .highlight { background: rgba(245,166,35,0.08); border-left: 3px solid var(--amber); padding: 8px 12px; margin: 10px 0; }
+  [id^="nb-page-"] code { background: var(--bg2); padding: 1px 5px; border-radius: 2px; font-size: 11px; }
+  [id^="nb-page-"] .tag { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 2px; margin-right: 4px; }
+  [id^="nb-page-"] .tag-green { background: rgba(76,175,125,0.15); color: var(--green); border: 1px solid rgba(76,175,125,0.3); }
+  [id^="nb-page-"] .tag-red { background: rgba(224,82,82,0.15); color: var(--red); border: 1px solid rgba(224,82,82,0.3); }
+  [id^="nb-page-"] .tag-amber { background: rgba(245,166,35,0.15); color: var(--amber); border: 1px solid rgba(245,166,35,0.3); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="logo">RR EXPLORER <span>| expectancy</span> <span id="total-fvgs" style="margin-left:12px;color:var(--text-dim);font-weight:300;font-size:11px"></span></div>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-tag active" data-view="heatmap" onclick="switchView('heatmap')">HEATMAP</div>
+    <div class="topbar-tag" data-view="trades" onclick="switchView('trades')">TRADES</div>
+    <div class="topbar-tag" data-view="mc" onclick="switchView('mc')">MONTE CARLO</div>
+    <div class="topbar-tag" data-view="strategy" onclick="switchView('strategy')">STRATEGY</div>
+    <div class="topbar-tag" data-view="backtest" onclick="switchView('backtest')">BACKTEST</div>
+    <div class="topbar-tag" data-view="notebook" onclick="switchView('notebook')">NOTEBOOK</div>
+    <a href="/heatmap" class="topbar-tag" style="text-decoration:none;margin-left:8px">HEATMAP WS</a>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="ctrl-group">
+      <span class="ctrl-label">Dataset</span>
+      <select id="ds-select"><option value="">Loading...</option></select>
+    </div>
+    <div class="ctrl-group">
+      <span class="ctrl-label">Setup</span>
+      <div class="setup-tabs" id="setup-tabs">
+        <div class="setup-tab active" data-setup="mit_extreme">MIT+EXTREME</div>
+        <div class="setup-tab" data-setup="mid_extreme">MID+EXTREME</div>
+      </div>
+    </div>
+    <div class="ctrl-group">
+      <span class="ctrl-label">Metric</span>
+      <div class="metric-tabs" id="metric-tabs">
+        <div class="metric-tab active" data-metric="ev">EV</div>
+        <div class="metric-tab" data-metric="win_rate">WIN%</div>
+      </div>
+    </div>
+    <div class="ctrl-group" style="flex:1">
+      <span class="ctrl-label">RR Target (n)</span>
+      <div class="slider-wrap">
+        <span class="slider-bounds">1.0</span>
+        <input type="range" id="n-slider" min="0" max="8" step="1" value="2">
+        <span class="slider-bounds">3.0</span>
+        <span class="slider-value" id="n-display">1.50</span>
+      </div>
+      <span class="breakeven" id="breakeven">BE: <b>40.0%</b></span>
+      <div class="metric-tab" id="best-btn" onclick="toggleBest()" style="margin-left:8px;padding:5px 10px;cursor:pointer">BEST</div>
+    </div>
+    <div class="ctrl-group">
+      <span class="ctrl-label">Min Samples</span>
+      <div class="slider-wrap" style="min-width:120px">
+        <span class="slider-bounds">0</span>
+        <input type="range" id="samples-slider" min="0" max="500" step="10" value="0">
+        <span class="slider-bounds">500</span>
+        <span class="slider-value" id="samples-display">0</span>
+      </div>
+    </div>
+    <div class="ctrl-group">
+      <div class="metric-tab" id="select-btn" onclick="toggleSelectMode()">SELECT</div>
+      <span id="select-count" style="font-size:10px;color:var(--text-dim);white-space:nowrap">0 / 3</span>
+    </div>
+  </div>
+
+  <!-- Views -->
+  <div class="chart-area">
+    <div class="views-container">
+    <!-- Heatmap view -->
+    <div class="view active" id="view-heatmap">
+      <div id="period-checks" style="width:28px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden"></div>
+      <div id="heatmap" style="flex:1;min-width:0"></div>
+    </div>
+    <!-- Trades view -->
+    <div class="view" id="view-trades">
+      <div style="display:flex;width:100%;height:100%">
+        <div class="mc-sidebar" style="width:200px">
+          <div class="sec-label">FVG INFO</div>
+          <div class="mc-param"><span class="k">Date</span><span class="v" id="tv-date">-</span></div>
+          <div class="mc-param"><span class="k">Time</span><span class="v" id="tv-time">-</span></div>
+          <div class="mc-param"><span class="k">Type</span><span class="v" id="tv-type">-</span></div>
+          <div class="mc-param"><span class="k">Zone</span><span class="v" id="tv-zone">-</span></div>
+          <div class="sec-label" style="margin-top:6px">TRADE</div>
+          <div class="mc-param"><span class="k">Cell</span><span class="v" id="tv-cell">-</span></div>
+          <div class="mc-param"><span class="k">Entry</span><span class="v" id="tv-entry">-</span></div>
+          <div class="mc-param"><span class="k">Stop</span><span class="v" id="tv-stop">-</span></div>
+          <div class="mc-param"><span class="k">Target</span><span class="v" id="tv-target">-</span></div>
+          <div class="mc-param"><span class="k">Risk</span><span class="v" id="tv-risk">-</span></div>
+          <div class="mc-param"><span class="k">Max Exp</span><span class="v" id="tv-maxexp">-</span></div>
+          <div class="mc-param"><span class="k">Outcome</span><span class="v" id="tv-outcome">-</span></div>
+          <div class="sec-label" style="margin-top:8px">TIMEFRAME</div>
+          <div class="metric-tabs" id="tv-tf-tabs" style="margin-bottom:8px">
+            <div class="metric-tab" data-tf="1min" onclick="setTvTf('1min')">1MIN</div>
+            <div class="metric-tab active" data-tf="5min" onclick="setTvTf('5min')">5MIN</div>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="btn-run" id="tv-prev" style="flex:1" disabled>&lt; PREV</button>
+            <button class="btn-run" id="tv-next" style="flex:1" disabled>NEXT &gt;</button>
+          </div>
+          <div style="text-align:center;font-size:10px;color:var(--text-dim);margin-top:4px" id="tv-counter">-</div>
+        </div>
+        <div class="mc-chart-area">
+          <div id="tv-chart" style="flex:1;min-height:0"></div>
+          <div class="mc-no-cell" id="tv-placeholder">Click a cell on the HEATMAP tab to view sample trades</div>
+        </div>
+      </div>
+    </div>
+    <!-- Monte Carlo view -->
+    <div class="view" id="view-mc">
+      <div class="mc-view" style="display:flex;width:100%;height:100%">
+        <div class="mc-sidebar">
+          <div class="sec-label">SIMULATION PARAMS</div>
+          <div class="mc-field">
+            <label>STARTING BALANCE ($)</label>
+            <input type="number" id="mc-balance" value="50000" min="1000" step="1000">
+          </div>
+          <div class="mc-field">
+            <label>RISK PER TRADE (%)</label>
+            <input type="number" id="mc-risk-pct" value="1" min="0.1" max="10" step="0.1">
+          </div>
+          <div class="mc-field">
+            <label>NUMBER OF TRADES</label>
+            <input type="number" id="mc-trades" value="200" min="10" max="2000" step="10">
+          </div>
+          <div class="mc-field">
+            <label>SIMULATIONS</label>
+            <input type="number" id="mc-paths" value="1000" min="100" max="5000" step="100">
+          </div>
+
+          <div class="sec-label" style="margin-top:8px">STRATEGY CELLS</div>
+          <div id="strat-cells-list" style="min-height:20px">
+            <div style="font-size:9px;color:var(--text-dimmer);padding:4px 0">Enable SELECT, click heatmap cells</div>
+          </div>
+          <div class="mc-param" style="margin-top:4px;padding-top:4px;border-top:1px solid var(--border)">
+            <span class="k">Combined EV</span><span class="v" id="mc-combined-ev">-</span>
+          </div>
+
+          <button class="btn-run" id="mc-run" disabled>RUN SIMULATION</button>
+
+          <div class="sec-label" style="margin-top:8px">RESULTS</div>
+          <div class="mc-stats" id="mc-results">
+            <div class="mc-param"><span class="k">Median Final</span><span class="v" id="mc-r-median">-</span></div>
+            <div class="mc-param"><span class="k">P5 Final</span><span class="v" id="mc-r-p5">-</span></div>
+            <div class="mc-param"><span class="k">P95 Final</span><span class="v" id="mc-r-p95">-</span></div>
+            <div class="mc-param"><span class="k">Median Max DD</span><span class="v" id="mc-r-dd">-</span></div>
+            <div class="mc-param"><span class="k">P95 Max DD</span><span class="v" id="mc-r-dd95">-</span></div>
+            <div class="mc-param"><span class="k">Ruin (50% DD)</span><span class="v" id="mc-r-ruin">-</span></div>
+          </div>
+        </div>
+        <div class="mc-chart-area">
+          <div id="mc-chart"></div>
+          <div class="mc-no-cell" id="mc-placeholder">Enable SELECT on heatmap, choose up to 3 cells, then run simulation</div>
+        </div>
+      </div>
+    </div>
+    </div><!-- /views-container -->
+    <!-- Strategy sidebar (shown alongside the main heatmap when strategy view is active) -->
+    <div id="sb-sidebar-panel" class="sb-sidebar" style="border-left:1px solid var(--border)">
+      <div class="sec-label">STRATEGY</div>
+      <div class="sb-meta">
+        <label style="font-size:9px;color:var(--text-dim)">NAME</label>
+        <input type="text" id="sb-name" placeholder="My Strategy" value="">
+        <label style="font-size:9px;color:var(--text-dim);margin-top:4px">DESCRIPTION</label>
+        <textarea id="sb-desc" placeholder="Optional notes..."></textarea>
+      </div>
+
+      <div class="sec-label" style="margin-top:8px">CELLS <span id="sb-cell-count" style="color:var(--text-dim);font-weight:300"></span></div>
+      <div class="sb-cell-list" id="sb-cell-list">
+        <div style="font-size:9px;color:var(--text-dimmer);padding:8px 0">Enable SELECT, click heatmap cells to add</div>
+      </div>
+
+      <div class="sb-stats" id="sb-stats">
+        <div class="sb-stat"><span class="k">Enabled cells</span><span class="v" id="sb-enabled">0</span></div>
+        <div class="sb-stat"><span class="k">Weighted EV</span><span class="v" id="sb-wev">-</span></div>
+        <div class="sb-stat"><span class="k">Est. trades/day</span><span class="v" id="sb-tpd">-</span></div>
+        <div class="sb-stat"><span class="k">Time coverage</span><span class="v" id="sb-coverage">-</span></div>
+      </div>
+
+      <div class="sb-actions">
+        <button class="sb-btn primary" onclick="sbSave()">SAVE</button>
+        <div class="sb-load-dropdown">
+          <button class="sb-btn" onclick="sbToggleLoadList()" style="width:100%">LOAD ▾</button>
+          <div class="sb-load-list" id="sb-load-list"></div>
+        </div>
+        <button class="sb-btn" onclick="sbDuplicate()">DUPLICATE</button>
+        <button class="sb-btn" onclick="sbExport()">EXPORT JSON</button>
+        <button class="sb-btn" id="sb-active-btn" onclick="sbSetActive()">SET AS ACTIVE</button>
+        <button class="sb-btn" onclick="sbClear()" style="color:var(--red);border-color:var(--red)">CLEAR</button>
+      </div>
+      <div id="sb-status" style="font-size:9px;color:var(--green);padding:4px 0;min-height:16px"></div>
+    </div>
+    <!-- Backtest view -->
+    <div class="view" id="view-backtest">
+      <div class="bt-view">
+        <div class="bt-controls">
+          <span class="ctrl-label">Strategy</span>
+          <select id="bt-strategy"></select>
+          <span class="ctrl-label">Start</span>
+          <input type="date" id="bt-start" value="2026-01-02">
+          <span class="ctrl-label">End</span>
+          <input type="date" id="bt-end">
+          <span class="ctrl-label">Balance</span>
+          <input type="number" id="bt-balance" value="76000" step="1000">
+          <span class="ctrl-label">Risk%</span>
+          <input type="number" id="bt-risk" value="1" min="0.1" max="5" step="0.1">
+          <button class="bt-run" id="bt-run-btn" onclick="btRun()">RUN BACKTEST</button>
+          <span class="ctrl-label" style="margin-left:auto">History</span>
+          <select id="bt-history" onchange="btLoadHistory(this.value)"><option value="">—</option></select>
+        </div>
+        <div class="bt-stats" id="bt-stats" style="display:none"></div>
+        <div class="bt-progress" id="bt-progress" style="display:none">
+          <div>Running backtest...</div>
+          <pre id="bt-progress-log"></pre>
+        </div>
+        <div id="bt-content" style="display:none">
+          <div class="bt-charts">
+            <div id="bt-equity-chart"></div>
+            <div id="bt-dd-chart"></div>
+            <div id="bt-daily-chart"></div>
+            <div id="bt-dist-chart"></div>
+          </div>
+          <div class="bt-tables">
+            <div class="bt-tab-bar">
+              <div class="bt-tab active" onclick="btSwitchTab('cells')">CELL PERFORMANCE</div>
+              <div class="bt-tab" onclick="btSwitchTab('trades')">TRADE LOG</div>
+              <div class="bt-tab" onclick="btSwitchTab('hourly')">HOURLY</div>
+            </div>
+            <div id="bt-table-cells"></div>
+            <div id="bt-table-trades" style="display:none"></div>
+            <div id="bt-table-hourly" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Notebook view -->
+    <div class="view" id="view-notebook">
+      <div style="display:flex;width:100%;height:100%;overflow:hidden">
+        <div style="width:160px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--border);padding:12px 0;overflow-y:auto">
+          <div style="padding:0 12px 8px;font-size:9px;color:var(--text-dimmer);letter-spacing:.1em;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);margin-bottom:4px">PAGES</div>
+          <div class="nb-nav active" data-page="strategy" onclick="switchNbPage('strategy')" style="padding:6px 12px;font-size:10px;cursor:pointer;color:var(--text-dim);border-left:2px solid transparent">STRATEGY</div>
+          <div class="nb-nav" data-page="mit" onclick="switchNbPage('mit')" style="padding:6px 12px;font-size:10px;cursor:pointer;color:var(--text-dim);border-left:2px solid transparent">MIT+EXTREME</div>
+          <div class="nb-nav" data-page="review2025" onclick="switchNbPage('review2025')" style="padding:6px 12px;font-size:10px;cursor:pointer;color:var(--text-dim);border-left:2px solid transparent">2025 REVIEW</div>
+        </div>
+        <div style="flex:1;overflow-y:auto;padding:24px 40px;font-size:12px;line-height:1.7;color:var(--text)">
+          <div id="nb-page-strategy" style="max-width:900px;margin:0 auto"></div>
+          <div id="nb-page-mit" style="max-width:900px;margin:0 auto;display:none"></div>
+          <div id="nb-page-review2025" style="max-width:900px;margin:0 auto;display:none"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Statusbar -->
+  <div class="statusbar">
+    <div class="status-item"><b>CELLS:</b> <span id="st-cells">-</span></div>
+    <div class="status-item"><b>SETUP:</b> <span id="st-setup">-</span></div>
+    <div class="status-item"><b>n:</b> <span id="st-n">-</span></div>
+    <div class="status-item" style="margin-left:12px"><b>W.AVG EV:</b> <span id="st-total-ev" style="font-weight:600">-</span></div>
+    <div class="status-item"><b>+EV CELLS:</b> <span id="st-pos-cells">-</span></div>
+    <div class="spacer"></div>
+    <div class="status-item" id="st-status">READY</div>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+const API = 'http://localhost:8765';
+const N_VALUES = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
+const SETUP_LABELS = {
+  mit_open: 'Mitigation + Open Stop',
+  mit_extreme: 'Mitigation + Extreme Stop',
+  mid_open: 'Midpoint + Open Stop',
+  mid_extreme: 'Midpoint + Extreme Stop',
+};
+
+let _data = null;
+let _setup = 'mit_extreme';
+let _metric = 'ev';
+let _nIdx = 2;
+let _bestMode = false;
+let _checkedPeriods = new Set(); // all checked by default, populated on render
+let _mcWinRate = null;
+let _mcN = null;
+let _mcCellLabel = null;
+let _stratCells = [];
+let _selectMode = false;
+const MAX_STRAT_CELLS = 50;  // Increased from 3 for strategy builder
+let _minSamples = 0;
+
+// ── View switching ────────────────────────────────────────────────────────
+function switchView(view) {
+  const sidebar = document.getElementById('sb-sidebar-panel');
+
+  if (view === 'strategy') {
+    // Toggle: if sidebar is already open, close it
+    if (sidebar.classList.contains('open')) {
+      sidebar.classList.remove('open');
+      document.querySelectorAll('.topbar-tag[data-view]').forEach(t => {
+        t.classList.toggle('active', t.dataset.view === 'heatmap');
+      });
+      requestAnimationFrame(() => { Plotly.Plots.resize(document.getElementById('heatmap')); });
+      return;
+    }
+    // Show strategy = heatmap view + sidebar
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.getElementById('view-heatmap').classList.add('active');
+    if (!_selectMode) toggleSelectMode();
+    // Prepare all sidebar content BEFORE making it visible
+    sbSyncFromStratCells();
+    sbRenderCellList();
+    // Now show — all content is already in the DOM
+    requestAnimationFrame(() => {
+      sidebar.classList.add('open');
+      renderHeatmap();
+      requestAnimationFrame(() => { Plotly.Plots.resize(document.getElementById('heatmap')); });
+    });
+  } else {
+    // Hide strategy sidebar, show the requested view
+    sidebar.classList.remove('open');
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.getElementById('view-' + view).classList.add('active');
+    if (view === 'heatmap') {
+      renderHeatmap();
+      setTimeout(() => { Plotly.Plots.resize(document.getElementById('heatmap')); }, 50);
+    }
+    if (view === 'mc') {
+      const el = document.getElementById('mc-chart');
+      if (el && el.data) Plotly.Plots.resize(el);
+    }
+  }
+
+  // Update topbar active state
+  document.querySelectorAll('.topbar-tag[data-view]').forEach(t => {
+    t.classList.toggle('active', t.dataset.view === view);
+  });
+}
+
+// ── Strategy Builder ─────────────────────────────────────────────────────
+function toggleSelectMode() {
+  _selectMode = !_selectMode;
+  document.getElementById('select-btn').classList.toggle('active', _selectMode);
+  renderHeatmap();
+}
+
+function updateStratPanel() {
+  const list = document.getElementById('strat-cells-list');
+  document.getElementById('select-count').textContent = `${_stratCells.length} / ${MAX_STRAT_CELLS}`;
+  if (_stratCells.length === 0) {
+    list.innerHTML = '<div style="font-size:9px;color:var(--text-dimmer);padding:4px 0">Enable SELECT, click heatmap cells</div>';
+    document.getElementById('mc-combined-ev').textContent = '-';
+    document.getElementById('mc-combined-ev').className = 'v';
+    document.getElementById('mc-run').disabled = true;
+    return;
+  }
+  list.innerHTML = _stratCells.map((sc, i) => {
+    const setup = sc.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    return `<div class="strat-cell-item">
+      <span class="cell-label">${sc.tp}<br>${sc.rr} | ${sc.rr_n.toFixed(2)}R | ${setup}</span>
+      <span class="cell-ev">${sc.ev >= 0 ? '+' : ''}${sc.ev.toFixed(3)}</span>
+      <span class="cell-remove" onclick="removeStratCell(${i})">&times;</span>
+    </div>`;
+  }).join('');
+  const combinedEv = _stratCells.reduce((s, c) => s + c.ev, 0);
+  const el = document.getElementById('mc-combined-ev');
+  el.textContent = (combinedEv >= 0 ? '+' : '') + combinedEv.toFixed(4) + ' / ' + _stratCells.length + ' trades';
+  el.className = 'v ' + (combinedEv >= 0 ? 'pos' : 'neg');
+  document.getElementById('mc-run').disabled = false;
+}
+
+function removeStratCell(idx) {
+  _stratCells.splice(idx, 1);
+  updateStratPanel();
+  renderHeatmap();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    const res = await fetch(`${API}/api/rr/manifest`);
+    const manifest = await res.json();
+    const sel = document.getElementById('ds-select');
+    sel.innerHTML = '';
+    const datasets = manifest.datasets || [];
+    if (datasets.length === 0) {
+      sel.innerHTML = '<option value="">No RR datasets</option>';
+      return;
+    }
+    datasets.sort((a, b) => {
+      const ya = parseInt((a.data_period || '').match(/\d+/) || 0);
+      const yb = parseInt((b.data_period || '').match(/\d+/) || 0);
+      return yb - ya;
+    });
+    datasets.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = `${d.ticker} ${d.timeframe_label} ${d.data_period} ${d.session_period_minutes}m`;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener('change', () => loadDataset(sel.value));
+    const default5y = datasets.find(d => d.data_period === '5y') || datasets[0];
+    sel.value = default5y.id;
+    loadDataset(default5y.id);
+  } catch (e) {
+    document.getElementById('st-status').textContent = 'API ERROR';
+  }
+}
+
+async function loadDataset(id) {
+  if (!id) return;
+  document.getElementById('st-status').textContent = 'LOADING...';
+  try {
+    const res = await fetch(`${API}/api/rr/${id}`);
+    _data = await res.json();
+    let total = 0;
+    (_data.cells || []).forEach(c => {
+      if (c.setups.mit_extreme) total += c.setups.mit_extreme.valid || 0;
+    });
+    document.getElementById('total-fvgs').textContent = `| ${total.toLocaleString()} FVGs`;
+    renderHeatmap();
+    document.getElementById('st-status').textContent = 'READY';
+  } catch (e) {
+    document.getElementById('st-status').textContent = 'LOAD ERROR';
+  }
+}
+
+// ── Setup tabs ────────────────────────────────────────────────────────────
+document.querySelectorAll('.setup-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.setup-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    _setup = tab.dataset.setup;
+    renderHeatmap();
+  });
+});
+
+// ── Min samples slider ───────────────────────────────────────────────────
+const samplesSlider = document.getElementById('samples-slider');
+samplesSlider.addEventListener('input', () => {
+  _minSamples = parseInt(samplesSlider.value);
+  document.getElementById('samples-display').textContent = _minSamples;
+  renderHeatmap();
+});
+
+// ── Metric tabs ───────────────────────────────────────────────────────────
+document.querySelectorAll('#metric-tabs .metric-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('#metric-tabs .metric-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    _metric = tab.dataset.metric;
+    renderHeatmap();
+  });
+});
+
+// ── Slider ────────────────────────────────────────────────────────────────
+const slider = document.getElementById('n-slider');
+slider.addEventListener('input', () => {
+  _nIdx = parseInt(slider.value);
+  _bestMode = false;
+  document.getElementById('best-btn').classList.remove('active');
+  updateSliderDisplay();
+  renderHeatmap();
+});
+
+function updateFilteredEv() {
+  if (!_data || !_data.cells) return;
+  const nI = _nIdx;
+  let evWsum = 0, evWn = 0, posCells = 0, totalCells = 0;
+  _data.cells.forEach(c => {
+    if (!_checkedPeriods.has(c.time_period)) return;
+    const s = c.setups[_setup];
+    if (!s || !s.valid || (_minSamples > 0 && s.valid < _minSamples)) return;
+    let useNi = nI, cellBestEv = -Infinity;
+    if (_bestMode) {
+      s.evs.forEach((e, i) => { if (e != null && e > cellBestEv) { cellBestEv = e; useNi = i; } });
+      if (cellBestEv <= 0) return;
+    }
+    const ev = s.evs[useNi];
+    if (ev != null) { evWsum += ev * s.valid; evWn += s.valid; totalCells++; if (ev > 0) posCells++; }
+  });
+  const wAvgEv = evWn > 0 ? evWsum / evWn : 0;
+  const stEvEl = document.getElementById('st-total-ev');
+  stEvEl.textContent = (wAvgEv >= 0 ? '+' : '') + wAvgEv.toFixed(4);
+  stEvEl.style.color = wAvgEv >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('st-cells').textContent = totalCells;
+  document.getElementById('st-pos-cells').textContent = `${posCells}/${totalCells}`;
+}
+
+function toggleBest() {
+  _bestMode = !_bestMode;
+  document.getElementById('best-btn').classList.toggle('active', _bestMode);
+  const sliderEl = document.getElementById('n-slider');
+  const metricTabs = document.querySelectorAll('.metric-tab[data-metric]');
+  if (_bestMode) {
+    sliderEl.value = 0;
+    sliderEl.disabled = true;
+    _nIdx = 0;
+    metricTabs.forEach(t => { t.style.pointerEvents = 'none'; t.style.opacity = '0.3'; });
+    _metric = 'ev';
+    document.querySelectorAll('.metric-tab').forEach(t => t.classList.toggle('active', t.dataset.metric === 'ev'));
+  } else {
+    sliderEl.disabled = false;
+    metricTabs.forEach(t => { t.style.pointerEvents = ''; t.style.opacity = ''; });
+  }
+  updateSliderDisplay();
+  renderHeatmap();
+}
+
+function updateSliderDisplay() {
+  const n = N_VALUES[_nIdx];
+  document.getElementById('n-display').textContent = n.toFixed(2);
+  const be = (1 / (n + 1) * 100).toFixed(1);
+  document.getElementById('breakeven').innerHTML = `BE: <b>${be}%</b>`;
+}
+updateSliderDisplay();
+
+// ── Sorting helpers ───────────────────────────────────────────────────────
+function timeSortKey(tp) {
+  try { const [h,m] = tp.split('-')[0].split(':').map(Number); return h*60+m; }
+  catch { return 9999; }
+}
+function sizeSortKey(sr) {
+  try { return parseFloat(sr.split('-')[0]); } catch { return 9999; }
+}
+
+// ── Heatmap render ────────────────────────────────────────────────────────
+function renderHeatmap() {
+  if (!_data || !_data.cells) return;
+  const cells = _data.cells;
+  const n = N_VALUES[_nIdx];
+  const nI = _nIdx;
+
+  const ySet = new Set(), xSet = new Set();
+  cells.forEach(c => { ySet.add(c.time_period); xSet.add(c.risk_range); });
+  const yLabels = [...ySet].sort((a,b) => timeSortKey(a) - timeSortKey(b));
+  const xLabels = [...xSet].sort((a,b) => sizeSortKey(a) - sizeSortKey(b));
+
+  const lookup = {};
+  cells.forEach(c => { lookup[`${c.time_period}||${c.risk_range}`] = c; });
+
+  // Weighted avg EV per time period (skip negative-EV cells in best mode)
+  const periodEvs = {};
+  yLabels.forEach(y => {
+    let wsum = 0, wn = 0;
+    xLabels.forEach(x => {
+      const c = lookup[`${y}||${x}`];
+      if (!c || !c.setups[_setup]) return;
+      const s = c.setups[_setup];
+      if (!s.valid || (_minSamples > 0 && s.valid < _minSamples)) return;
+      let useNi = nI, cellBestEv = -Infinity;
+      if (_bestMode) {
+        s.evs.forEach((e, i) => { if (e != null && e > cellBestEv) { cellBestEv = e; useNi = i; } });
+        if (cellBestEv <= 0) return; // skip negative EV cells
+      }
+      const ev = s.evs[useNi];
+      if (ev != null) { wsum += ev * s.valid; wn += s.valid; }
+    });
+    periodEvs[y] = wn > 0 ? wsum / wn : null;
+  });
+
+  // Y-axis: keep plain labels, add EV as separate annotations
+  const yDisplay = yLabels;
+
+  const z = [], hover = [], annotations = [];
+  const fN = (v, dp=1) => v != null ? Number(v).toFixed(dp) : 'N/A';
+
+  yLabels.forEach((y, yi) => {
+    const zRow = [], hRow = [];
+    xLabels.forEach((x, xi) => {
+      const c = lookup[`${y}||${x}`];
+      if (!c || !c.setups[_setup]) { zRow.push(null); hRow.push('No data'); return; }
+      const s = c.setups[_setup];
+      if (_minSamples > 0 && s.valid < _minSamples) { zRow.push(null); hRow.push('No data'); return; }
+
+      // In best mode: find the n with highest EV for this cell
+      let bestNi = nI, bestEv = -Infinity;
+      if (_bestMode) {
+        s.evs.forEach((ev, ni) => { if (ev != null && ev > bestEv) { bestEv = ev; bestNi = ni; } });
+        // Skip cells where even the best EV is negative
+        if (bestEv <= 0) { zRow.push(null); hRow.push('No data'); return; }
+      }
+      const useNi = _bestMode ? bestNi : nI;
+      const val = _bestMode ? s.evs[useNi] : (_metric === 'ev' ? s.evs[useNi] : s.win_rates[useNi]);
+      zRow.push(val);
+
+      const lines = [
+        `<b>${y}  |  ${x}</b>`,
+        `<b>${SETUP_LABELS[_setup]}</b>`,
+        `──────────────────────`,
+        `Samples:        ${s.valid}`,
+        `Median Risk:    ${fN(s.median_risk)} pts`,
+        `──────────────────────`,
+      ];
+      N_VALUES.forEach((nv, ni) => {
+        const marker = ni === useNi ? ' <<' : '';
+        const wr = fN(s.win_rates[ni]);
+        const ev = s.evs[ni] != null ? (s.evs[ni] >= 0 ? '+' : '') + Number(s.evs[ni]).toFixed(3) : 'N/A';
+        lines.push(`n=${nv.toFixed(2)}: ${wr}% win  EV=${ev}${marker}`);
+      });
+      hRow.push(lines.join('<br>'));
+
+      if (val != null) {
+        const txt = _bestMode
+          ? `${N_VALUES[bestNi].toFixed(2)}R ${fN(s.win_rates[bestNi])}%`
+          : (_metric === 'ev'
+            ? (val >= 0 ? '+' : '') + val.toFixed(3)
+            : val.toFixed(1) + '%');
+        annotations.push({
+          x: x, y: yDisplay[yi], text: txt, showarrow: false, xref: 'x', yref: 'y',
+          font: { family: 'IBM Plex Mono', size: 9,
+            color: _metric === 'ev' ? (val >= 0 ? '#c8ffc8' : '#ffc8c8') : '#e8e8e8' },
+        });
+      }
+    });
+    z.push(zRow);
+    hover.push(hRow);
+  });
+
+  const useEv = _bestMode || _metric === 'ev';
+  const colorscale = useEv
+    ? [[0,'#8b0000'],[0.5,'#1a1a1a'],[1,'#006400']]
+    : [[0,'#1a0a0a'],[0.4,'#3a2a10'],[0.7,'#2a4a2a'],[1,'#006400']];
+
+  const trace = {
+    type: 'heatmap', z, x: xLabels, y: yDisplay,
+    colorscale, showscale: true, zsmooth: false,
+    zmid: useEv ? 0 : undefined,
+    customdata: hover,
+    hovertemplate: '%{customdata}<extra></extra>',
+    hoverlabel: { bgcolor: '#1a1a1a', bordercolor: '#f5a623',
+      font: { family: 'IBM Plex Mono', color: '#e8e8e8', size: 11 } },
+    colorbar: { thickness: 14,
+      tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+      outlinecolor: '#2a2a2a', outlinewidth: 1,
+      title: { text: useEv ? 'EV' : 'Win %', font: { size: 10, color: '#888' } } },
+  };
+
+  const title = `${SETUP_LABELS[_setup]} | n = ${n.toFixed(2)} | ${_metric === 'ev' ? 'Expectancy' : 'Win Rate'}  [click cell for MC]`;
+
+  // Selection overlay shapes for strategy builder (full cell outlines)
+  const selShapes = _stratCells.filter(sc => sc.setup === _setup).map(sc => {
+    const xi = xLabels.indexOf(sc.rr);
+    const yi = yLabels.indexOf(sc.tp);
+    if (xi < 0 || yi < 0) return null;
+    return {
+      type: 'rect', xref: 'x', yref: 'y',
+      x0: xi - 0.5, x1: xi + 0.5, y0: yi - 0.5, y1: yi + 0.5,
+      line: { color: '#f5a623', width: 3 },
+      fillcolor: 'rgba(245,166,35,0.08)',
+    };
+  }).filter(Boolean);
+
+  Plotly.react('heatmap', [trace], {
+    paper_bgcolor: '#111111', plot_bgcolor: '#0a0a0a',
+    font: { family: 'IBM Plex Mono', color: '#e8e8e8' },
+    margin: { t: 40, b: 50, l: 110, r: 60 },
+    shapes: selShapes,
+    annotations: [{ text: `<b>${title}</b>`, xref: 'paper', yref: 'paper',
+      x: 0.5, y: 1.02, xanchor: 'center', yanchor: 'bottom', showarrow: false,
+      font: { family: 'IBM Plex Mono', size: 11, color: '#f5a623' } },
+      // Per-period EV labels on Y axis
+      ...yLabels.map(y => {
+        const ev = periodEvs[y];
+        if (ev == null) return null;
+        const sign = ev >= 0 ? '+' : '';
+        return {
+          text: `${sign}${ev.toFixed(3)}`, xref: 'paper', yref: 'y',
+          x: -0.005, y: y, xanchor: 'right', yanchor: 'top',
+          showarrow: false,
+          font: { family: 'IBM Plex Mono', size: 8, color: ev >= 0 ? '#4caf7d' : '#e05252' },
+        };
+      }).filter(Boolean),
+      ...annotations],
+    xaxis: { tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+      showgrid: false, zeroline: false, linecolor: '#2a2a2a', linewidth: 1, showline: true,
+      title: { text: 'Risk (pts)', font: { size: 10, color: '#555' } } },
+    yaxis: { tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+      showgrid: false, zeroline: false, linecolor: '#2a2a2a', linewidth: 1, showline: true,
+      autorange: 'reversed',
+      title: { text: 'Time Period', font: { size: 10, color: '#555' } } },
+  }, { responsive: true, displaylogo: false, displayModeBar: true,
+       modeBarButtonsToRemove: ['select2d','lasso2d','autoScale2d','toggleSpikelines'] });
+
+  // Click handler: select cells for strategy or view trades
+  const hmEl = document.getElementById('heatmap');
+  hmEl.removeAllListeners && hmEl.removeAllListeners('plotly_click');
+  hmEl.on('plotly_click', function(d) {
+    const pt = d.points[0];
+    const tp = pt.y.split('  ')[0].trim(), rr = pt.x;
+    const c = lookup[`${tp}||${rr}`];
+    if (!c) return;
+    const s = c.setups[_setup];
+    if (!s || !s.valid) return;
+    if (_selectMode) {
+      const wr = s.win_rates[_nIdx];
+      const ev = s.evs[_nIdx];
+      if (wr == null || ev == null) return;
+      const existIdx = _stratCells.findIndex(sc => sc.tp === tp && sc.rr === rr && sc.setup === _setup);
+      if (existIdx >= 0) {
+        _stratCells.splice(existIdx, 1);
+      } else if (_stratCells.length < MAX_STRAT_CELLS) {
+        _stratCells.push({ tp, rr, wr, ev, rr_n: N_VALUES[_nIdx], nIdx: _nIdx, samples: s.valid, setup: _setup });
+      }
+      updateStratPanel();
+      // Sync to strategy builder sidebar if it's open
+      if (document.getElementById('sb-sidebar-panel').classList.contains('open')) {
+        sbSyncFromStratCells();
+        sbRenderCellList();
+      }
+      renderHeatmap();
+      return;
+    }
+    _tvTimePeriod = tp;
+    _tvRiskRange = rr;
+    _tvSampleIdx = 0;
+    loadTradeSample();
+    switchView('trades');
+  });
+
+  // Build period checkboxes aligned to heatmap rows
+  const checkDiv = document.getElementById('period-checks');
+  // Only rebuild if periods changed
+  const periodsKey = yLabels.join(',');
+  if (checkDiv.dataset.key !== periodsKey) {
+    checkDiv.dataset.key = periodsKey;
+    if (_checkedPeriods.size === 0) yLabels.forEach(y => _checkedPeriods.add(y));
+    checkDiv.innerHTML = '<div style="height:40px;flex-shrink:0"></div>'; // top margin to align with chart
+    yLabels.forEach(y => {
+      const checked = _checkedPeriods.has(y);
+      const el = document.createElement('div');
+      el.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;min-height:0';
+      el.innerHTML = `<input type="checkbox" data-period="${y}" ${checked ? 'checked' : ''}>`;
+      el.querySelector('input').addEventListener('change', function() {
+        if (this.checked) _checkedPeriods.add(y); else _checkedPeriods.delete(y);
+        updateFilteredEv();
+      });
+      checkDiv.appendChild(el);
+    });
+    // Bottom margin for x-axis
+    const bot = document.createElement('div');
+    bot.style.cssText = 'height:50px;flex-shrink:0';
+    checkDiv.appendChild(bot);
+  }
+
+  // Weighted avg EV across checked periods only (skip negative-EV cells in best mode)
+  let evWsum = 0, evWn = 0, posCells = 0, totalCells = 0;
+  cells.forEach(c => {
+    if (!_checkedPeriods.has(c.time_period)) return;
+    const s = c.setups[_setup];
+    if (!s || !s.valid || (_minSamples > 0 && s.valid < _minSamples)) return;
+    let useNi = nI, cellBestEv = -Infinity;
+    if (_bestMode) {
+      s.evs.forEach((e, i) => { if (e != null && e > cellBestEv) { cellBestEv = e; useNi = i; } });
+      if (cellBestEv <= 0) return;
+    }
+    const ev = s.evs[useNi];
+    if (ev != null) { evWsum += ev * s.valid; evWn += s.valid; totalCells++; if (ev > 0) posCells++; }
+  });
+  const wAvgEv = evWn > 0 ? evWsum / evWn : 0;
+  const stEvEl = document.getElementById('st-total-ev');
+  stEvEl.textContent = (wAvgEv >= 0 ? '+' : '') + wAvgEv.toFixed(4);
+  stEvEl.style.color = wAvgEv >= 0 ? 'var(--green)' : 'var(--red)';
+
+  document.getElementById('st-cells').textContent = totalCells;
+  document.getElementById('st-setup').textContent = _setup;
+  document.getElementById('st-n').textContent = n.toFixed(2);
+  document.getElementById('st-pos-cells').textContent = `${posCells}/${totalCells}`;
+}
+
+// ── Monte Carlo Engine ────────────────────────────────────────────────────
+document.getElementById('mc-run').addEventListener('click', runMonteCarlo);
+
+function runMonteCarlo() {
+  if (_stratCells.length === 0) return;
+
+  const balance0 = parseFloat(document.getElementById('mc-balance').value) || 50000;
+  const riskPct  = (parseFloat(document.getElementById('mc-risk-pct').value) || 1) / 100;
+  const nTrades  = parseInt(document.getElementById('mc-trades').value) || 200;
+  const nPaths   = parseInt(document.getElementById('mc-paths').value) || 1000;
+  const cells    = _stratCells;
+
+  // Run simulations — round-robin through selected cells
+  const allPaths = [];
+  const finalBals = [];
+  const maxDDs = [];
+
+  for (let p = 0; p < nPaths; p++) {
+    const equity = [balance0];
+    let peak = balance0;
+    let maxDD = 0;
+
+    for (let t = 0; t < nTrades; t++) {
+      const cell = cells[t % cells.length];
+      const wr = cell.wr / 100;
+      const rr = cell.rr_n;
+      const bal = equity[equity.length - 1];
+      const riskAmt = bal * riskPct;
+      const win = Math.random() < wr;
+      const pnl = win ? riskAmt * rr : -riskAmt;
+      const newBal = bal + pnl;
+      equity.push(Math.max(newBal, 0));
+
+      if (newBal > peak) peak = newBal;
+      const dd = peak > 0 ? (peak - newBal) / peak : 0;
+      if (dd > maxDD) maxDD = dd;
+
+      if (newBal <= 0) {
+        // Fill rest with 0
+        for (let r = t + 1; r < nTrades; r++) equity.push(0);
+        break;
+      }
+    }
+
+    allPaths.push(equity);
+    finalBals.push(equity[equity.length - 1]);
+    maxDDs.push(maxDD);
+  }
+
+  // Compute percentiles at each trade step
+  const percentiles = [5, 25, 50, 75, 95];
+  const pctData = percentiles.map(() => []);
+  const x = Array.from({length: nTrades + 1}, (_, i) => i);
+
+  for (let t = 0; t <= nTrades; t++) {
+    const vals = allPaths.map(p => p[t]).sort((a, b) => a - b);
+    percentiles.forEach((pct, pi) => {
+      const idx = Math.floor(pct / 100 * vals.length);
+      pctData[pi].push(vals[Math.min(idx, vals.length - 1)]);
+    });
+  }
+
+  // Stats
+  finalBals.sort((a, b) => a - b);
+  maxDDs.sort((a, b) => a - b);
+  const pctile = (arr, p) => arr[Math.floor(p / 100 * arr.length)];
+
+  const medianFinal = pctile(finalBals, 50);
+  const p5Final = pctile(finalBals, 5);
+  const p95Final = pctile(finalBals, 95);
+  const medianDD = pctile(maxDDs, 50);
+  const p95DD = pctile(maxDDs, 95);
+  const ruinCount = maxDDs.filter(d => d >= 0.5).length;
+  const ruinPct = (ruinCount / nPaths * 100);
+
+  const fmt = v => '$' + v.toLocaleString(undefined, {maximumFractionDigits: 0});
+  const roi = v => { const r = (v - balance0) / balance0 * 100; return (r >= 0 ? '+' : '') + r.toFixed(1) + '%'; };
+  document.getElementById('mc-r-median').textContent = fmt(medianFinal) + '  ' + roi(medianFinal);
+  document.getElementById('mc-r-p5').textContent = fmt(p5Final) + '  ' + roi(p5Final);
+  document.getElementById('mc-r-p95').textContent = fmt(p95Final) + '  ' + roi(p95Final);
+  document.getElementById('mc-r-dd').textContent = (medianDD * 100).toFixed(1) + '%';
+  document.getElementById('mc-r-dd95').textContent = (p95DD * 100).toFixed(1) + '%';
+  const ruinEl = document.getElementById('mc-r-ruin');
+  ruinEl.textContent = ruinPct.toFixed(1) + '%';
+  ruinEl.className = 'v ' + (ruinPct > 10 ? 'neg' : ruinPct > 0 ? '' : 'pos');
+
+  // Plot equity fan
+  document.getElementById('mc-placeholder').style.display = 'none';
+  document.getElementById('mc-chart').style.display = 'block';
+
+  const pctColors = ['#e05252', '#c4841c', '#4caf7d', '#c4841c', '#e05252'];
+  const pctNames  = ['P5', 'P25', 'Median', 'P75', 'P95'];
+
+  // Fill between P5-P95 and P25-P75
+  const traces = [];
+
+  // P5 line (lower bound)
+  traces.push({
+    x, y: pctData[0], mode: 'lines', line: { color: 'transparent' },
+    showlegend: false, hoverinfo: 'skip',
+  });
+  // P95 fill
+  traces.push({
+    x, y: pctData[4], fill: 'tonexty', fillcolor: 'rgba(224,82,82,0.08)',
+    mode: 'lines', line: { color: 'transparent' },
+    showlegend: false, hoverinfo: 'skip',
+  });
+  // P25 line
+  traces.push({
+    x, y: pctData[1], mode: 'lines', line: { color: 'transparent' },
+    showlegend: false, hoverinfo: 'skip',
+  });
+  // P75 fill
+  traces.push({
+    x, y: pctData[3], fill: 'tonexty', fillcolor: 'rgba(196,132,28,0.12)',
+    mode: 'lines', line: { color: 'transparent' },
+    showlegend: false, hoverinfo: 'skip',
+  });
+
+  // Percentile lines
+  percentiles.forEach((pct, pi) => {
+    traces.push({
+      x, y: pctData[pi],
+      mode: 'lines',
+      name: pctNames[pi],
+      line: { color: pctColors[pi], width: pi === 2 ? 2.5 : 1, dash: pi === 2 ? 'solid' : 'dot' },
+    });
+  });
+
+  // Starting balance line
+  traces.push({
+    x: [0, nTrades], y: [balance0, balance0],
+    mode: 'lines', name: 'Start',
+    line: { color: '#555', width: 1, dash: 'dash' },
+  });
+
+  const cellLabels = cells.map(c => `${c.tp} ${c.rr} ${c.rr_n.toFixed(1)}R`).join('  +  ');
+  const mcTitle = `Strategy MC: ${cellLabels} | ${cells.length} cell${cells.length > 1 ? 's' : ''} round-robin`;
+
+  Plotly.react('mc-chart', traces, {
+    paper_bgcolor: '#111111', plot_bgcolor: '#0a0a0a',
+    font: { family: 'IBM Plex Mono', color: '#e8e8e8' },
+    margin: { t: 45, b: 45, l: 70, r: 30 },
+    legend: { x: 0.01, y: 0.99, bgcolor: 'rgba(17,17,17,0.8)',
+      font: { size: 9, color: '#888' } },
+    annotations: [{ text: `<b>${mcTitle}</b>`, xref: 'paper', yref: 'paper',
+      x: 0.5, y: 1.02, xanchor: 'center', yanchor: 'bottom', showarrow: false,
+      font: { family: 'IBM Plex Mono', size: 10, color: '#f5a623' } }],
+    xaxis: { title: { text: 'Trade #', font: { size: 10, color: '#555' } },
+      tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+      showgrid: true, gridcolor: '#1a1a1a', zeroline: false,
+      linecolor: '#2a2a2a', linewidth: 1, showline: true },
+    yaxis: { title: { text: 'Balance ($)', font: { size: 10, color: '#555' } },
+      tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+      showgrid: true, gridcolor: '#1a1a1a', zeroline: false,
+      linecolor: '#2a2a2a', linewidth: 1, showline: true,
+      tickprefix: '$' },
+  }, { responsive: true, displaylogo: false });
+}
+
+// ── Trade Viewer ──────────────────────────────────────────────────────────
+let _tvTimePeriod = null, _tvRiskRange = null, _tvSampleIdx = 0, _tvTotal = 0, _tvTf = '5min';
+
+document.getElementById('tv-prev').addEventListener('click', () => {
+  if (_tvSampleIdx > 0) { _tvSampleIdx--; loadTradeSample(); }
+});
+document.getElementById('tv-next').addEventListener('click', () => {
+  if (_tvSampleIdx < _tvTotal - 1) { _tvSampleIdx++; loadTradeSample(); }
+});
+
+function setTvTf(tf) {
+  _tvTf = tf;
+  document.querySelectorAll('#tv-tf-tabs .metric-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tf === tf);
+  });
+  loadTradeSample();
+}
+
+async function loadTradeSample() {
+  if (!_tvTimePeriod || !_tvRiskRange) return;
+  const n = N_VALUES[_nIdx];
+  const params = new URLSearchParams({
+    time_period: _tvTimePeriod,
+    risk_range: _tvRiskRange,
+    setup: _setup,
+    n: n,
+    sample_idx: _tvSampleIdx,
+    tf: _tvTf,
+  });
+  try {
+    const res = await fetch(`${API}/api/rr/trade-sample?${params}`);
+    if (!res.ok) { document.getElementById('tv-placeholder').textContent = 'No trades found for this cell'; return; }
+    const data = await res.json();
+    _tvTotal = data.total_samples;
+    _tvSampleIdx = data.sample_idx;
+    renderTradeChart(data);
+  } catch (e) {
+    document.getElementById('tv-placeholder').textContent = 'Error loading trade data';
+  }
+}
+
+function renderTradeChart(data) {
+  const t = data.trade;
+  const candles = data.candles;
+  if (!candles || candles.length === 0) {
+    document.getElementById('tv-placeholder').textContent = 'No candle data available';
+    return;
+  }
+
+  document.getElementById('tv-placeholder').style.display = 'none';
+  document.getElementById('tv-chart').style.display = 'block';
+
+  // Update sidebar — FVG info for TradingView cross-check (display in NY time)
+  const fvgTs = t.time_candle3;
+  const fvgDateStr = fvgTs.substring(0, 10);  // "2023-07-11"
+  const fvgTimeStr = fvgTs.substring(11, 16); // "13:05"
+  document.getElementById('tv-date').textContent = fvgDateStr;
+  document.getElementById('tv-time').textContent = fvgTimeStr + ' ET';
+  document.getElementById('tv-type').textContent = t.fvg_type.toUpperCase();
+  document.getElementById('tv-zone').textContent = `${t.zone_low.toFixed(2)} - ${t.zone_high.toFixed(2)}`;
+  document.getElementById('tv-cell').textContent = `${_tvTimePeriod} | ${_tvRiskRange}`;
+  document.getElementById('tv-entry').textContent = t.entry.toFixed(2);
+  document.getElementById('tv-stop').textContent = t.stop.toFixed(2);
+  document.getElementById('tv-target').textContent = t.target.toFixed(2);
+  document.getElementById('tv-risk').textContent = t.risk.toFixed(2) + ' pts';
+  document.getElementById('tv-maxexp').textContent = t.max_exp.toFixed(2) + ' pts';
+  const outcomeEl = document.getElementById('tv-outcome');
+  outcomeEl.textContent = t.won ? 'WIN' : 'LOSS';
+  outcomeEl.className = 'v ' + (t.won ? 'pos' : 'neg');
+
+  document.getElementById('tv-prev').disabled = _tvSampleIdx <= 0;
+  document.getElementById('tv-next').disabled = _tvSampleIdx >= _tvTotal - 1;
+  document.getElementById('tv-counter').textContent = `${_tvSampleIdx + 1} / ${_tvTotal}`;
+
+  // Build candlestick chart
+  const dates = candles.map(c => c.date);
+  const opens = candles.map(c => c.open);
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const closes = candles.map(c => c.close);
+
+  const candlestick = {
+    type: 'candlestick', x: dates, open: opens, high: highs, low: lows, close: closes,
+    increasing: { line: { color: '#4caf7d' }, fillcolor: '#4caf7d' },
+    decreasing: { line: { color: '#e05252' }, fillcolor: '#e05252' },
+    showlegend: false,
+  };
+
+  // FVG zone rectangle — starts at candle 1, extends to end of chart
+  const fvgStartIdx = dates.findIndex(d => d >= t.time_candle1);
+  const fvgX0 = fvgStartIdx >= 0 ? fvgStartIdx : 0;
+  const shapes = [{
+    type: 'rect', xref: 'x', x0: fvgX0 - 0.5, x1: dates.length - 0.5,
+    yref: 'y', y0: t.zone_low, y1: t.zone_high,
+    fillcolor: t.fvg_type === 'bullish' ? 'rgba(76,175,125,0.12)' : 'rgba(224,82,82,0.12)',
+    line: { width: 0 },
+  }];
+
+  // Find where entry, SL, TP are hit in the candle data
+  const mitIdx = dates.findIndex(d => d >= t.mitigation_time);
+  const entryX0 = mitIdx >= 0 ? mitIdx : fvgX0;
+
+  // Walk candles from entry to find where SL or TP is hit
+  let slHitIdx = dates.length - 1;
+  let tpHitIdx = dates.length - 1;
+  for (let i = entryX0; i < candles.length; i++) {
+    const c = candles[i];
+    if (t.fvg_type === 'bullish') {
+      if (tpHitIdx === dates.length - 1 && c.high >= t.target) tpHitIdx = i;
+      if (slHitIdx === dates.length - 1 && c.low <= t.stop) slHitIdx = i;
+    } else {
+      if (tpHitIdx === dates.length - 1 && c.low <= t.target) tpHitIdx = i;
+      if (slHitIdx === dates.length - 1 && c.high >= t.stop) slHitIdx = i;
+    }
+    // Stop at whichever was hit first
+    if (slHitIdx < dates.length - 1 || tpHitIdx < dates.length - 1) break;
+  }
+
+  // FVG midpoint line (for mid entry setups)
+  if (_setup.startsWith('mid')) {
+    const mid = (t.zone_high + t.zone_low) / 2;
+    shapes.push({
+      type: 'line', xref: 'x', x0: fvgX0 - 0.5, x1: dates.length - 0.5,
+      yref: 'y', y0: mid, y1: mid,
+      line: { color: '#ffffff', width: 1, dash: 'dot' },
+    });
+  }
+
+  // Trade ends at whichever is hit first
+  const tradeEndIdx = Math.min(slHitIdx, tpHitIdx);
+
+  // SL level line: from FVG start to trade end
+  shapes.push({
+    type: 'line', xref: 'x', x0: fvgX0 - 0.5, x1: tradeEndIdx + 0.5,
+    yref: 'y', y0: t.stop, y1: t.stop,
+    line: { color: '#e05252', width: 1, dash: 'dot' },
+  });
+  // TP level line: from FVG start to trade end
+  shapes.push({
+    type: 'line', xref: 'x', x0: fvgX0 - 0.5, x1: tradeEndIdx + 0.5,
+    yref: 'y', y0: t.target, y1: t.target,
+    line: { color: '#9b59b6', width: 1, dash: 'dot' },
+  });
+
+  // Annotations for levels
+  const levelLabels = [
+    { y: t.entry, color: '#f5a623', label: 'ENTRY' },
+    { y: t.stop, color: '#e05252', label: 'STOP' },
+    { y: t.target, color: '#9b59b6', label: 'TARGET' },
+  ];
+  const annotations = levelLabels.map(ls => ({
+    x: 1.01, xref: 'paper', xanchor: 'left',
+    y: ls.y, yref: 'y', yanchor: 'middle',
+    text: `${ls.label} ${ls.y.toFixed(2)}`,
+    showarrow: false,
+    font: { family: 'IBM Plex Mono', size: 9, color: ls.color },
+  }));
+
+  // Title
+  const outcome = t.won ? '<span style="color:#4caf7d">WIN</span>' : '<span style="color:#e05252">LOSS</span>';
+  const title = `${t.fvg_type.toUpperCase()} FVG | ${SETUP_LABELS[_setup]} | n=${N_VALUES[_nIdx].toFixed(2)} | ${outcome}`;
+
+  annotations.push({
+    text: `<b>${title}</b>`, xref: 'paper', yref: 'paper',
+    x: 0.5, y: 1.02, xanchor: 'center', yanchor: 'bottom', showarrow: false,
+    font: { family: 'IBM Plex Mono', size: 11, color: '#f5a623' },
+  });
+
+  // Marker padding — offset from candle body so triangles don't overlap wicks
+  const priceRange = Math.max(...highs) - Math.min(...lows);
+  const pad = priceRange * 0.02;
+
+  // Entry marker — triangle below candle low (long) or above candle high (short)
+  const entryIdx = entryX0 >= 0 ? entryX0 : fvgX0;
+  const entryCandle = candles[entryIdx];
+  const entryMarkerY = t.fvg_type === 'bullish' ? entryCandle.low - pad : entryCandle.high + pad;
+  const entryMarker = {
+    type: 'scatter', mode: 'markers',
+    x: [dates[entryIdx]],
+    y: [entryMarkerY],
+    marker: {
+      symbol: t.fvg_type === 'bullish' ? 'triangle-up' : 'triangle-down',
+      size: 14, color: '#f5a623',
+      line: { color: '#000', width: 1 },
+    },
+    name: 'ENTRY', showlegend: false,
+    hovertemplate: `ENTRY ${t.entry.toFixed(2)}<extra></extra>`,
+  };
+
+  // TP marker — purple triangle at the candle that hits target
+  const tpTraces = [];
+  if (t.won && tpHitIdx < dates.length - 1) {
+    const tpCandle = candles[tpHitIdx];
+    const tpMarkerY = t.fvg_type === 'bullish' ? tpCandle.high + pad : tpCandle.low - pad;
+    tpTraces.push({
+      type: 'scatter', mode: 'markers',
+      x: [dates[tpHitIdx]],
+      y: [tpMarkerY],
+      marker: {
+        symbol: t.fvg_type === 'bullish' ? 'triangle-down' : 'triangle-up',
+        size: 14, color: '#9b59b6',
+        line: { color: '#000', width: 1 },
+      },
+      name: 'TP', showlegend: false,
+      hovertemplate: `TARGET ${t.target.toFixed(2)}<extra></extra>`,
+    });
+  }
+
+  Plotly.react('tv-chart', [candlestick, entryMarker, ...tpTraces], {
+    paper_bgcolor: '#111111', plot_bgcolor: '#0a0a0a',
+    font: { family: 'IBM Plex Mono', color: '#e8e8e8' },
+    margin: { t: 40, b: 40, l: 60, r: 100 },
+    shapes, annotations,
+    dragmode: 'pan',
+    xaxis: {
+      type: 'category', tickfont: { size: 8, color: '#888' },
+      showgrid: false, linecolor: '#2a2a2a', showline: true,
+      rangeslider: { visible: false },
+      nticks: 10,
+      fixedrange: false,
+    },
+    yaxis: {
+      tickfont: { size: 9, color: '#888' },
+      showgrid: true, gridcolor: '#1a1a1a', linecolor: '#2a2a2a', showline: true,
+      tickprefix: '',
+      fixedrange: false,
+    },
+  }, { responsive: true, displaylogo: false, scrollZoom: true });
+}
+
+// ── Notebook ─────────────────────────────────────────────────────────────
+function switchNbPage(page) {
+  document.querySelectorAll('[id^="nb-page-"]').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.nb-nav').forEach(n => n.classList.remove('active'));
+  document.getElementById('nb-page-' + page).style.display = 'block';
+  document.querySelector(`.nb-nav[data-page="${page}"]`).classList.add('active');
+}
+
+document.getElementById('nb-page-strategy').innerHTML = `
+<h1>FVG RR TRADING STRATEGY — NQ 5min</h1>
+<p>Derived from <strong>5-year NQ futures backtesting</strong> across 62,703 mitigated FVGs. 1-minute candle walk for stop/target precision. Touch-based stop logic.</p>
+
+<h2>Primary Setup: MID_EXTREME</h2>
+<div class="highlight">
+  <strong>Entry:</strong> FVG midpoint &nbsp;|&nbsp; <strong>Stop:</strong> Middle candle extreme &nbsp;|&nbsp; <strong>Target:</strong> 1.00–1.25R
+</div>
+<p><span class="tag tag-green">+36% higher EV</span> vs mit_extreme (0.094 vs 0.069). Tighter risk shifts trades into 5-15pt bins where edge is strongest. Only 8% fewer trades (~2,868/yr vs 3,114/yr).</p>
+
+<h2>Risk Parameters</h2>
+<table>
+  <tr><th>Risk Range</th><th>Verdict</th><th>Notes</th></tr>
+  <tr><td><strong>5-15 pts</strong></td><td><span class="tag tag-green">SWEET SPOT</span></td><td>Consistently +EV across all lookback periods, 200+ samples/cell</td></tr>
+  <tr><td>15-30 pts</td><td><span class="tag tag-amber">OKAY</span></td><td>Positive but declining edge</td></tr>
+  <tr><td>40+ pts</td><td><span class="tag tag-red">AVOID</span></td><td>Negative EV, sparse samples</td></tr>
+</table>
+<p>Hard cap: <strong>80pt max risk</strong></p>
+
+<h2>Time Windows</h2>
+<table>
+  <tr><th>Window</th><th>Verdict</th><th>Notes</th></tr>
+  <tr><td><strong>10:00-11:00</strong></td><td><span class="tag tag-green">BEST</span></td><td>Post-open, volatility settling, strongest edge</td></tr>
+  <tr><td><strong>11:00-11:30</strong></td><td><span class="tag tag-green">GOOD</span></td><td>+0.178 avg EV at risk 10-15, 202 samples</td></tr>
+  <tr><td><strong>13:00-13:30</strong></td><td><span class="tag tag-green">GOOD</span></td><td>Best mid_extreme cell: +0.186 EV, 222 samples</td></tr>
+  <tr><td>09:30-10:00</td><td><span class="tag tag-amber">MIXED</span></td><td>High EV when tight stop available, but median risk is 31pts</td></tr>
+  <tr><td>12:00-12:30</td><td><span class="tag tag-red">WEAK</span></td><td>Lunch chop</td></tr>
+  <tr><td>15:30-16:00</td><td><span class="tag tag-red">AVOID</span></td><td>Consistently negative EV</td></tr>
+</table>
+
+<h2>Top 3 Trades (9:30–11:30 session)</h2>
+
+<h3>#1 — 10:30-11:00 | MIT+EXTREME | risk 10-15pts</h3>
+<table>
+  <tr><td>RR Target</td><td><strong>3.00R</strong></td></tr>
+  <tr><td>Win Rate</td><td>31.8%</td></tr>
+  <tr><td>EV</td><td class="pos"><strong>+0.274 per R</strong></td></tr>
+  <tr><td>Samples</td><td>223 (5 years) — ~1/week</td></tr>
+  <tr><td>Median Risk</td><td>12.2pts ($245)</td></tr>
+  <tr><td>Target</td><td>36.8pts ($735)</td></tr>
+  <tr><td>Avg Profit</td><td class="pos"><strong>$67/trade</strong></td></tr>
+</table>
+
+<h3>#2 — 09:30-10:00 | MIT+EXTREME | risk 5-10pts</h3>
+<table>
+  <tr><td>RR Target</td><td><strong>2.25R</strong></td></tr>
+  <tr><td>Win Rate</td><td>43.4%</td></tr>
+  <tr><td>EV</td><td class="pos"><strong>+0.410 per R</strong></td></tr>
+  <tr><td>Samples</td><td>83 (5 years) — rare but highest edge</td></tr>
+  <tr><td>Median Risk</td><td>8.0pts ($160)</td></tr>
+  <tr><td>Target</td><td>18.0pts ($360)</td></tr>
+  <tr><td>Avg Profit</td><td class="pos"><strong>$66/trade</strong></td></tr>
+</table>
+
+<h3>#3 — 11:00-11:30 | MID+EXTREME | risk 10-15pts</h3>
+<table>
+  <tr><td>RR Target</td><td><strong>2.75R</strong></td></tr>
+  <tr><td>Win Rate</td><td>31.6%</td></tr>
+  <tr><td>EV</td><td class="pos"><strong>+0.184 per R</strong></td></tr>
+  <tr><td>Samples</td><td>342 (5 years) — most frequent</td></tr>
+  <tr><td>Median Risk</td><td>12.2pts ($245)</td></tr>
+  <tr><td>Target</td><td>33.7pts ($674)</td></tr>
+  <tr><td>Avg Profit</td><td class="pos"><strong>$45/trade</strong></td></tr>
+</table>
+
+<h3>Best Single Trade: 10:00-11:00</h3>
+<div class="highlight">
+  <strong>10:30-11:00 | MIT+EXTREME | risk 10-15pts</strong><br>
+  Robust across n=2.25-3.00 (all above +0.23 EV). FVG forms mid-morning, middle candle extreme gives 10-15pt stop, enter at mitigation, let it run to 2.5-3R. ~$63-67/trade. About once a week.
+</div>
+
+<h2>Key Findings</h2>
+<p><strong>1. Take profits early</strong> — optimal n=1.0-1.25 overall, but morning session (9:30-11:30) supports higher targets (2.25-3.0R) due to momentum.</p>
+<p><strong>2. Risk matters more than FVG size</strong> — same FVG size can have 10pt or 35pt risk. Bucketing by risk is the correct approach.</p>
+<p><strong>3. Mid entry > mit entry overall</strong> — but mit_extreme dominates the 10:00-11:00 window specifically.</p>
+<p><strong>4. Edge is real but modest</strong> — +0.094R weighted avg. Requires discipline and volume to compound.</p>
+<p><strong>5. Data integrity is critical</strong> — contract roll artifacts inflated EV at higher RR targets. Always verify with clean continuous contracts.</p>
+
+<h2>Expectancy Formula</h2>
+<p><code>EV = P(win) × (n + 1) - 1</code></p>
+<table>
+  <tr><th>n (RR)</th><th>Breakeven WR</th></tr>
+  <tr><td>1.00</td><td>50.0%</td></tr>
+  <tr><td>1.25</td><td>44.4%</td></tr>
+  <tr><td>1.50</td><td>40.0%</td></tr>
+  <tr><td>2.00</td><td>33.3%</td></tr>
+  <tr><td>2.50</td><td>28.6%</td></tr>
+  <tr><td>3.00</td><td>25.0%</td></tr>
+</table>
+`;
+
+document.getElementById('nb-page-mit').innerHTML = `
+<h1>MIT+EXTREME — HIGH WIN RATE STRATEGY</h1>
+<p>Entry at mitigation level, stop at middle candle extreme. Optimized for <strong>1.00–1.25R targets</strong> with higher win rates. The "grinder" setup — smaller wins, more often.</p>
+
+<h2>Setup Definition</h2>
+<div class="highlight">
+  <strong>Entry:</strong> Mitigation level (zone_high for bullish, zone_low for bearish)<br>
+  <strong>Stop:</strong> Middle candle extreme (low for bullish, high for bearish)<br>
+  <strong>Target:</strong> 1.00–1.25R<br>
+  <strong>Win Rate:</strong> 51.2% at 1R, 45.3% at 1.25R
+</div>
+
+<h2>Why MIT+EXTREME at Low RR</h2>
+<p>Mit_extreme has a <strong>wider stop</strong> than mid_extreme (entry is further from stop). This means:</p>
+<p>• More room for the trade to breathe — fewer premature stop-outs</p>
+<p>• The wider stop keeps win rates above 50% at 1:1, which is the breakeven threshold</p>
+<p>• At 1.25R you're still at 45.3% WR — comfortably above the 44.4% breakeven</p>
+<p>• <strong>15,568 trades over 5 years</strong> = ~3,100/year = ~12/trading day</p>
+
+<h2>Overall Edge (5Y)</h2>
+<table>
+  <tr><th>RR Target</th><th>Win Rate</th><th>EV per R</th><th>Breakeven</th><th>Edge over BE</th></tr>
+  <tr><td><strong>1.00R</strong></td><td class="pos"><strong>51.2%</strong></td><td class="pos">+0.024</td><td>50.0%</td><td><span class="tag tag-green">+1.2%</span></td></tr>
+  <tr><td><strong>1.25R</strong></td><td><strong>45.3%</strong></td><td class="pos">+0.019</td><td>44.4%</td><td><span class="tag tag-green">+0.9%</span></td></tr>
+  <tr><td>1.50R</td><td>41.2%</td><td class="pos">+0.011</td><td>40.0%</td><td><span class="tag tag-amber">+1.2%</span></td></tr>
+</table>
+<p>The edge is thin but consistent. At 1R with 51.2% WR, you're grinding +0.024R per trade. Over 3,100 trades/year that compounds.</p>
+
+<h2>Best Cells — n=1.00R (highest volume)</h2>
+<table>
+  <tr><th>Time</th><th>Risk</th><th>Win Rate</th><th>EV</th><th>Samples</th><th>$/trade</th></tr>
+  <tr><td><strong>14:30-15:00</strong></td><td>5-10</td><td class="pos"><strong>57.5%</strong></td><td class="pos">+0.149</td><td>329</td><td>+$22</td></tr>
+  <tr><td><strong>13:00-13:30</strong></td><td>5-10</td><td class="pos"><strong>57.2%</strong></td><td class="pos">+0.145</td><td>283</td><td>+$22</td></tr>
+  <tr><td>10:30-11:00</td><td>10-15</td><td>56.0%</td><td class="pos">+0.121</td><td>223</td><td>+$30</td></tr>
+  <tr><td>11:00-11:30</td><td>15-20</td><td>55.5%</td><td class="pos">+0.110</td><td>245</td><td>+$38</td></tr>
+  <tr><td>10:30-11:00</td><td>20-25</td><td>55.3%</td><td class="pos">+0.106</td><td>217</td><td>+$47</td></tr>
+</table>
+
+<h2>Best Cells — n=1.25R (best balance)</h2>
+<table>
+  <tr><th>Time</th><th>Risk</th><th>Win Rate</th><th>EV</th><th>Samples</th><th>$/trade</th></tr>
+  <tr><td><strong>14:30-15:00</strong></td><td>5-10</td><td><strong>52.0%</strong></td><td class="pos">+0.170</td><td>329</td><td>+$25</td></tr>
+  <tr><td><strong>10:00-10:30</strong></td><td>10-15</td><td><strong>52.7%</strong></td><td class="pos">+0.186</td><td>165</td><td>+$48</td></tr>
+  <tr><td>13:00-13:30</td><td>5-10</td><td>51.2%</td><td class="pos">+0.153</td><td>283</td><td>+$23</td></tr>
+  <tr><td>14:30-15:00</td><td>10-15</td><td>51.1%</td><td class="pos">+0.150</td><td>270</td><td>+$36</td></tr>
+  <tr><td>09:30-10:00</td><td>5-10</td><td>53.0%</td><td class="pos">+0.193</td><td>83</td><td>+$31</td></tr>
+</table>
+
+<h2>When to Use MIT vs MID</h2>
+<table>
+  <tr><th></th><th>MIT+EXTREME</th><th>MID+EXTREME</th></tr>
+  <tr><td><strong>Best for</strong></td><td>Grinding, high frequency</td><td>Selective, higher EV</td></tr>
+  <tr><td><strong>Optimal n</strong></td><td>1.00–1.25R</td><td>1.00–1.25R (overall), 2.5–3R (morning)</td></tr>
+  <tr><td><strong>Win rate</strong></td><td class="pos">51.2% at 1R</td><td>45-48% at 1R</td></tr>
+  <tr><td><strong>Trades/year</strong></td><td><strong>~3,100</strong></td><td>~2,870</td></tr>
+  <tr><td><strong>EV per trade</strong></td><td>+0.024R</td><td class="pos"><strong>+0.033R</strong></td></tr>
+  <tr><td><strong>Activation</strong></td><td>Always (on mitigation)</td><td>Conditional (midpoint reach)</td></tr>
+</table>
+
+<div class="highlight">
+  <strong>Use MIT+EXTREME when:</strong> You want more setups, prefer higher win rates, and are comfortable with smaller per-trade edge. Ideal for the afternoon session (13:00-15:00) with tight 5-10pt stops.<br><br>
+  <strong>Use MID+EXTREME when:</strong> You want higher EV per trade and are willing to wait for the midpoint fill. Better for the morning session (10:00-11:30) where momentum supports higher RR targets.
+</div>
+
+<h2>Dollar Projection (MIT+EXTREME, 1 contract)</h2>
+<p>At 1.00R, 5-10pt risk, ~$160 per trade:</p>
+<table>
+  <tr><th>Timeframe</th><th>Trades</th><th>EV/trade</th><th>Gross P&L</th></tr>
+  <tr><td>Per trade</td><td>1</td><td>+$3.80</td><td>+$3.80</td></tr>
+  <tr><td>Per week (est)</td><td>~60</td><td>+$3.80</td><td class="pos">+$228</td></tr>
+  <tr><td>Per month</td><td>~260</td><td>+$3.80</td><td class="pos">+$988</td></tr>
+  <tr><td>Per year</td><td>~3,100</td><td>+$3.80</td><td class="pos">+$11,780</td></tr>
+</table>
+<p>At 1.25R with the best cells (10:00-10:30, 10-15pt risk, $260 avg risk):</p>
+<table>
+  <tr><td>Per trade</td><td>+$48</td></tr>
+  <tr><td>Per month (est ~13 setups)</td><td class="pos">+$624</td></tr>
+</table>
+<p><em>These are gross numbers before commissions and slippage. NQ round-turn is ~$4.50/contract.</em></p>
+`;
+
+document.getElementById('nb-page-review2025').innerHTML = `
+<h1>2025 TOP 3 TRADES — REVIEW</h1>
+<p>Performance review based on <strong>1-year NQ data</strong> (Dec 2024 — Dec 2025). Session: 9:30–11:30 ET. Minimum 5 samples per cell.</p>
+
+<h2>Overview</h2>
+<div class="highlight">
+  2025 confirmed the 5-year edge. The #1 trade from the 5Y strategy (10:30-11:00, MIT+EXTREME, 10-15pts) was also the #1 trade in 2025 — with <strong>even higher EV</strong> (+0.76 vs +0.27). The edge didn't decay; it strengthened in a volatile year.
+</div>
+
+<h2>#1 — 10:30-11:00 | MIT+EXTREME | risk 10-15pts</h2>
+<table>
+  <tr><th>Metric</th><th>2025</th><th>5Y Avg</th></tr>
+  <tr><td>RR Target</td><td><strong>3.00R</strong></td><td>3.00R</td></tr>
+  <tr><td>Win Rate</td><td class="pos"><strong>44.0%</strong></td><td>31.8%</td></tr>
+  <tr><td>EV</td><td class="pos"><strong>+0.760</strong></td><td>+0.274</td></tr>
+  <tr><td>Samples</td><td>25</td><td>223</td></tr>
+  <tr><td>Median Risk</td><td>12.2pts ($245)</td><td>12.2pts ($245)</td></tr>
+  <tr><td>Avg Profit</td><td class="pos"><strong>$179/trade</strong></td><td>$67/trade</td></tr>
+</table>
+<p><span class="tag tag-green">CONFIRMED</span> Best trade on both timeframes. Win rate jumped from 31.8% to 44.0% in 2025 — likely due to higher NQ volatility. The 3R target at 10:30 captures the mid-morning momentum move after the open chop settles.</p>
+
+<h2>#2 — 09:30-10:00 | MID+EXTREME | risk 15-20pts</h2>
+<table>
+  <tr><th>Metric</th><th>2025</th><th>Notes</th></tr>
+  <tr><td>RR Target</td><td><strong>3.00R</strong></td><td></td></tr>
+  <tr><td>Win Rate</td><td><strong>40.0%</strong></td><td>Above 25% BE for 3R</td></tr>
+  <tr><td>EV</td><td class="pos"><strong>+0.600</strong></td><td></td></tr>
+  <tr><td>Samples</td><td>35</td><td>~3/month</td></tr>
+  <tr><td>Median Risk</td><td>17.5pts ($350)</td><td></td></tr>
+  <tr><td>Avg Profit</td><td class="pos"><strong>$210/trade</strong></td><td>Highest $/trade</td></tr>
+</table>
+<p><span class="tag tag-amber">NEW IN 2025</span> This setup wasn't in the 5Y top 3 — the midpoint entry at the open with moderate risk (15-20pts) was particularly effective in 2025. The deeper entry (midpoint vs mitigation) gave better fills in the volatile open.</p>
+
+<h2>#3 — 11:00-11:30 | MID+EXTREME | risk 10-15pts</h2>
+<table>
+  <tr><th>Metric</th><th>2025</th><th>5Y Avg</th></tr>
+  <tr><td>RR Target</td><td><strong>1.00R</strong></td><td>2.75R</td></tr>
+  <tr><td>Win Rate</td><td class="pos"><strong>70.2%</strong></td><td>31.6%</td></tr>
+  <tr><td>EV</td><td class="pos"><strong>+0.404</strong></td><td>+0.184</td></tr>
+  <tr><td>Samples</td><td>57</td><td>342</td></tr>
+  <tr><td>Median Risk</td><td>12.2pts ($245)</td><td>12.2pts ($245)</td></tr>
+  <tr><td>Avg Profit</td><td class="pos"><strong>$99/trade</strong></td><td>$45/trade</td></tr>
+</table>
+<p><span class="tag tag-green">MOST FREQUENT</span> 57 occurrences = ~5/month. In 2025, the optimal target shifted to 1:1 with a 70% hit rate — the late-morning FVGs were getting mitigated and bouncing quickly without the follow-through for higher RR. A scalper's trade: high frequency, high win rate, modest target.</p>
+
+<h2>Key Takeaways from 2025</h2>
+
+<h3>What worked</h3>
+<p><strong>The 10:30-11:00 mit_extreme setup is the real deal.</strong> Top performer on both 1Y and 5Y. The edge didn't degrade — it got stronger. This is the bread-and-butter trade.</p>
+<p><strong>Lower RR targets outperformed in 2025.</strong> The #3 trade at 1:1 with 70% WR shows that in recent market conditions, quick exits work better than holding for 3R. The market was choppier — FVGs got mitigated but didn't always run.</p>
+
+<h3>What changed</h3>
+<p><strong>Mid_extreme gained ground at the open.</strong> The 9:30 midpoint entry wasn't a top trade on 5Y but became #2 in 2025. More volatile opens = deeper FVG penetration = midpoint fills more often.</p>
+<p><strong>Optimal n shifted down.</strong> 5Y optimal was 2.5-3R for morning trades. 2025 favored 1R-2R for the 11:00+ window. Adapt your targets to current conditions.</p>
+
+<h3>Risk management</h3>
+<p><strong>All top trades were in the 10-20pt risk range.</strong> No outlier risk bins. The edge concentrates where it should — manageable stops, reasonable targets, repeatable setups.</p>
+`;
+
+// ── Strategy Builder ─────────────────────────────────────────────────────
+// Uses _stratCells from the existing MC select mode as the cell source.
+// Adds: save/load/export to /api/strategies, per-cell R:R override, enable/disable.
+
+let _sbCells = [];          // [{tp, rr, setup, rr_target, ev, wr, samples, enabled, median_risk, trades_per_day, notes}]
+let _sbName = '';
+let _sbDesc = '';
+let _sbId = null;
+let _sbActiveId = null;
+
+function sbSyncFromStratCells() {
+  // Sync MC _stratCells → _sbCells (add new ones, keep existing state)
+  const existing = new Map(_sbCells.map(c => [`${c.tp}||${c.rr}||${c.setup}`, c]));
+  _stratCells.forEach(sc => {
+    const key = `${sc.tp}||${sc.rr}||${sc.setup}`;
+    if (!existing.has(key)) {
+      _sbCells.push({
+        tp: sc.tp, rr: sc.rr, setup: sc.setup,
+        rr_target: sc.rr_n, ev: sc.ev, wr: sc.wr,
+        samples: sc.samples, enabled: true,
+        median_risk: 0, trades_per_day: 0, notes: '',
+      });
+    }
+  });
+  // Remove cells no longer in _stratCells
+  const scKeys = new Set(_stratCells.map(sc => `${sc.tp}||${sc.rr}||${sc.setup}`));
+  _sbCells = _sbCells.filter(c => scKeys.has(`${c.tp}||${c.rr}||${c.setup}`));
+}
+
+function sbRenderCellList() {
+  const list = document.getElementById('sb-cell-list');
+  const count = document.getElementById('sb-cell-count');
+  if (_sbCells.length === 0) {
+    list.innerHTML = '<div style="font-size:9px;color:var(--text-dimmer);padding:8px 0">Enable SELECT on HEATMAP tab, click cells to add them here</div>';
+    count.textContent = '(0)';
+    sbUpdateStats();
+    return;
+  }
+  count.textContent = `(${_sbCells.length})`;
+  list.innerHTML = _sbCells.map((c, i) => {
+    const setupLabel = c.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    const evClass = c.ev >= 0 ? 'pos' : 'neg';
+    const disClass = c.enabled ? '' : ' disabled';
+    const rrOpts = N_VALUES.map(n => `<option value="${n}"${n === c.rr_target ? ' selected' : ''}>${n.toFixed(2)}R</option>`).join('');
+    return `<div class="sb-cell${disClass}">
+      <input type="checkbox" class="sb-check" ${c.enabled ? 'checked' : ''} onchange="sbToggleCell(${i}, this.checked)">
+      <div class="sb-info">
+        <div class="sb-tp">${c.tp} | ${c.rr}</div>
+        <div class="sb-detail">${setupLabel} | ${c.samples} samples</div>
+      </div>
+      <select class="sb-rr-sel" onchange="sbChangeRR(${i}, parseFloat(this.value))">${rrOpts}</select>
+      <span class="sb-ev ${evClass}">${c.ev >= 0 ? '+' : ''}${c.ev.toFixed(3)}</span>
+      <span class="sb-rm" onclick="sbRemoveCell(${i})">&times;</span>
+    </div>`;
+  }).join('');
+  sbUpdateStats();
+}
+
+function sbToggleCell(idx, enabled) {
+  _sbCells[idx].enabled = enabled;
+  sbRenderCellList();
+  renderHeatmap();
+}
+
+function sbChangeRR(idx, newN) {
+  const c = _sbCells[idx];
+  c.rr_target = newN;
+  // Look up new EV from data if available
+  if (_data) {
+    const cell = _data.cells.find(dc => dc.time_period === c.tp && dc.risk_range === c.rr);
+    if (cell && cell.setups[c.setup]) {
+      const ni = N_VALUES.indexOf(newN);
+      if (ni >= 0) {
+        c.ev = cell.setups[c.setup].evs[ni] || 0;
+        c.wr = cell.setups[c.setup].win_rates[ni] || 0;
+      }
+    }
+  }
+  sbRenderCellList();
+}
+
+function sbRemoveCell(idx) {
+  const c = _sbCells[idx];
+  // Also remove from _stratCells
+  const si = _stratCells.findIndex(sc => sc.tp === c.tp && sc.rr === c.rr && sc.setup === c.setup);
+  if (si >= 0) _stratCells.splice(si, 1);
+  _sbCells.splice(idx, 1);
+  updateStratPanel();
+  sbRenderCellList();
+  renderHeatmap();
+}
+
+function sbUpdateStats() {
+  const enabled = _sbCells.filter(c => c.enabled);
+  document.getElementById('sb-enabled').textContent = `${enabled.length} / ${_sbCells.length}`;
+  if (enabled.length === 0) {
+    document.getElementById('sb-wev').textContent = '-';
+    document.getElementById('sb-tpd').textContent = '-';
+    document.getElementById('sb-coverage').textContent = '-';
+    return;
+  }
+  const totalSamples = enabled.reduce((s, c) => s + (c.samples || 0), 0);
+  const wev = totalSamples > 0 ? enabled.reduce((s, c) => s + c.ev * (c.samples || 0), 0) / totalSamples : 0;
+  const tpd = enabled.reduce((s, c) => s + (c.trades_per_day || 0), 0);
+  const periods = [...new Set(enabled.map(c => c.tp))].sort();
+  document.getElementById('sb-wev').textContent = (wev >= 0 ? '+' : '') + wev.toFixed(4);
+  document.getElementById('sb-wev').style.color = wev >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('sb-tpd').textContent = tpd > 0 ? tpd.toFixed(1) : '-';
+  document.getElementById('sb-coverage').textContent = `${periods.length} windows`;
+}
+
+async function sbSave() {
+  const name = document.getElementById('sb-name').value.trim() || 'Unnamed Strategy';
+  const desc = document.getElementById('sb-desc').value.trim();
+  const dsId = document.getElementById('ds-select').value;
+  const strategy = {
+    schema_version: '1.0',
+    meta: {
+      id: _sbId || undefined,
+      name, description: desc,
+      source_dataset: dsId, ticker: 'NQ', timeframe: '5min',
+    },
+    filters: { min_samples: 150, require_all_evs_positive: true },
+    cells: _sbCells.map(c => ({
+      time_period: c.tp, risk_range: c.rr, setup: c.setup,
+      rr_target: c.rr_target, enabled: c.enabled,
+      win_rate: c.wr || 0, ev: c.ev || 0,
+      median_risk: c.median_risk || 0, samples: c.samples || 0,
+      trades_per_day: c.trades_per_day || 0, notes: c.notes || '',
+    })),
+  };
+  try {
+    const res = await fetch(`${API}/api/strategies`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(strategy) });
+    const data = await res.json();
+    if (data.saved) {
+      _sbId = data.id;
+      sbStatus(`Saved as "${data.id}"`);
+    } else {
+      sbStatus('Save failed: ' + (data.errors || []).join(', '), true);
+    }
+  } catch (e) { sbStatus('Save error: ' + e.message, true); }
+}
+
+async function sbLoadStrategy(id) {
+  try {
+    const res = await fetch(`${API}/api/strategies/${id}`);
+    if (!res.ok) throw new Error('Not found');
+    const s = await res.json();
+    _sbId = s.meta.id;
+    _sbName = s.meta.name || '';
+    _sbDesc = s.meta.description || '';
+    document.getElementById('sb-name').value = _sbName;
+    document.getElementById('sb-desc').value = _sbDesc;
+    _sbCells = (s.cells || []).map(c => ({
+      tp: c.time_period, rr: c.risk_range, setup: c.setup,
+      rr_target: c.rr_target, ev: c.ev || 0, wr: c.win_rate || 0,
+      samples: c.samples || 0, enabled: c.enabled !== false,
+      median_risk: c.median_risk || 0, trades_per_day: c.trades_per_day || 0,
+      notes: c.notes || '',
+    }));
+    // Sync back to MC _stratCells
+    _stratCells = _sbCells.filter(c => c.enabled).map(c => ({
+      tp: c.tp, rr: c.rr, setup: c.setup, rr_n: c.rr_target,
+      ev: c.ev, wr: c.wr, samples: c.samples, nIdx: N_VALUES.indexOf(c.rr_target),
+    }));
+    updateStratPanel();
+    sbRenderCellList();
+    renderHeatmap();
+    sbUpdateActiveBtn();
+    sbStatus(`Loaded "${_sbName}"`);
+    document.getElementById('sb-load-list').classList.remove('open');
+  } catch (e) { sbStatus('Load error: ' + e.message, true); }
+}
+
+async function sbToggleLoadList() {
+  const list = document.getElementById('sb-load-list');
+  if (list.classList.contains('open')) { list.classList.remove('open'); return; }
+  try {
+    const res = await fetch(`${API}/api/strategies`);
+    const manifest = await res.json();
+    _sbActiveId = manifest.active_strategy;
+    const strategies = manifest.strategies || [];
+    if (strategies.length === 0) {
+      list.innerHTML = '<div class="sb-load-item" style="color:var(--text-dimmer)">No saved strategies</div>';
+    } else {
+      list.innerHTML = strategies.map(s => {
+        const dot = s.id === _sbActiveId ? '<span class="active-dot">● </span>' : '';
+        return `<div class="sb-load-item" onclick="sbLoadStrategy('${s.id}')">${dot}${s.name || s.id} <span style="color:var(--text-dimmer)">(${s.enabled_count || '?'} cells)</span></div>`;
+      }).join('');
+    }
+    list.classList.add('open');
+  } catch (e) { sbStatus('Error loading list: ' + e.message, true); }
+}
+
+function sbClear() {
+  _sbCells = [];
+  _stratCells.length = 0;
+  _sbId = null;
+  document.getElementById('sb-name').value = '';
+  document.getElementById('sb-desc').value = '';
+  updateStratPanel();
+  sbRenderCellList();
+  renderHeatmap();
+  sbStatus('Cleared');
+}
+
+function sbDuplicate() {
+  _sbId = null;
+  const name = document.getElementById('sb-name').value.trim();
+  document.getElementById('sb-name').value = name + ' (copy)';
+  sbStatus('Duplicated — save to create a new strategy');
+}
+
+function sbExport() {
+  const name = document.getElementById('sb-name').value.trim() || 'strategy';
+  const strategy = {
+    schema_version: '1.0',
+    meta: { id: _sbId, name, description: document.getElementById('sb-desc').value, source_dataset: document.getElementById('ds-select').value, ticker: 'NQ', timeframe: '5min' },
+    filters: { min_samples: 150, require_all_evs_positive: true },
+    cells: _sbCells.map(c => ({ time_period: c.tp, risk_range: c.rr, setup: c.setup, rr_target: c.rr_target, enabled: c.enabled, win_rate: c.wr, ev: c.ev, median_risk: c.median_risk, samples: c.samples, trades_per_day: c.trades_per_day, notes: c.notes })),
+  };
+  const blob = new Blob([JSON.stringify(strategy, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name.replace(/\s+/g, '-').toLowerCase() + '.json';
+  a.click();
+  sbStatus('Exported ' + a.download);
+}
+
+async function sbSetActive() {
+  if (!_sbId) { sbStatus('Save the strategy first', true); return; }
+  try {
+    const res = await fetch(`${API}/api/strategies/active/${_sbId}`, { method: 'PUT' });
+    const data = await res.json();
+    if (data.active) {
+      _sbActiveId = _sbId;
+      sbUpdateActiveBtn();
+      sbStatus(`"${_sbId}" is now the ACTIVE strategy for the bot`);
+    }
+  } catch (e) { sbStatus('Error: ' + e.message, true); }
+}
+
+function sbUpdateActiveBtn() {
+  const btn = document.getElementById('sb-active-btn');
+  if (_sbId && _sbId === _sbActiveId) {
+    btn.textContent = '● ACTIVE';
+    btn.classList.add('active-badge');
+  } else {
+    btn.textContent = 'SET AS ACTIVE';
+    btn.classList.remove('active-badge');
+  }
+}
+
+function sbStatus(msg, isError) {
+  const el = document.getElementById('sb-status');
+  el.textContent = msg;
+  el.style.color = isError ? 'var(--red)' : 'var(--green)';
+  setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 4000);
+}
+
+// Close load dropdown on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.sb-load-dropdown')) {
+    document.getElementById('sb-load-list').classList.remove('open');
+  }
+});
+
+// ── Backtest Report ──────────────────────────────────────────────────────
+let _btResults = null;
+const _btPlotLayout = {
+  paper_bgcolor: '#0a0a0a', plot_bgcolor: '#111',
+  font: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+  margin: { l: 50, r: 20, t: 30, b: 40 },
+  xaxis: { gridcolor: '#222', linecolor: '#333' },
+  yaxis: { gridcolor: '#222', linecolor: '#333' },
+};
+
+async function btInit() {
+  // Load strategies into dropdown
+  try {
+    const res = await fetch(`${API}/api/strategies`);
+    const m = await res.json();
+    const sel = document.getElementById('bt-strategy');
+    sel.innerHTML = '';
+    (m.strategies || []).forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.id; opt.textContent = s.name || s.id;
+      sel.appendChild(opt);
+    });
+    // Set end date to today
+    document.getElementById('bt-end').value = new Date().toISOString().slice(0, 10);
+  } catch(e) {}
+  // Load history
+  btRefreshHistory();
+}
+
+async function btRefreshHistory() {
+  try {
+    const res = await fetch(`${API}/api/backtest/history`);
+    const data = await res.json();
+    const sel = document.getElementById('bt-history');
+    sel.innerHTML = '<option value="">— load previous —</option>';
+    (data.runs || []).forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.run_id;
+      const pnl = r.net_pnl >= 0 ? `+$${r.net_pnl}` : `-$${Math.abs(r.net_pnl)}`;
+      opt.textContent = `${r.strategy_name || 'unknown'} ${r.start_date}→${r.end_date} ${pnl}`;
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+}
+
+async function btRun() {
+  const stratId = document.getElementById('bt-strategy').value;
+  if (!stratId) return;
+  const start = document.getElementById('bt-start').value.replace(/-/g, '');
+  const end = document.getElementById('bt-end').value.replace(/-/g, '');
+  const balance = parseFloat(document.getElementById('bt-balance').value);
+  const riskPct = parseFloat(document.getElementById('bt-risk').value) / 100;
+
+  document.getElementById('bt-run-btn').disabled = true;
+  document.getElementById('bt-content').style.display = 'none';
+  document.getElementById('bt-stats').style.display = 'none';
+  document.getElementById('bt-progress').style.display = 'block';
+  document.getElementById('bt-progress-log').textContent = '';
+
+  try {
+    const res = await fetch(`${API}/api/backtest`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ strategy_id: stratId, start_date: start, end_date: end, balance, risk_pct: riskPct }),
+    });
+    const { job_id } = await res.json();
+
+    // Stream progress via SSE
+    const evtSource = new EventSource(`${API}/api/backtest/${job_id}/stream`);
+    evtSource.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.line) {
+        document.getElementById('bt-progress-log').textContent += d.line + '\n';
+        document.getElementById('bt-progress-log').scrollTop = 9999;
+      }
+      if (d.done) {
+        evtSource.close();
+        btLoadResults(job_id);
+      }
+    };
+    evtSource.onerror = () => { evtSource.close(); document.getElementById('bt-run-btn').disabled = false; };
+  } catch(e) {
+    document.getElementById('bt-progress-log').textContent = 'Error: ' + e.message;
+    document.getElementById('bt-run-btn').disabled = false;
+  }
+}
+
+async function btLoadHistory(runId) {
+  if (!runId) return;
+  document.getElementById('bt-progress').style.display = 'block';
+  document.getElementById('bt-progress-log').textContent = 'Loading...';
+  try {
+    const res = await fetch(`${API}/api/backtest/${runId}/results`);
+    _btResults = await res.json();
+    btRenderAll();
+  } catch(e) {
+    document.getElementById('bt-progress-log').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function btLoadResults(jobId) {
+  try {
+    const res = await fetch(`${API}/api/backtest/${jobId}/results`);
+    _btResults = await res.json();
+    btRenderAll();
+    btRefreshHistory();
+  } catch(e) {
+    document.getElementById('bt-progress-log').textContent += '\nError loading results: ' + e.message;
+  }
+  document.getElementById('bt-run-btn').disabled = false;
+}
+
+function btRenderAll() {
+  if (!_btResults) return;
+  document.getElementById('bt-progress').style.display = 'none';
+  document.getElementById('bt-content').style.display = 'block';
+  btRenderStats();
+  btRenderEquityCurve();
+  btRenderDrawdown();
+  btRenderDailyPnl();
+  btRenderDistribution();
+  btRenderCellTable();
+  btRenderTradeLog();
+  btRenderHourly();
+}
+
+function btRenderStats() {
+  const s = _btResults.summary;
+  if (!s || !s.total_trades) { document.getElementById('bt-stats').style.display = 'none'; return; }
+  const m = _btResults.meta || {};
+  const pnlClass = s.net_pnl >= 0 ? 'pos' : 'neg';
+  const pfStr = s.profit_factor != null ? s.profit_factor.toFixed(2) : '—';
+  document.getElementById('bt-stats').style.display = 'flex';
+  document.getElementById('bt-stats').innerHTML = `
+    <div class="bt-stat"><span class="label">Period</span><span class="value">${m.start_date || '?'} → ${m.end_date || '?'} (${m.trading_days || '?'}d)</span></div>
+    <div class="bt-stat"><span class="label">Trades</span><span class="value">${s.total_trades}</span></div>
+    <div class="bt-stat"><span class="label">Win Rate</span><span class="value">${s.win_rate}%</span></div>
+    <div class="bt-stat"><span class="label">Net P&L</span><span class="value ${pnlClass}">${s.net_pnl >= 0 ? '+' : ''}$${s.net_pnl.toLocaleString()} (${s.pnl_pct >= 0 ? '+' : ''}${s.pnl_pct}%)</span></div>
+    <div class="bt-stat"><span class="label">Profit Factor</span><span class="value">${pfStr}</span></div>
+    <div class="bt-stat"><span class="label">Max DD</span><span class="value neg">-$${s.max_drawdown.toLocaleString()} (-${s.max_dd_pct}%)</span></div>
+    <div class="bt-stat"><span class="label">Avg Win</span><span class="value pos">$${Math.round(s.avg_win).toLocaleString()}</span></div>
+    <div class="bt-stat"><span class="label">Avg Loss</span><span class="value neg">$${Math.round(s.avg_loss).toLocaleString()}</span></div>
+    <div class="bt-stat"><span class="label">Trades/Day</span><span class="value">${s.trades_per_day}</span></div>
+  `;
+}
+
+function btRenderEquityCurve() {
+  const ec = _btResults.equity_curve || [];
+  if (!ec.length) return;
+  Plotly.react('bt-equity-chart', [{
+    x: ec.map((e, i) => i + 1), y: ec.map(e => e.balance),
+    type: 'scatter', mode: 'lines', line: { color: '#5b9cf6', width: 1.5 },
+    hovertemplate: 'Trade %{x}<br>Balance: $%{y:,.0f}<extra></extra>',
+  }], { ..._btPlotLayout, title: { text: 'Equity Curve', font: { size: 11, color: '#888' } },
+    yaxis: { ..._btPlotLayout.yaxis, title: 'Balance ($)', tickformat: '$,.0f' },
+    xaxis: { ..._btPlotLayout.xaxis, title: 'Trade #' },
+  }, { responsive: true, displaylogo: false, displayModeBar: false });
+}
+
+function btRenderDrawdown() {
+  const dd = _btResults.drawdown_curve || [];
+  if (!dd.length) return;
+  Plotly.react('bt-dd-chart', [{
+    x: dd.map((d, i) => i + 1), y: dd.map(d => -d.drawdown_pct),
+    type: 'scatter', mode: 'lines', fill: 'tozeroy',
+    line: { color: '#e05252', width: 1 }, fillcolor: 'rgba(224,82,82,0.15)',
+    hovertemplate: 'Trade %{x}<br>DD: %{y:.1f}%<extra></extra>',
+  }], { ..._btPlotLayout, title: { text: 'Drawdown', font: { size: 11, color: '#888' } },
+    yaxis: { ..._btPlotLayout.yaxis, title: 'Drawdown (%)', ticksuffix: '%' },
+    xaxis: { ..._btPlotLayout.xaxis, title: 'Trade #' },
+    shapes: [{ type: 'line', x0: 0, x1: dd.length, y0: -3, y1: -3, line: { color: '#e05252', dash: 'dash', width: 1 } }],
+  }, { responsive: true, displaylogo: false, displayModeBar: false });
+}
+
+function btRenderDailyPnl() {
+  const dp = _btResults.daily_pnl || [];
+  if (!dp.length) return;
+  Plotly.react('bt-daily-chart', [{
+    x: dp.map(d => d.date), y: dp.map(d => d.pnl),
+    type: 'bar', marker: { color: dp.map(d => d.pnl >= 0 ? '#4caf7d' : '#e05252') },
+    hovertemplate: '%{x}<br>P&L: $%{y:,.0f}<br>Trades: %{customdata}<extra></extra>',
+    customdata: dp.map(d => d.trades),
+  }], { ..._btPlotLayout, title: { text: 'Daily P&L', font: { size: 11, color: '#888' } },
+    yaxis: { ..._btPlotLayout.yaxis, title: 'P&L ($)', tickformat: '$,.0f' },
+    xaxis: { ..._btPlotLayout.xaxis, title: '' },
+  }, { responsive: true, displaylogo: false, displayModeBar: false });
+}
+
+function btRenderDistribution() {
+  const trades = _btResults.trades || [];
+  if (!trades.length) return;
+  const pnls = trades.map(t => t.pnl_dollars);
+  Plotly.react('bt-dist-chart', [{
+    x: pnls, type: 'histogram', nbinsx: 30,
+    marker: { color: 'rgba(91,156,246,0.6)', line: { color: '#5b9cf6', width: 1 } },
+  }], { ..._btPlotLayout, title: { text: 'P&L Distribution', font: { size: 11, color: '#888' } },
+    xaxis: { ..._btPlotLayout.xaxis, title: 'P&L per trade ($)', tickformat: '$,.0f' },
+    yaxis: { ..._btPlotLayout.yaxis, title: 'Frequency' },
+    shapes: [{ type: 'line', x0: 0, x1: 0, y0: 0, y1: 1, yref: 'paper', line: { color: '#888', dash: 'dash', width: 1 } }],
+  }, { responsive: true, displaylogo: false, displayModeBar: false });
+}
+
+function btSwitchTab(tab) {
+  document.querySelectorAll('.bt-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.bt-tab[onclick*="${tab}"]`).classList.add('active');
+  ['cells', 'trades', 'hourly'].forEach(t => {
+    document.getElementById(`bt-table-${t}`).style.display = t === tab ? 'block' : 'none';
+  });
+}
+
+function btRenderCellTable() {
+  const cells = _btResults.cell_performance || [];
+  let html = `<table class="bt-table"><thead><tr>
+    <th>Time Period</th><th>Risk</th><th>Setup</th><th>N</th><th>Trades</th><th>Wins</th><th>WR%</th><th>Total P&L</th><th>Avg P&L</th>
+  </tr></thead><tbody>`;
+  cells.forEach(c => {
+    const cls = c.total_pnl >= 0 ? 'win' : 'loss';
+    const setup = c.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    html += `<tr class="${cls}"><td>${c.time_period}</td><td>${c.risk_range}</td><td>${setup}</td><td>${c.n_value}R</td>
+      <td>${c.trades}</td><td>${c.wins}</td><td>${c.win_rate}%</td>
+      <td>$${c.total_pnl.toLocaleString()}</td><td>$${c.avg_pnl.toLocaleString()}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('bt-table-cells').innerHTML = html;
+}
+
+function btRenderTradeLog() {
+  const trades = _btResults.trades || [];
+  let html = `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
+    <th>#</th><th>Date</th><th>Time Period</th><th>Type</th><th>Setup</th><th>Side</th>
+    <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
+    <th>Exit</th><th>Reason</th><th>P&L pts</th><th>P&L $</th>
+  </tr></thead><tbody>`;
+  trades.forEach(t => {
+    const cls = t.exit_reason === 'TP' ? 'win' : (t.exit_reason === 'SL' ? 'loss' : 'eod');
+    const setup = t.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    html += `<tr class="${cls}"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
+      <td>${t.fvg_type}</td><td>${setup}</td><td>${t.side}</td>
+      <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
+      <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts}</td>
+      <td>${t.exit_price}</td><td>${t.exit_reason}</td>
+      <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td></tr>`;
+  });
+  html += '</tbody></table></div>';
+  document.getElementById('bt-table-trades').innerHTML = html;
+}
+
+function btRenderHourly() {
+  const h = _btResults.hourly_pnl || [];
+  let html = `<table class="bt-table"><thead><tr>
+    <th>Time Period</th><th>Trades</th><th>Wins</th><th>WR%</th><th>Total P&L</th>
+  </tr></thead><tbody>`;
+  h.forEach(r => {
+    const cls = r.pnl >= 0 ? 'win' : 'loss';
+    html += `<tr class="${cls}"><td>${r.time_period}</td><td>${r.trades}</td>
+      <td>${r.wins}</td><td>${r.win_rate}%</td><td>$${r.pnl.toLocaleString()}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('bt-table-hourly').innerHTML = html;
+}
+
+init();
+btInit();
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# Data (too large for git)
+logic/databento_data/
+logic/databento_cache/
+logic/fvg_cache/
+logic/csv/
+logic/charts/
+charts/
+csv/
+fvg_cache/
+
+# Bot runtime
+bot/data/
+bot/bot_state/
+bot/logs/
+bot/backtest/results/
+*.db
+
+# Heatmap data (generated)
+logic/heatmap_data/
+logic/rr_data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

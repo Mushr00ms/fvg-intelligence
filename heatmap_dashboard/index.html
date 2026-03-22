@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FVG Heatmap Analysis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a0a; --bg1: #111111; --bg2: #1a1a1a; --bg3: #222222;
+    --amber: #f5a623; --amber-dim: #c4841c;
+    --green: #4caf7d; --red: #e05252; --blue: #5b9cf6;
+    --text: #e8e8e8; --text-dim: #888; --text-dimmer: #555;
+    --border: #2a2a2a; --border-bright: #3a3a3a;
+    --mono: 'IBM Plex Mono', monospace;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; }
+
+  .shell { display: grid; grid-template-rows: 38px 32px 1fr 28px; height: 100vh; overflow: hidden; }
+
+  /* Topbar */
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg1); border-bottom: 1px solid var(--border-bright);
+    padding: 0 14px; flex-shrink: 0;
+  }
+  .logo { color: var(--amber); font-weight: 600; font-size: 13px; letter-spacing: .05em; }
+  .logo span { color: var(--text-dim); font-weight: 300; }
+  .topbar-spacer { flex: 1; }
+  .topbar-tag { font-size: 10px; color: var(--text-dim); border: 1px solid var(--border-bright); padding: 1px 6px; border-radius: 2px; }
+
+  /* Tab bar */
+  .tabbar {
+    display: flex; align-items: center;
+    background: var(--bg1); border-bottom: 1px solid var(--border);
+    padding: 0 8px; gap: 4px; overflow: hidden; flex-shrink: 0;
+  }
+  .tabs-list {
+    display: flex; align-items: stretch; gap: 0; overflow-x: auto; flex: 1;
+    scrollbar-width: none;
+  }
+  .tabs-list::-webkit-scrollbar { display: none; }
+  .tab {
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 10px; height: 31px; cursor: pointer;
+    font-size: 10px; color: var(--text-dim);
+    border-top: 2px solid transparent;
+    border-right: 1px solid var(--border);
+    white-space: nowrap; user-select: none;
+    transition: color .15s;
+    min-width: 0;
+  }
+  .tab:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .tab.active { color: var(--amber); border-top-color: var(--amber); background: var(--bg); }
+  .tab-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+  .tab-close {
+    background: none; border: none; color: var(--text-dimmer);
+    cursor: pointer; font-size: 13px; line-height: 1; padding: 0 1px;
+    opacity: 0; flex-shrink: 0;
+  }
+  .tab:hover .tab-close { opacity: 1; }
+  .tab-close:hover { color: var(--red); }
+  .tab-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+  .tabbar-actions {
+    display: flex; align-items: center; gap: 5px;
+    padding-left: 8px; border-left: 1px solid var(--border); flex-shrink: 0;
+  }
+  .tab-add {
+    background: none; border: 1px solid var(--border-bright);
+    color: var(--text-dim); cursor: pointer; font-size: 15px; line-height: 1;
+    width: 22px; height: 22px; border-radius: 2px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tab-add:hover { color: var(--amber); border-color: var(--amber-dim); }
+  .split-btn {
+    background: none; border: 1px solid var(--border-bright);
+    color: var(--text-dim); cursor: pointer; font-size: 10px;
+    height: 22px; padding: 0 7px; border-radius: 2px;
+    font-family: var(--mono); letter-spacing: .03em;
+  }
+  .split-btn:hover { color: var(--amber); border-color: var(--amber-dim); }
+  .split-btn.active { color: var(--amber); border-color: var(--amber); background: rgba(245,166,35,.08); }
+
+  /* Content */
+  .content { display: grid; grid-template-columns: 224px 1fr; overflow: hidden; }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--bg1); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 10px 9px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .sidebar::-webkit-scrollbar { width: 3px; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+  .sec-label {
+    font-size: 9px; letter-spacing: .1em; font-weight: 600;
+    color: var(--text-dimmer); text-transform: uppercase;
+    padding-bottom: 4px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+  .field label { font-size: 9px; color: var(--text-dim); letter-spacing: .06em; }
+
+  select {
+    background: var(--bg2); color: var(--text);
+    border: 1px solid var(--border-bright); border-radius: 2px;
+    font-family: var(--mono); font-size: 11px;
+    padding: 4px 6px; width: 100%; outline: none;
+    appearance: none; -webkit-appearance: none;
+    transition: border-color .15s;
+  }
+  select:focus { border-color: var(--amber-dim); }
+  select:disabled { opacity: .4; cursor: not-allowed; }
+  select option { background: var(--bg2); }
+
+  /* Match badge */
+  .match-badge {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10px; padding: 5px 7px; border-radius: 2px;
+    border: 1px solid var(--border-bright); margin-bottom: 4px;
+    min-height: 26px; min-width: 0;
+  }
+  .match-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .match-badge.none    { color: var(--red);   border-color: #3a1515; background: #1a0a0a; }
+  .match-badge.one     { color: var(--green); border-color: #1a3a25; background: #0a1a0f; }
+  .match-badge.many    { color: var(--amber); border-color: #3a2a10; background: #1a1205; }
+  .match-badge.pending { color: var(--text-dim); }
+  .match-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .none .match-dot  { background: var(--red); }
+  .one  .match-dot  { background: var(--green); }
+  .many .match-dot  { background: var(--amber); }
+
+  .btn {
+    background: var(--amber); color: #000;
+    border: none; cursor: pointer;
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 6px 10px; border-radius: 2px; letter-spacing: .04em;
+    width: 100%; transition: background .15s;
+  }
+  .btn:hover:not(:disabled) { background: #f0b84e; }
+  .btn:active:not(:disabled) { background: var(--amber-dim); }
+  .btn:disabled { opacity: .3; cursor: not-allowed; }
+
+  .btn.secondary {
+    background: var(--bg3); color: var(--text);
+    border: 1px solid var(--border-bright);
+  }
+  .btn.secondary:hover:not(:disabled) { border-color: var(--amber-dim); color: var(--amber); }
+
+  .btn.generate {
+    background: #1a2a3a; color: var(--blue);
+    border: 1px solid #2a3a4a;
+  }
+  .btn.generate:hover:not(:disabled) { background: #243548; border-color: var(--blue); }
+  .btn.generate.running {
+    background: #1a2a1a; color: var(--green); border-color: #2a4a2a;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+  .btn-row { display: flex; gap: 5px; }
+  .btn-row .btn { flex: 1; }
+
+  .cs-row { display: flex; flex-direction: column; gap: 3px; margin-bottom: 3px; }
+  .cs-row .panel-tag { font-size: 9px; color: var(--text-dimmer); }
+
+  /* Overview stats */
+  .stat-box {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 6px 8px; border-radius: 2px;
+    background: var(--bg2); border: 1px solid var(--border);
+  }
+  .os-tf-block { padding: 4px 0; }
+  .os-tf-block + .os-tf-block { border-top: 1px solid var(--border); }
+  .os-tf-label { font-size: 8.5px; color: var(--amber); font-weight: 600; letter-spacing: .08em; margin-bottom: 2px; }
+  .os-row { display: flex; justify-content: space-between; align-items: center; }
+  .stat-k { font-size: 9px; color: var(--text-dim); letter-spacing: .04em; }
+  .stat-v { font-size: 10px; font-weight: 500; color: var(--text); }
+
+  /* Chart area */
+  .chart-area { background: var(--bg); overflow: hidden; display: flex; flex-direction: column; }
+
+  /* Charts wrap (flex:1, holds pane-solo or pane-split) */
+  .charts-wrap { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+
+  /* Solo pane */
+  .pane-solo { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+  #heatmap-solo { flex: 1; min-height: 0; }
+
+  /* Split pane */
+  .pane-split { flex: 1; display: flex; overflow: hidden; }
+  .split-half {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    position: relative; border-top: 2px solid transparent;
+    transition: border-top-color .15s;
+  }
+  .split-half.focused { border-top-color: var(--amber); }
+  .half-hdr {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 8px; background: var(--bg1); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .half-label { font-size: 9px; color: var(--text-dimmer); letter-spacing: .08em; flex-shrink: 0; }
+  .half-hdr select { flex: 1; font-size: 10px; padding: 2px 4px; height: 22px; }
+  #heatmap-left, #heatmap-right { flex: 1; min-height: 0; }
+  .split-divider { width: 3px; background: var(--border-bright); flex-shrink: 0; }
+
+  /* Terminal log panel */
+  .log-panel {
+    flex-shrink: 0;
+    background: #080808; border-top: 1px solid var(--border-bright);
+    display: flex; flex-direction: column;
+    height: 0; overflow: hidden;
+    transition: height .25s ease;
+  }
+  .log-panel.open { height: 200px; }
+  .log-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px; background: var(--bg1); border-bottom: 1px solid var(--border);
+    flex-shrink: 0; font-size: 10px;
+  }
+  .log-header .log-title { color: var(--text-dim); flex: 1; }
+  .log-close { background: none; border: none; color: var(--text-dimmer); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+  .log-close:hover { color: var(--red); }
+  .log-body {
+    flex: 1; overflow-y: auto; padding: 6px 10px;
+    font-size: 10px; line-height: 1.5; color: #aaa;
+  }
+  .log-body::-webkit-scrollbar { width: 3px; }
+  .log-body::-webkit-scrollbar-thumb { background: var(--border-bright); }
+  .log-line.info  { color: #ccc; }
+  .log-line.warn  { color: var(--amber); }
+  .log-line.error { color: var(--red); }
+  .log-line.ok    { color: var(--green); }
+
+  /* Empty state */
+  .empty-state {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; color: var(--text-dimmer); pointer-events: none;
+  }
+  .empty-state .icon { font-size: 32px; opacity: .4; }
+  .empty-state p { font-size: 11px; }
+
+  /* Fill-missing dialog */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,.75); align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--bg1); border: 1px solid var(--border-bright);
+    border-radius: 3px; width: 320px; max-width: 95vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,.6);
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+  }
+  .modal-title { font-size: 11px; font-weight: 600; color: var(--blue); letter-spacing: .06em; }
+  .modal-close { background: none; border: none; color: var(--text-dimmer); cursor: pointer; font-size: 16px; line-height: 1; }
+  .modal-close:hover { color: var(--red); }
+  .modal-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .modal-field { display: flex; flex-direction: column; gap: 3px; }
+  .modal-field label { font-size: 9px; color: var(--amber); letter-spacing: .08em; font-weight: 600; }
+  .modal-field input, .modal-field select {
+    background: var(--bg3); color: var(--text);
+    border: 1px solid var(--blue); border-radius: 2px;
+    font-family: var(--mono); font-size: 11px;
+    padding: 5px 7px; width: 100%; outline: none;
+  }
+  .modal-field input:focus, .modal-field select:focus { border-color: var(--amber-dim); }
+  .modal-error { font-size: 10px; color: var(--red); padding: 4px 12px; display: none; }
+  .modal-error.visible { display: block; }
+  .modal-footer { padding: 8px 12px 12px; display: flex; gap: 6px; }
+  .modal-footer .btn { flex: 1; }
+
+  /* Statusbar */
+  .statusbar {
+    background: var(--bg1); border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 12px; font-size: 10px; color: var(--text-dim);
+  }
+  .pill { padding: 0 6px; border-radius: 2px; font-size: 9px; font-weight: 500; }
+  .pill-ok   { background: #1a3a25; color: var(--green); }
+  .pill-warn { background: #3a2a10; color: var(--amber); }
+  .pill-err  { background: #3a1515; color: var(--red); }
+  .pill-run  { background: #1a2a3a; color: var(--blue); }
+  .statusbar-spacer { flex: 1; }
+  .stat-pair { display: flex; gap: 4px; }
+  .stat-pair .k { color: var(--text-dimmer); }
+
+  /* Sticky cell tooltip */
+  #sticky-tip {
+    display: none; position: fixed; z-index: 200;
+    background: #1a1a1a; border: 1px solid var(--amber);
+    border-radius: 3px; padding: 10px 28px 10px 12px;
+    font-family: var(--mono); font-size: 10.5px; color: #e8e8e8;
+    line-height: 1.65; max-width: 296px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.8);
+    pointer-events: auto;
+  }
+  #sticky-tip.visible { display: block; }
+  #sticky-tip-pin-hdr {
+    font-size: 8.5px; color: var(--amber); letter-spacing: .12em;
+    font-weight: 600; margin-bottom: 5px; padding-bottom: 4px;
+    border-bottom: 1px solid rgba(245,166,35,.3);
+  }
+  #sticky-tip-close {
+    position: absolute; top: 6px; right: 8px;
+    background: none; border: none; color: var(--text-dimmer);
+    cursor: pointer; font-size: 13px; line-height: 1; padding: 0;
+  }
+  #sticky-tip-close:hover { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="logo">◈ FVG HEATMAP <span>ANALYSIS</span></div>
+    <span class="topbar-tag">LIVE</span>
+    <div class="topbar-spacer"></div>
+    <span style="color:var(--text-dim);font-size:10px" id="manifest-count">Loading...</span>
+  </div>
+
+  <!-- Tab bar -->
+  <div class="tabbar">
+    <div class="tabs-list" id="tabs-list"></div>
+    <div class="tabbar-actions">
+      <button class="tab-add" id="tab-add-btn" title="New workspace">+</button>
+      <button class="split-btn" id="split-btn">⊞ SPLIT</button>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+
+      <div>
+        <div class="sec-label">Parameters</div>
+        <div class="field"><label>TICKER</label>
+          <select id="p-ticker"><option value="">—</option></select></div>
+        <div class="field"><label>TIMEFRAME</label>
+          <select id="p-tf"><option value="">—</option></select></div>
+        <div class="field"><label>DATA PERIOD</label>
+          <select id="p-period"><option value="">—</option></select></div>
+        <div class="field"><label>SESSION (min)</label>
+          <select id="p-session"><option value="">—</option></select></div>
+        <div class="field"><label>SIZE METHOD</label>
+          <select id="p-method"><option value="">—</option></select></div>
+        <div class="field"><label>SIZE START</label>
+          <select id="p-start"><option value="">—</option></select></div>
+        <div class="field"><label>SIZE END</label>
+          <select id="p-end"><option value="">—</option></select></div>
+        <div class="field"><label>MIN EXPANSION</label>
+          <select id="p-exp"><option value="">—</option></select></div>
+        <div class="field"><label>SIZE STEP</label>
+          <select id="p-step"><option value="">—</option></select></div>
+      </div>
+
+      <div>
+        <div id="match-badge" class="match-badge pending">
+          <div class="match-dot"></div>
+          <span id="match-text">Set parameters above</span>
+        </div>
+        <div class="btn-row" style="margin-bottom:4px">
+          <button class="btn" id="load-btn" disabled>▶ LOAD</button>
+          <button class="btn generate" id="generate-btn" disabled>⚡ GENERATE</button>
+        </div>
+        <button class="btn secondary" id="refresh-btn">↺ REFRESH</button>
+      </div>
+
+      <div>
+        <div class="sec-label">Display</div>
+        <button class="btn secondary" id="toggle-labels-btn">TOGGLE CELL LABELS</button>
+      </div>
+
+      <div>
+        <div class="sec-label">Colorscales</div>
+        <div class="cs-row">
+          <div class="panel-tag">① INVALIDATION RATE</div>
+          <select id="cs1">
+            <option value="OliveGreen" selected>OliveGreen</option>
+            <option value="RdYlGn_r">RdYlGn_r</option>
+            <option value="RdYlGn">RdYlGn</option><option value="Hot">Hot</option>
+            <option value="Reds">Reds</option><option value="Blues">Blues</option>
+            <option value="Viridis">Viridis</option><option value="Plasma">Plasma</option>
+            <option value="YlGnBu">YlGnBu</option><option value="YlOrRd">YlOrRd</option>
+          </select>
+        </div>
+        <div class="cs-row">
+          <div class="panel-tag">② AVG EXPANSION SIZE</div>
+          <select id="cs2">
+            <option value="YlGnBu" selected>YlGnBu</option>
+            <option value="Viridis">Viridis</option><option value="Blues">Blues</option>
+            <option value="Greens">Greens</option><option value="RdYlGn">RdYlGn</option>
+            <option value="Plasma">Plasma</option><option value="YlOrRd">YlOrRd</option>
+          </select>
+        </div>
+        <div class="cs-row">
+          <div class="panel-tag">③ P75 MITIGATION TIME</div>
+          <select id="cs3">
+            <option value="YlOrRd" selected>YlOrRd</option>
+            <option value="Hot">Hot</option><option value="Reds">Reds</option>
+            <option value="Oranges">Oranges</option><option value="Viridis">Viridis</option>
+            <option value="Plasma">Plasma</option>
+          </select>
+        </div>
+        <div class="cs-row">
+          <div class="panel-tag">④ P75 TIME TO INVALID</div>
+          <select id="cs4">
+            <option value="RdYlGn" selected>RdYlGn</option>
+            <option value="Viridis">Viridis</option><option value="Plasma">Plasma</option>
+            <option value="YlGnBu">YlGnBu</option><option value="Greens">Greens</option>
+            <option value="Blues">Blues</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">Overview Stats</div>
+        <div class="stat-box" id="overview-stats">
+          <div class="os-tf-block">
+            <div class="os-tf-label">3MIN FVG</div>
+            <div class="os-row"><span class="stat-k">Total</span><span class="stat-v" id="os-3m-total">—</span></div>
+            <div class="os-row"><span class="stat-k">Mid Crossed</span><span class="stat-v" id="os-3m-mid">—</span></div>
+            <div class="os-row"><span class="stat-k">Avg Mid Cross</span><span class="stat-v" id="os-3m-avgmid">—</span></div>
+          </div>
+          <div class="os-tf-block">
+            <div class="os-tf-label">5MIN FVG</div>
+            <div class="os-row"><span class="stat-k">Total</span><span class="stat-v" id="os-5m-total">—</span></div>
+            <div class="os-row"><span class="stat-k">Mid Crossed</span><span class="stat-v" id="os-5m-mid">—</span></div>
+            <div class="os-row"><span class="stat-k">Avg Mid Cross</span><span class="stat-v" id="os-5m-avgmid">—</span></div>
+          </div>
+          <div class="os-tf-block">
+            <div class="os-tf-label">15MIN FVG</div>
+            <div class="os-row"><span class="stat-k">Total</span><span class="stat-v" id="os-15m-total">—</span></div>
+            <div class="os-row"><span class="stat-k">Mid Crossed</span><span class="stat-v" id="os-15m-mid">—</span></div>
+            <div class="os-row"><span class="stat-k">Avg Mid Cross</span><span class="stat-v" id="os-15m-avgmid">—</span></div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /sidebar -->
+
+    <!-- Chart area -->
+    <div class="chart-area">
+      <div class="charts-wrap">
+
+        <!-- Solo mode -->
+        <div class="pane-solo" id="pane-solo">
+          <div id="heatmap-solo"></div>
+          <div class="empty-state" id="empty-solo">
+            <div class="icon">▦</div>
+            <p>Select parameters, then LOAD or GENERATE</p>
+            <p style="font-size:10px;color:var(--text-dimmer)">GENERATE runs python logic/main.py with your params</p>
+          </div>
+        </div>
+
+        <!-- Split mode (hidden by default) -->
+        <div class="pane-split" id="pane-split" style="display:none">
+          <div class="split-half focused" id="half-left">
+            <div class="half-hdr">
+              <span class="half-label">L</span>
+              <select id="sel-left"></select>
+            </div>
+            <div id="heatmap-left"></div>
+            <div class="empty-state" id="empty-left">
+              <div class="icon">▦</div><p>No data loaded</p>
+            </div>
+          </div>
+          <div class="split-divider"></div>
+          <div class="split-half" id="half-right">
+            <div class="half-hdr">
+              <span class="half-label">R</span>
+              <select id="sel-right"></select>
+            </div>
+            <div id="heatmap-right"></div>
+            <div class="empty-state" id="empty-right">
+              <div class="icon">▦</div><p>No data loaded</p>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /charts-wrap -->
+
+      <!-- Terminal log panel -->
+      <div class="log-panel" id="log-panel">
+        <div class="log-header">
+          <span class="log-title">⚡ GENERATION LOG</span>
+          <span id="log-status" class="log-status" style="color:var(--blue);font-size:10px">running…</span>
+          <button class="log-close" id="log-close-btn" title="Close">✕</button>
+        </div>
+        <div class="log-body" id="log-body"></div>
+      </div>
+    </div><!-- /chart-area -->
+
+  </div><!-- /content -->
+
+  <!-- Statusbar -->
+  <div class="statusbar">
+    <span class="pill pill-ok" id="status-pill">READY</span>
+    <span id="status-msg">No dataset loaded</span>
+    <div class="statusbar-spacer"></div>
+    <div class="stat-pair"><span class="k">datasets:</span><span id="stat-datasets">—</span></div>
+    <div class="stat-pair"><span class="k">cells:</span><span id="stat-cells">—</span></div>
+    <div class="stat-pair"><span class="k">periods:</span><span id="stat-periods">—</span></div>
+    <div class="stat-pair"><span class="k">sizes:</span><span id="stat-sizes">—</span></div>
+  </div>
+</div><!-- /shell -->
+
+<!-- Fill-missing parameters dialog -->
+<div class="modal-overlay" id="fill-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title">⚡ FILL MISSING PARAMETERS</span>
+      <button class="modal-close" id="modal-close-btn">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div id="modal-error" class="modal-error"></div>
+    <div class="modal-footer">
+      <button class="btn secondary" id="modal-cancel-btn">CANCEL</button>
+      <button class="btn generate" id="modal-run-btn">▶ RUN</button>
+    </div>
+  </div>
+</div>
+
+<div id="sticky-tip">
+  <div id="sticky-tip-pin-hdr">◈ PINNED CELL</div>
+  <div id="sticky-tip-content"></div>
+  <button id="sticky-tip-close" title="Click cell again or press Esc to dismiss">✕</button>
+</div>
+
+<script>
+"use strict";
+const API = 'http://localhost:8765';
+
+// ── Panel definitions ──────────────────────────────────────────────────────
+const PANELS = [
+  { title:'INVALIDATION RATE (%)',    col:'invalidation_rate',    fmt: v => v!=null ? v.toFixed(1)+'%'   : 'N/A' },
+  { title:'AVG EXPANSION (pts)',      col:'avg_expansion_size',   fmt: v => v!=null ? v.toFixed(1)       : 'N/A' },
+  { title:'P75 MITIGATION TIME (m)', col:'p75_mitigation_time',  fmt: v => v!=null ? v.toFixed(0)+'m'   : 'N/A' },
+  { title:'P75 TIME TO INVALID (m)',  col:'p75_time_to_invalidation', fmt: v => v!=null ? v.toFixed(0)+'m' : 'N/A' },
+];
+
+// ── Param definitions ──────────────────────────────────────────────────────
+const PARAM_KEYS = [
+  { id:'p-ticker',  field:'ticker',                 label:'TICKER',        inputType:'select', options:['NQ','ES'] },
+  { id:'p-tf',      field:'timeframe_label',         label:'TIMEFRAME',     inputType:'select', options:['3min','5min','15min'] },
+  { id:'p-period',  field:'data_period',             label:'DATA PERIOD',   inputType:'text',   placeholder:'e.g. 5y, 15y, 2y' },
+  { id:'p-session', field:'session_period_minutes',  label:'SESSION (min)', inputType:'number', placeholder:'e.g. 30 or 60', min:1 },
+  { id:'p-method',  field:'size_filtering_method',   label:'SIZE METHOD',   inputType:'select', options:['bins','cumulative'] },
+  { id:'p-start',   field:'size_range_start',        label:'SIZE START',    inputType:'number', placeholder:'e.g. 10.0',  step:0.25 },
+  { id:'p-end',     field:'size_range_end',          label:'SIZE END',      inputType:'number', placeholder:'e.g. 40.0',  step:0.25 },
+  { id:'p-exp',     field:'min_expansion_size',      label:'MIN EXPANSION', inputType:'number', placeholder:'e.g. 40',    step:0.5 },
+  { id:'p-step',    field:'size_range_step',         label:'SIZE STEP',     inputType:'number', placeholder:'e.g. 2.5',   step:0.25 },
+];
+
+// ── Default colorscales ────────────────────────────────────────────────────
+const DEFAULT_CS = { cs1:'OliveGreen', cs2:'YlGnBu', cs3:'YlOrRd', cs4:'RdYlGn' };
+
+// ── Workspace state ────────────────────────────────────────────────────────
+let _wsCounter  = 0;
+let _ws         = {};    // id → { id, name, params, colorscales, labelsVisible, data, matchedId }
+let _wsOrder    = [];
+let _activeId   = null;
+let _splitMode  = false;
+let _splitLeft  = null;
+let _splitRight = null;
+
+// Legacy globals kept in sync with active workspace
+let _manifest   = null;
+let _currentEvt = null;
+
+// ── Sticky cell pin state ─────────────────────────────────────────────────
+const _pinnedCells           = {};   // divId → {xi, yi} | null
+const _clickHandlersAttached = new Set();
+let   _lastMousePos          = { x: 0, y: 0 };
+document.addEventListener('mousemove', e => { _lastMousePos = { x: e.clientX, y: e.clientY }; });
+
+// ── Workspace CRUD ─────────────────────────────────────────────────────────
+function newWorkspace(name) {
+  _wsCounter++;
+  const id = `ws-${_wsCounter}`;
+  _ws[id] = {
+    id, name: name || `Workspace ${_wsCounter}`,
+    params: {}, colorscales: { ...DEFAULT_CS },
+    labelsVisible: true, data: null, matchedId: null,
+  };
+  _wsOrder.push(id);
+  return id;
+}
+
+function removeWorkspace(wsId) {
+  if (_wsOrder.length <= 1) return;
+  const idx = _wsOrder.indexOf(wsId);
+  if (idx === -1) return;
+  _wsOrder.splice(idx, 1);
+  delete _ws[wsId];
+
+  if (_splitLeft  === wsId) _splitLeft  = _wsOrder[0];
+  if (_splitRight === wsId) _splitRight = _wsOrder[Math.min(1, _wsOrder.length - 1)];
+
+  if (_activeId === wsId) {
+    _activeId = _wsOrder[Math.max(0, idx - 1)];
+    loadStateIntoDom(_activeId);
+  }
+
+  if (_splitMode) {
+    renderWorkspace(_splitLeft,  'heatmap-left');
+    renderWorkspace(_splitRight, 'heatmap-right');
+    updateSplitSelectors();
+    markActivePaneFocus();
+  } else {
+    renderWorkspace(_activeId, 'heatmap-solo');
+  }
+  renderTabBar();
+  persistAll();
+}
+
+// ── Workspace persistence ──────────────────────────────────────────────────
+const _WS_KEY = 'fvg_workspaces';
+
+function persistAll() {
+  const save = {
+    v: 2, activeId: _activeId,
+    splitMode: _splitMode, splitLeft: _splitLeft, splitRight: _splitRight,
+    wsOrder: _wsOrder,
+    workspaces: _wsOrder.map(id => {
+      const w = _ws[id];
+      return { id: w.id, name: w.name, params: w.params, colorscales: w.colorscales, labelsVisible: w.labelsVisible, matchedId: w.matchedId };
+    }),
+  };
+  localStorage.setItem(_WS_KEY, JSON.stringify(save));
+}
+
+function restoreAll() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(_WS_KEY) || 'null'); } catch { return false; }
+  if (!saved || saved.v !== 2 || !saved.workspaces || !saved.workspaces.length) return false;
+
+  _ws = {}; _wsOrder = [];
+  saved.workspaces.forEach(w => {
+    _ws[w.id] = { ...w, data: null };
+    _wsOrder.push(w.id);
+    const n = parseInt(w.id.replace('ws-', '')) || 0;
+    if (n >= _wsCounter) _wsCounter = n;
+  });
+  _activeId   = saved.activeId   && _ws[saved.activeId]   ? saved.activeId   : _wsOrder[0];
+  _splitLeft  = saved.splitLeft  && _ws[saved.splitLeft]  ? saved.splitLeft  : null;
+  _splitRight = saved.splitRight && _ws[saved.splitRight] ? saved.splitRight : null;
+  _splitMode  = saved.splitMode && !!_splitLeft && !!_splitRight;
+  return true;
+}
+
+// ── State save/load from DOM ───────────────────────────────────────────────
+function saveCurrentState() {
+  if (!_activeId || !_ws[_activeId]) return;
+  const w = _ws[_activeId];
+  w.params = {};
+  PARAM_KEYS.forEach(({ id, field }) => {
+    w.params[field] = document.getElementById(id).value || null;
+  });
+  ['cs1','cs2','cs3','cs4'].forEach(id => {
+    w.colorscales[id] = document.getElementById(id).value;
+  });
+  w.labelsVisible = document.getElementById('toggle-labels-btn').dataset.visible !== 'false';
+}
+
+function loadStateIntoDom(wsId) {
+  const w = _ws[wsId];
+  if (!w) return;
+
+  PARAM_KEYS.forEach(({ id, field }) => {
+    const sel = document.getElementById(id);
+    const v   = w.params[field];
+    if (v && ![...sel.options].some(o => o.value === v)) {
+      const opt = document.createElement('option');
+      opt.value = v; opt.textContent = v;
+      sel.appendChild(opt);
+    }
+    sel.value = v || '';
+  });
+
+  ['cs1','cs2','cs3','cs4'].forEach(id => {
+    const el = document.getElementById(id);
+    if (w.colorscales[id]) el.value = w.colorscales[id];
+  });
+
+  document.getElementById('toggle-labels-btn').dataset.visible = String(w.labelsVisible);
+  updateMatch();
+}
+
+// ── Switch active workspace ────────────────────────────────────────────────
+function setActiveWorkspace(wsId) {
+  if (!_ws[wsId]) return;
+  if (_activeId) saveCurrentState();
+  _activeId = wsId;
+  loadStateIntoDom(wsId);
+
+  if (_splitMode) {
+    markActivePaneFocus();
+  } else {
+    renderWorkspace(wsId, 'heatmap-solo');
+  }
+  renderTabBar();
+  persistAll();
+}
+
+// ── Tab bar ────────────────────────────────────────────────────────────────
+function renderTabBar() {
+  const list = document.getElementById('tabs-list');
+  list.innerHTML = '';
+  _wsOrder.forEach(wsId => {
+    const w   = _ws[wsId];
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (wsId === _activeId ? ' active' : '');
+    tab.dataset.wsId = wsId;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'tab-name';
+    nameSpan.textContent = w.name;
+    nameSpan.title = 'Double-click to rename';
+    nameSpan.addEventListener('dblclick', e => { e.stopPropagation(); startRename(wsId, nameSpan); });
+    tab.appendChild(nameSpan);
+
+    if (w.data) {
+      const dot = document.createElement('span');
+      dot.className = 'tab-dot';
+      tab.appendChild(dot);
+    }
+
+    if (_wsOrder.length > 1) {
+      const cls = document.createElement('button');
+      cls.className = 'tab-close'; cls.textContent = '×'; cls.title = 'Close';
+      cls.addEventListener('click', e => { e.stopPropagation(); removeWorkspace(wsId); });
+      tab.appendChild(cls);
+    }
+
+    tab.addEventListener('click', () => setActiveWorkspace(wsId));
+    list.appendChild(tab);
+  });
+
+  document.getElementById('split-btn').classList.toggle('active', _splitMode);
+  document.getElementById('tab-add-btn').style.opacity = _wsOrder.length >= 6 ? '.3' : '1';
+  document.getElementById('tab-add-btn').disabled = _wsOrder.length >= 6;
+}
+
+function startRename(wsId, nameSpan) {
+  const old = _ws[wsId].name;
+  const inp = document.createElement('input');
+  inp.type = 'text'; inp.value = old;
+  inp.style.cssText = 'background:var(--bg3);color:var(--text);border:1px solid var(--amber-dim);font:inherit;width:100px;padding:1px 4px;border-radius:2px;outline:none;';
+  nameSpan.replaceWith(inp);
+  inp.select();
+  const commit = () => {
+    const name = inp.value.trim() || old;
+    _ws[wsId].name = name;
+    const ns = document.createElement('span');
+    ns.className = 'tab-name'; ns.textContent = name; ns.title = 'Double-click to rename';
+    ns.addEventListener('dblclick', e => { e.stopPropagation(); startRename(wsId, ns); });
+    inp.replaceWith(ns);
+    if (_splitMode) updateSplitSelectors();
+    persistAll();
+  };
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') inp.blur();
+    if (e.key === 'Escape') { _ws[wsId].name = old; inp.blur(); }
+  });
+}
+
+// ── Split view ─────────────────────────────────────────────────────────────
+function setSplitMode(enabled) {
+  _splitMode = enabled;
+  document.getElementById('pane-solo').style.display  = enabled ? 'none' : 'flex';
+  document.getElementById('pane-split').style.display = enabled ? 'flex' : 'none';
+
+  if (enabled) {
+    if (!_splitLeft)  _splitLeft  = _activeId;
+    if (!_splitRight || _splitRight === _splitLeft) {
+      const other = _wsOrder.find(id => id !== _splitLeft);
+      _splitRight = other || (() => { const id = newWorkspace(); renderTabBar(); return id; })();
+    }
+    updateSplitSelectors();
+    renderWorkspace(_splitLeft,  'heatmap-left');
+    renderWorkspace(_splitRight, 'heatmap-right');
+    markActivePaneFocus();
+  } else {
+    renderWorkspace(_activeId, 'heatmap-solo');
+  }
+  renderTabBar();
+  persistAll();
+}
+
+function markActivePaneFocus() {
+  document.getElementById('half-left').classList.toggle('focused',  _activeId === _splitLeft);
+  document.getElementById('half-right').classList.toggle('focused', _activeId === _splitRight);
+}
+
+function updateSplitSelectors() {
+  ['left', 'right'].forEach(side => {
+    const sel = document.getElementById(`sel-${side}`);
+    sel.innerHTML = '';
+    _wsOrder.forEach(id => {
+      const opt = document.createElement('option');
+      opt.value = id; opt.textContent = _ws[id].name;
+      sel.appendChild(opt);
+    });
+    sel.value = side === 'left' ? _splitLeft : _splitRight;
+  });
+}
+
+function getActiveDivId() {
+  if (!_splitMode) return 'heatmap-solo';
+  if (_activeId === _splitLeft)  return 'heatmap-left';
+  if (_activeId === _splitRight) return 'heatmap-right';
+  return 'heatmap-solo';
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function setStatus(msg, type='ok') {
+  document.getElementById('status-msg').textContent = msg;
+  const pill = document.getElementById('status-pill');
+  pill.className = 'pill pill-' + type;
+  pill.textContent = { ok:'READY', warn:'WARN', err:'ERR', run:'RUNNING' }[type] || 'READY';
+}
+
+function naturalSort(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function getParamValues() {
+  const v = {};
+  PARAM_KEYS.forEach(({ id, field }) => { v[field] = document.getElementById(id).value || null; });
+  return v;
+}
+
+function allParamsFilled() {
+  return PARAM_KEYS.every(({ id }) => document.getElementById(id).value !== '');
+}
+
+// ── Cascade ────────────────────────────────────────────────────────────────
+function repopulateDropdown(sel, values, keepVal) {
+  const prev = keepVal !== undefined ? keepVal : sel.value;
+  while (sel.options.length > 1) sel.remove(1);
+  values.forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = String(v); opt.textContent = String(v);
+    sel.appendChild(opt);
+  });
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function cascadeFrom(changedField) {
+  const idx = PARAM_KEYS.findIndex(k => k.field === changedField);
+  let ds = _manifest ? (_manifest.datasets || []) : [];
+  for (let i = 0; i <= idx; i++) {
+    const { id, field } = PARAM_KEYS[i];
+    const val = document.getElementById(id).value;
+    if (val) ds = ds.filter(d => String(d[field]) === val);
+  }
+  for (let i = idx + 1; i < PARAM_KEYS.length; i++) {
+    const { id, field } = PARAM_KEYS[i];
+    const sel    = document.getElementById(id);
+    const unique = [...new Set(ds.map(d => String(d[field])))].sort(naturalSort);
+    repopulateDropdown(sel, unique);
+    if (unique.length === 1) sel.value = unique[0];
+    sel.disabled = false;
+  }
+  updateMatch();
+  saveCurrentState();
+  persistAll();
+}
+
+// ── Match / button state ───────────────────────────────────────────────────
+function updateMatch() {
+  const values  = getParamValues();
+  const badge   = document.getElementById('match-badge');
+  const text    = document.getElementById('match-text');
+  const loadBtn = document.getElementById('load-btn');
+  const genBtn  = document.getElementById('generate-btn');
+
+  let ds = _manifest ? (_manifest.datasets || []) : [];
+  PARAM_KEYS.forEach(({ field }) => {
+    if (values[field] != null) ds = ds.filter(d => String(d[field]) === String(values[field]));
+  });
+
+  const nSet   = PARAM_KEYS.filter(({ field }) => values[field] != null).length;
+  const filled = allParamsFilled();
+  const isRunning = genBtn.classList.contains('running');
+
+  if (nSet === 0) {
+    badge.className = 'match-badge pending';
+    text.textContent = 'Set parameters above';
+    loadBtn.disabled = true;
+    if (_ws[_activeId]) _ws[_activeId].matchedId = null;
+  } else if (ds.length === 0) {
+    badge.className = 'match-badge none';
+    text.textContent = filled ? 'No match — click GENERATE' : 'No match — fill all params to generate';
+    loadBtn.disabled = true;
+    if (_ws[_activeId]) _ws[_activeId].matchedId = null;
+  } else if (ds.length === 1) {
+    badge.className = 'match-badge one';
+    text.textContent = ds[0].id;
+    text.title = ds[0].id;
+    loadBtn.disabled = false;
+    if (_ws[_activeId]) _ws[_activeId].matchedId = ds[0].id;
+  } else {
+    badge.className = 'match-badge many';
+    text.textContent = `${ds.length} matches — narrow down`;
+    loadBtn.disabled = true;
+    if (_ws[_activeId]) _ws[_activeId].matchedId = null;
+  }
+  genBtn.disabled = isRunning;
+}
+
+function getMatchedId() {
+  return _ws[_activeId] ? _ws[_activeId].matchedId : null;
+}
+
+// ── Manifest ───────────────────────────────────────────────────────────────
+async function fetchManifest() {
+  try {
+    const res = await fetch(`${API}/api/manifest`);
+    if (!res.ok) throw new Error(res.statusText);
+    _manifest = await res.json();
+    const n   = (_manifest.datasets || []).length;
+    document.getElementById('manifest-count').textContent = `${n} dataset${n===1?'':'s'}`;
+    document.getElementById('stat-datasets').textContent  = n;
+
+    PARAM_KEYS.forEach(({ id, field }) => {
+      const sel    = document.getElementById(id);
+      const unique = [...new Set((_manifest.datasets||[]).map(d=>String(d[field])))].sort(naturalSort);
+      repopulateDropdown(sel, unique, sel.value);
+    });
+    loadStateIntoDom(_activeId);
+    setStatus(`Manifest loaded — ${n} dataset${n===1?'':'s'} available`);
+    autoReloadWorkspaces();
+    updateOverviewStats();
+  } catch(e) {
+    document.getElementById('manifest-count').textContent = 'API offline';
+    setStatus('Cannot reach API at ' + API + ' — is heatmap_api.py running?', 'err');
+  }
+}
+
+// ── Auto-reload workspace data on page refresh ─────────────────────────────
+async function autoReloadWorkspaces() {
+  // Active workspace first so user sees it immediately, then the rest
+  const order = [_activeId, ..._wsOrder.filter(id => id !== _activeId)];
+  for (const wsId of order) {
+    const w = _ws[wsId];
+    if (!w || !w.matchedId || w.data) continue;
+    try {
+      const res = await fetch(`${API}/api/dataset/${encodeURIComponent(w.matchedId)}`);
+      if (!res.ok) { w.matchedId = null; continue; }
+      w.data = await res.json();
+      // Re-render into whichever pane currently shows this workspace
+      if (!_splitMode && wsId === _activeId) {
+        renderWorkspace(wsId, 'heatmap-solo');
+        setStatus(`Restored: ${w.matchedId}`);
+      } else if (_splitMode && wsId === _splitLeft) {
+        renderWorkspace(wsId, 'heatmap-left');
+      } else if (_splitMode && wsId === _splitRight) {
+        renderWorkspace(wsId, 'heatmap-right');
+      }
+      renderTabBar();
+    } catch { w.matchedId = null; }
+  }
+}
+
+// ── Dataset load ───────────────────────────────────────────────────────────
+async function loadDataset(id) {
+  setStatus(`Loading ${id}…`);
+  try {
+    const res  = await fetch(`${API}/api/dataset/${encodeURIComponent(id)}`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    unpinCell(getActiveDivId());
+    _ws[_activeId].data      = data;
+    _ws[_activeId].matchedId = id;
+    renderWorkspace(_activeId, getActiveDivId());
+    renderTabBar();
+    setStatus(`Loaded: ${id}`);
+  } catch(e) {
+    setStatus(`Error: ${e.message}`, 'err');
+  }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+const CS_MAP = {
+  'OliveGreen': [[0,[42,85,18]],[.35,[88,130,42]],[.65,[152,178,95]],[1,[234,237,212]]],
+  'RdYlGn':   [[0,[215,25,28]],[.5,[254,224,139]],[1,[26,150,65]]],
+  'RdYlGn_r': [[0,[26,150,65]],[.5,[254,224,139]],[1,[215,25,28]]],
+  'YlGnBu':   [[0,[255,255,204]],[.5,[65,182,196]],[1,[37,52,148]]],
+  'YlOrRd':   [[0,[255,255,204]],[.5,[253,141,60]],[1,[189,0,38]]],
+  'Viridis':  [[0,[68,1,84]],[.25,[59,82,139]],[.5,[33,145,140]],[.75,[94,201,98]],[1,[253,231,37]]],
+  'Plasma':   [[0,[13,8,135]],[.5,[239,72,134]],[1,[240,249,33]]],
+  'Blues':    [[0,[247,251,255]],[.5,[107,174,214]],[1,[8,48,107]]],
+  'Greens':   [[0,[247,252,245]],[.5,[116,196,118]],[1,[0,68,27]]],
+  'Reds':     [[0,[255,245,240]],[.5,[252,141,89]],[1,[165,15,21]]],
+  'Oranges':  [[0,[255,245,235]],[.5,[253,174,107]],[1,[127,39,4]]],
+  'Hot':      [[0,[11,0,0]],[.4,[230,0,0]],[.7,[255,210,0]],[1,[255,255,255]]],
+};
+const _PLOTLY_BUILTINS = new Set(['RdYlGn','RdYlGn_r','YlGnBu','YlOrRd','Viridis','Plasma','Blues','Greens','Reds','Oranges','Hot']);
+
+function getPlotlyCS(name) {
+  if (_PLOTLY_BUILTINS.has(name)) return name;
+  const cs = CS_MAP[name];
+  if (!cs) return name;
+  return cs.map(([stop,[r,g,b]]) => [stop, `rgb(${r},${g},${b})`]);
+}
+
+function interpColor(name, t) {
+  const cs = CS_MAP[name] || CS_MAP['Viridis'];
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 0; i < cs.length - 1; i++) {
+    const [s0,c0] = cs[i], [s1,c1] = cs[i+1];
+    if (t >= s0 && t <= s1) {
+      const f = s1>s0 ? (t-s0)/(s1-s0) : 0;
+      return c0.map((v,j) => Math.round(v + f*(c1[j]-v)));
+    }
+  }
+  return cs[cs.length-1][1];
+}
+
+function textColor(r,g,b) { return (0.299*r+0.587*g+0.114*b) > 140 ? '#000' : '#fff'; }
+
+function timeSortKey(tp) {
+  try { const [h,m]=tp.split('-')[0].trim().split(':').map(Number); return h*60+m; }
+  catch { return 9999; }
+}
+function sizeSortKey(sr) { try { return parseFloat(sr.split('-')[0]); } catch { return 9999; } }
+
+function buildPivot(rows, colMap, Y, X, vcol) {
+  const yi=colMap[Y], xi=colMap[X], vi=colMap[vcol];
+  if (yi===undefined||xi===undefined||vi===undefined) return null;
+  const ySet=new Set(), xSet=new Set();
+  rows.forEach(r => { ySet.add(String(r[yi])); xSet.add(String(r[xi])); });
+  const yLabels=[...ySet].sort((a,b)=>timeSortKey(a)-timeSortKey(b));
+  const xLabels=[...xSet].sort((a,b)=>sizeSortKey(a)-sizeSortKey(b));
+  const lookup={};
+  rows.forEach(r => { lookup[`${r[yi]}||${r[xi]}`]=r[vi]; });
+  const z=yLabels.map(y=>xLabels.map(x=>{
+    const v=lookup[`${y}||${x}`];
+    return (v!=null&&v!=='') ? Number(v) : null;
+  }));
+  return {z,xLabels,yLabels};
+}
+
+function buildHoverMatrix(rows, colMap, Y, X) {
+  const yi=colMap[Y], xi=colMap[X];
+  const ySet=new Set(), xSet=new Set();
+  rows.forEach(r=>{ ySet.add(String(r[yi])); xSet.add(String(r[xi])); });
+  const yLabels=[...ySet].sort((a,b)=>timeSortKey(a)-timeSortKey(b));
+  const xLabels=[...xSet].sort((a,b)=>sizeSortKey(a)-sizeSortKey(b));
+  const lookup={};
+  rows.forEach(r=>{ lookup[`${r[yi]}||${r[xi]}`]=r; });
+  const fN=(v,dp=1)=>v!=null?Number(v).toFixed(dp):'N/A';
+  return yLabels.map(y=>xLabels.map(x=>{
+    const r=lookup[`${y}||${x}`];
+    if(!r) return 'No data';
+    return [
+      `<b>${y}  |  size ≥ ${x}</b>`,
+      `──────────────────────`,
+      `Total FVGs:        ${r[colMap['total_fvgs']]??'N/A'}`,
+      `Mitigated:         ${r[colMap['mitigated_fvgs']]??'N/A'} (${fN(r[colMap['mitigation_rate']])}%)`,
+      `Invalidation:      ${fN(r[colMap['invalidation_rate']])}%`,
+      `──────────────────────`,
+      `Avg Expansion:     ${fN(r[colMap['avg_expansion_size']])} pts`,
+      `P75 Expansion:     ${fN(r[colMap['p75_expansion_size']])} pts`,
+      `──────────────────────`,
+      `Avg Eff (exp/sz):  ${fN(r[colMap['expansion_efficiency']],3)}`,
+      `P75 Eff (exp/sz):  ${fN(r[colMap['p75_expansion_efficiency']],3)}`,
+      `──────────────────────`,
+      `P75 Mit Time:      ${fN(r[colMap['p75_mitigation_time']])} min`,
+      `P75 Exp Time:      ${fN(r[colMap['p75_expansion_time']])} min`,
+      `P75 To Target:     ${fN(r[colMap['p75_time_to_target']])} min`,
+      `P75 To Invalid:    ${fN(r[colMap['p75_time_to_invalidation']])} min`,
+      `──────────────────────`,
+      `Optimal Target:    ${fN(r[colMap['optimal_target']])} pts`,
+      `Optimal EV:        ${fN(r[colMap['optimal_ev']],3)}`,
+      `──────────────────────`,
+      `Avg Pen Depth:     ${fN(r[colMap['avg_penetration_depth']])} pts`,
+      `P75 Pen Depth:     ${fN(r[colMap['p75_penetration_depth']])} pts`,
+      `Pen Depth Ratio:   ${fN(r[colMap['avg_penetration_depth_ratio']],3)}`,
+      `Pen Candles (avg): ${fN(r[colMap['avg_penetration_candle_count']])}`,
+      `Mid Crossings:     ${fN(r[colMap['avg_midpoint_crossing_count']])}`,
+      `Mid Crossed (%):   ${fN(r[colMap['midpoint_crossed_pct']])}%`,
+      `──────────────────────`,
+      `Avg Stop (risk):   ${fN(r[colMap['avg_risk_points']])} pts`,
+      `Avg Actual RR:     ${fN(r[colMap['avg_rr']],2)}`,
+      `1.0× FVG Hit:      ${fN(r[colMap['rr_1_0_hit_rate']])}%`,
+      `1.5× FVG Hit:      ${fN(r[colMap['rr_1_5_hit_rate']])}%`,
+      `2.0× FVG Hit:      ${fN(r[colMap['rr_2_0_hit_rate']])}%`,
+    ].join('<br>');
+  }));
+}
+
+function buildAnnotations(z, xl, yl, colorscale, xref, yref, fmt) {
+  let vmin=Infinity, vmax=-Infinity;
+  z.forEach(row=>row.forEach(v=>{ if(v!=null){if(v<vmin)vmin=v;if(v>vmax)vmax=v;} }));
+  const range=vmax-vmin||1;
+  return yl.flatMap((y,yi)=>xl.map((x,xi)=>{
+    const v=z[yi][xi]; if(v==null) return null;
+    const [r,g,b]=interpColor(colorscale,(v-vmin)/range);
+    return {x,y,xref,yref,text:fmt(v),showarrow:false,
+      font:{family:'IBM Plex Mono',size:9,color:textColor(r,g,b)}};
+  })).filter(Boolean);
+}
+
+function renderWorkspace(wsId, divId) {
+  const w       = _ws[wsId];
+  const emptyMap = { 'heatmap-solo':'empty-solo','heatmap-left':'empty-left','heatmap-right':'empty-right' };
+  const emptyId = emptyMap[divId];
+  if (!w || !w.data) {
+    if (emptyId) document.getElementById(emptyId).style.display = 'flex';
+    return;
+  }
+  const css = ['cs1','cs2','cs3','cs4'].map(k => w.colorscales[k]);
+  render(w.data, divId, css, w.labelsVisible);
+}
+
+function render(data, divId, css, labelsViz) {
+  if (!data) return;
+  divId    = divId    || 'heatmap-solo';
+  css      = css      || ['cs1','cs2','cs3','cs4'].map(id => document.getElementById(id).value);
+  labelsViz = labelsViz != null ? labelsViz : (_ws[_activeId] ? _ws[_activeId].labelsVisible : true);
+
+  const { columns, rows } = data;
+  const colMap = {};
+  columns.forEach((c,i) => { colMap[c] = i; });
+
+  const Y = 'time_period', X = 'size_range';
+  const pivots = PANELS.map(p => buildPivot(rows, colMap, Y, X, p.col));
+  const hover  = buildHoverMatrix(rows, colMap, Y, X);
+  if (!pivots[0]) { setStatus('Column mismatch', 'err'); return; }
+  const { xLabels, yLabels } = pivots[0];
+
+  const xDoms  = [[0,.44],[.56,1.0],[0,.44],[.56,1.0]];
+  const yDoms  = [[.55,1.0],[.55,1.0],[0,.45],[0,.45]];
+  const xrefs  = ['x','x2','x3','x4'];
+  const yrefs  = ['y','y2','y3','y4'];
+
+  const traces = PANELS.map((p,i) => ({
+    type:'heatmap',
+    z: pivots[i]?.z ?? null, x: pivots[i]?.xLabels ?? xLabels, y: pivots[i]?.yLabels ?? yLabels,
+    colorscale: getPlotlyCS(css[i]), showscale: true,
+    xaxis: xrefs[i], yaxis: yrefs[i],
+    customdata: hover, hovertemplate: '%{customdata}<extra></extra>',
+    hoverlabel: { bgcolor:'#1a1a1a', bordercolor:'#f5a623', font:{ family:'IBM Plex Mono', color:'#e8e8e8', size:11 } },
+    colorbar: { len:.42, thickness:12,
+      x: i%2===0 ? .44 : 1.0, xanchor:'left',
+      y: i<2 ? .775 : .225, yanchor:'middle',
+      tickfont: { family:'IBM Plex Mono', size:8, color:'#888' },
+      outlinecolor:'#2a2a2a', outlinewidth:1 },
+    zsmooth: false,
+  }));
+
+  let annotations = [];
+  if (labelsViz) {
+    PANELS.forEach((p,i) => {
+      if (!pivots[i]) return;
+      annotations = annotations.concat(buildAnnotations(pivots[i].z, pivots[i].xLabels, pivots[i].yLabels, css[i], xrefs[i], yrefs[i], p.fmt));
+    });
+  }
+  PANELS.forEach((p,i) => annotations.push({
+    text:`<b>${p.title}</b>`, xref:'paper', yref:'paper',
+    x: xDoms[i][0]+(xDoms[i][1]-xDoms[i][0])/2, y: yDoms[i][1]+.02,
+    xanchor:'center', yanchor:'bottom', showarrow:false,
+    font:{ family:'IBM Plex Mono', size:10, color:'#f5a623' },
+  }));
+
+  const axStyle = { tickfont:{family:'IBM Plex Mono',size:9,color:'#888'}, showgrid:false, zeroline:false, linecolor:'#2a2a2a', linewidth:1, showline:true, tickcolor:'#2a2a2a' };
+  const yAxStyle = { ...axStyle, autorange:'reversed' };
+
+  Plotly.react(divId, traces, {
+    paper_bgcolor:'#111111', plot_bgcolor:'#0a0a0a',
+    font:{ family:'IBM Plex Mono', color:'#e8e8e8' },
+    margin:{ t:50, b:40, l:80, r:40 },
+    annotations,
+    xaxis:  { ...axStyle,  domain:xDoms[0] },
+    xaxis2: { ...axStyle,  domain:xDoms[1], anchor:'y2' },
+    xaxis3: { ...axStyle,  domain:xDoms[2], anchor:'y3' },
+    xaxis4: { ...axStyle,  domain:xDoms[3], anchor:'y4' },
+    yaxis:  { ...yAxStyle, domain:yDoms[0] },
+    yaxis2: { ...yAxStyle, domain:yDoms[1], anchor:'x2' },
+    yaxis3: { ...yAxStyle, domain:yDoms[2], anchor:'x3' },
+    yaxis4: { ...yAxStyle, domain:yDoms[3], anchor:'x4' },
+  }, { responsive:true, displaylogo:false, displayModeBar:true,
+       modeBarButtonsToRemove:['select2d','lasso2d','autoScale2d','toggleSpikelines'] });
+
+  attachClickHandlers(divId);
+  if (_pinnedCells[divId]) addCellHighlight(divId, _pinnedCells[divId].xi, _pinnedCells[divId].yi);
+
+  const emptyMap = { 'heatmap-solo':'empty-solo','heatmap-left':'empty-left','heatmap-right':'empty-right' };
+  const emptyId  = emptyMap[divId];
+  if (emptyId) document.getElementById(emptyId).style.display = 'none';
+
+  // Update stats only for the active pane
+  if (divId === getActiveDivId()) {
+    const periods = new Set(rows.map(r => r[colMap['time_period']])).size;
+    const sizes   = new Set(rows.map(r => r[colMap['size_range']])).size;
+    document.getElementById('stat-cells').textContent   = rows.length;
+    document.getElementById('stat-periods').textContent = periods;
+    document.getElementById('stat-sizes').textContent   = sizes;
+  }
+}
+
+async function updateOverviewStats() {
+  try {
+    const res = await fetch(`${API}/api/overview-stats`);
+    if (!res.ok) return;
+    const data = await res.json();
+    ['3m:3min','5m:5min','15m:15min'].forEach(pair => {
+      const [prefix, key] = pair.split(':');
+      const s = data[key];
+      document.getElementById(`os-${prefix}-total`).textContent  = s ? s.total.toLocaleString() : '—';
+      document.getElementById(`os-${prefix}-mid`).textContent    = s && s.midPct != null ? s.midPct + '%' : '—';
+      document.getElementById(`os-${prefix}-avgmid`).textContent = s && s.avgMid != null ? s.avgMid       : '—';
+    });
+  } catch {}
+}
+
+// ── Fill-missing dialog ────────────────────────────────────────────────────
+function showFillDialog(currentValues, blankKeys) {
+  const body = document.getElementById('modal-body');
+  body.innerHTML = '';
+  document.getElementById('modal-error').className = 'modal-error';
+
+  blankKeys.forEach(pk => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-field';
+    const lbl = document.createElement('label');
+    lbl.textContent = pk.label;
+    wrap.appendChild(lbl);
+
+    let inp;
+    if (pk.inputType === 'select') {
+      inp = document.createElement('select');
+      const ph = document.createElement('option');
+      ph.value = ''; ph.textContent = '—';
+      inp.appendChild(ph);
+      (pk.options || []).forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt; o.textContent = opt;
+        inp.appendChild(o);
+      });
+    } else {
+      inp = document.createElement('input');
+      inp.type = pk.inputType || 'text';
+      if (pk.placeholder) inp.placeholder = pk.placeholder;
+      if (pk.step)        inp.step = String(pk.step);
+      if (pk.min != null) inp.min  = String(pk.min);
+    }
+    inp.dataset.field = pk.field;
+    inp.className = 'modal-inp';
+    if (currentValues[pk.field]) inp.value = currentValues[pk.field];
+    wrap.appendChild(inp);
+    body.appendChild(wrap);
+  });
+
+  document.getElementById('fill-modal').classList.add('open');
+  setTimeout(() => { const f = body.querySelector('input, select'); if (f) f.focus(); }, 50);
+}
+
+function hideFillDialog() {
+  document.getElementById('fill-modal').classList.remove('open');
+}
+
+function collectDialogValues() {
+  const vals = {};
+  document.querySelectorAll('#modal-body .modal-inp').forEach(inp => {
+    vals[inp.dataset.field] = inp.value.trim();
+  });
+  return vals;
+}
+
+// ── Generate ───────────────────────────────────────────────────────────────
+async function generateDataset() {
+  const v = getParamValues();
+  const blankKeys = PARAM_KEYS.filter(pk => !v[pk.field]);
+  if (blankKeys.length > 0) { showFillDialog(v, blankKeys); return; }
+  await doGenerate(v);
+}
+
+async function doGenerate(v) {
+  const body = {
+    ticker:          v.ticker,
+    timeframe:       v.timeframe_label,
+    period:          v.data_period,
+    session_minutes: parseInt(v.session_period_minutes),
+    method:          v.size_filtering_method,
+    size_start:      parseFloat(v.size_range_start),
+    size_end:        parseFloat(v.size_range_end),
+    size_step:       parseFloat(v.size_range_step),
+    min_exp:         parseFloat(v.min_expansion_size),
+  };
+
+  const errEl = document.getElementById('modal-error');
+  if (!body.ticker || !['NQ','ES'].includes(body.ticker)) {
+    errEl.textContent = 'Ticker must be NQ or ES'; errEl.className = 'modal-error visible'; return;
+  }
+  if (!body.timeframe || !['3min','5min','15min'].includes(body.timeframe)) {
+    errEl.textContent = 'Timeframe must be 3min, 5min or 15min'; errEl.className = 'modal-error visible'; return;
+  }
+  if (!body.method || !['bins','cumulative'].includes(body.method)) {
+    errEl.textContent = 'Method must be bins or cumulative'; errEl.className = 'modal-error visible'; return;
+  }
+  if (!body.period) {
+    errEl.textContent = 'Data period is required (e.g. 5y)'; errEl.className = 'modal-error visible'; return;
+  }
+  if (isNaN(body.size_start)||isNaN(body.size_end)||isNaN(body.size_step)||isNaN(body.min_exp)||isNaN(body.session_minutes)) {
+    errEl.textContent = 'All numeric fields must be valid numbers'; errEl.className = 'modal-error visible'; return;
+  }
+  errEl.className = 'modal-error';
+  hideFillDialog();
+
+  if (_currentEvt) { _currentEvt.close(); _currentEvt = null; }
+  setStatus('Starting generation…', 'run');
+  openLogPanel();
+
+  let res;
+  try {
+    res = await fetch(`${API}/api/compute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch(e) {
+    setStatus('API unreachable: ' + e.message, 'err'); return;
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    appendLog('ERROR: ' + (err.detail || res.statusText), 'error');
+    setStatus('Generation request failed', 'err'); return;
+  }
+
+  const { job_id } = await res.json();
+  appendLog(`Job started: ${job_id}`, 'ok');
+
+  const genBtn = document.getElementById('generate-btn');
+  genBtn.classList.add('running');
+  genBtn.textContent = '⚙ RUNNING…';
+  genBtn.disabled = true;
+
+  const evtSrc = new EventSource(`${API}/api/jobs/${encodeURIComponent(job_id)}/stream`);
+  _currentEvt = evtSrc;
+
+  evtSrc.onmessage = e => { appendLog(e.data); };
+
+  evtSrc.addEventListener('done', async () => {
+    evtSrc.close(); _currentEvt = null;
+    appendLog('✓ Generation complete — refreshing manifest…', 'ok');
+    document.getElementById('log-status').textContent = 'done';
+    document.getElementById('log-status').style.color = 'var(--green)';
+    setStatus('Generation complete', 'ok');
+    genBtn.classList.remove('running');
+    genBtn.textContent = '⚡ GENERATE';
+    updateMatch();
+
+    await fetchManifest();
+    updateMatch();
+    const mid = getMatchedId();
+    if (mid) {
+      await loadDataset(mid);
+      updateOverviewStats();
+      appendLog('✓ Dataset loaded — close this panel with ✕', 'ok');
+    } else {
+      appendLog('Dataset saved — select it to load', 'warn');
+    }
+  });
+
+  evtSrc.addEventListener('error', e => {
+    evtSrc.close(); _currentEvt = null;
+    appendLog('✗ ' + (e.data || 'unknown error'), 'error');
+    document.getElementById('log-status').textContent = 'failed';
+    document.getElementById('log-status').style.color = 'var(--red)';
+    setStatus('Generation failed', 'err');
+    genBtn.classList.remove('running');
+    genBtn.textContent = '⚡ GENERATE';
+    updateMatch();
+  });
+
+  evtSrc.onerror = () => {
+    if (evtSrc.readyState === EventSource.CLOSED) return;
+    appendLog('Stream connection lost', 'error');
+  };
+}
+
+// ── Log panel ──────────────────────────────────────────────────────────────
+function openLogPanel() {
+  const panel = document.getElementById('log-panel');
+  document.getElementById('log-body').innerHTML = '';
+  document.getElementById('log-status').textContent = 'running…';
+  document.getElementById('log-status').style.color = 'var(--blue)';
+  panel.classList.add('open');
+}
+
+function closeLogPanel() {
+  document.getElementById('log-panel').classList.remove('open');
+  if (_currentEvt) { _currentEvt.close(); _currentEvt = null; }
+}
+
+function appendLog(line, cls='info') {
+  const body = document.getElementById('log-body');
+  const div  = document.createElement('div');
+  div.className = 'log-line ' + cls;
+  if (!cls || cls === 'info') {
+    if (/\[WARNING\]/i.test(line))  div.className = 'log-line warn';
+    else if (/\[ERROR\]/i.test(line)) div.className = 'log-line error';
+    else if (/complete|done|success|exported/i.test(line)) div.className = 'log-line ok';
+  }
+  div.textContent = line;
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+}
+
+// ── Sticky cell pin / tooltip ─────────────────────────────────────────────
+const _CELL_XREFS = ['x','x2','x3','x4'];
+const _CELL_YREFS = ['y','y2','y3','y4'];
+
+function addCellHighlight(divId, xi, yi) {
+  const shapes = _CELL_XREFS.map((xref, i) => ({
+    type: 'rect', xref, yref: _CELL_YREFS[i],
+    x0: xi - 0.5, x1: xi + 0.5,
+    y0: yi - 0.5, y1: yi + 0.5,
+    line: { color: '#f5a623', width: 2 },
+    fillcolor: 'rgba(245,166,35,0.07)',
+  }));
+  Plotly.relayout(divId, { shapes });
+}
+
+function unpinCell(divId) {
+  if (!_pinnedCells[divId]) return;
+  _pinnedCells[divId] = null;
+  const el = document.getElementById(divId);
+  if (el && el.data) Plotly.relayout(divId, { shapes: [] });
+  const tip = document.getElementById('sticky-tip');
+  if (tip.dataset.divId === divId) tip.classList.remove('visible');
+}
+
+function unpinAllCells() {
+  ['heatmap-solo','heatmap-left','heatmap-right'].forEach(unpinCell);
+}
+
+function showStickyTip(html, mouseX, mouseY, divId) {
+  const tip     = document.getElementById('sticky-tip');
+  const content = document.getElementById('sticky-tip-content');
+  content.innerHTML = html;
+  tip.dataset.divId = divId;
+  tip.style.left    = (mouseX + 14) + 'px';
+  tip.style.top     = (mouseY - 24) + 'px';
+  tip.classList.add('visible');
+  // Clamp to viewport
+  requestAnimationFrame(() => {
+    const r = tip.getBoundingClientRect();
+    if (r.right  > window.innerWidth  - 8) tip.style.left = (mouseX - r.width  - 14) + 'px';
+    if (r.bottom > window.innerHeight - 8) tip.style.top  = (mouseY - r.height + 20) + 'px';
+  });
+}
+
+function attachClickHandlers(divId) {
+  if (_clickHandlersAttached.has(divId)) return;
+  const el = document.getElementById(divId);
+  if (!el || !el.on) return;
+  _clickHandlersAttached.add(divId);
+  el.on('plotly_click', data => {
+    const pt = data && data.points && data.points[0];
+    if (!pt || !pt.pointIndex) return;
+    const yi = pt.pointIndex[0], xi = pt.pointIndex[1];
+    const prev = _pinnedCells[divId];
+    // Same cell → unpin (toggle off)
+    if (prev && prev.xi === xi && prev.yi === yi) { unpinCell(divId); return; }
+    _pinnedCells[divId] = { xi, yi };
+    const mx = (data.event && data.event.clientX) || _lastMousePos.x;
+    const my = (data.event && data.event.clientY) || _lastMousePos.y;
+    showStickyTip(pt.customdata || 'No data', mx, my, divId);
+    addCellHighlight(divId, xi, yi);
+  });
+}
+
+// ── Event wiring ───────────────────────────────────────────────────────────
+PARAM_KEYS.forEach(({ id, field }) => {
+  document.getElementById(id).addEventListener('change', () => cascadeFrom(field));
+});
+
+document.getElementById('load-btn').addEventListener('click', () => {
+  const mid = getMatchedId();
+  if (mid) loadDataset(mid);
+});
+
+document.getElementById('generate-btn').addEventListener('click', generateDataset);
+document.getElementById('refresh-btn').addEventListener('click', fetchManifest);
+
+document.getElementById('toggle-labels-btn').addEventListener('click', () => {
+  if (!_activeId || !_ws[_activeId]) return;
+  _ws[_activeId].labelsVisible = !_ws[_activeId].labelsVisible;
+  const divId = getActiveDivId();
+  renderWorkspace(_activeId, divId);
+  persistAll();
+});
+
+document.getElementById('log-close-btn').addEventListener('click', closeLogPanel);
+
+// Fill-missing dialog
+document.getElementById('modal-close-btn').addEventListener('click',  hideFillDialog);
+document.getElementById('modal-cancel-btn').addEventListener('click', hideFillDialog);
+document.getElementById('fill-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('fill-modal')) hideFillDialog();
+});
+document.getElementById('modal-run-btn').addEventListener('click', () => {
+  const dialogVals = collectDialogValues();
+  const merged     = { ...getParamValues(), ...dialogVals };
+  PARAM_KEYS.forEach(pk => {
+    if (dialogVals[pk.field]) {
+      const sel = document.getElementById(pk.id);
+      if (![...sel.options].some(o => o.value === dialogVals[pk.field])) {
+        const opt = document.createElement('option');
+        opt.value = dialogVals[pk.field]; opt.textContent = dialogVals[pk.field];
+        sel.appendChild(opt);
+      }
+      sel.value = dialogVals[pk.field];
+    }
+  });
+  saveCurrentState(); persistAll();
+  doGenerate(merged);
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { hideFillDialog(); unpinAllCells(); }
+});
+
+// Sticky tip close button
+document.getElementById('sticky-tip-close').addEventListener('click', e => {
+  e.stopPropagation();
+  unpinCell(document.getElementById('sticky-tip').dataset.divId || '');
+});
+
+// Dismiss sticky tip on click outside chart divs
+document.addEventListener('click', e => {
+  const tip = document.getElementById('sticky-tip');
+  if (!tip.classList.contains('visible')) return;
+  if (tip.contains(e.target)) return;
+  for (const divId of ['heatmap-solo','heatmap-left','heatmap-right']) {
+    const el = document.getElementById(divId);
+    if (el && el.contains(e.target)) return; // plotly_click handles this
+  }
+  unpinAllCells();
+});
+
+// Colorscale changes
+['cs1','cs2','cs3','cs4'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => {
+    saveCurrentState();
+    persistAll();
+    renderWorkspace(_activeId, getActiveDivId());
+  });
+});
+
+// Tab bar
+document.getElementById('tab-add-btn').addEventListener('click', () => {
+  if (_wsOrder.length >= 6) return;
+  saveCurrentState();
+  const id = newWorkspace();
+  setActiveWorkspace(id);
+});
+
+document.getElementById('split-btn').addEventListener('click', () => {
+  saveCurrentState();
+  if (!_splitMode && _wsOrder.length < 2) {
+    // Need at least 2 workspaces for split
+    newWorkspace();
+    renderTabBar();
+  }
+  setSplitMode(!_splitMode);
+});
+
+// Split half workspace selectors
+document.getElementById('sel-left').addEventListener('change', e => {
+  _splitLeft = e.target.value;
+  if (_activeId === null || !_ws[_activeId]) _activeId = _splitLeft;
+  // If choosing the same ws as right, swap
+  if (_splitLeft === _splitRight) {
+    _splitRight = _wsOrder.find(id => id !== _splitLeft) || _splitLeft;
+    document.getElementById('sel-right').value = _splitRight;
+  }
+  renderWorkspace(_splitLeft, 'heatmap-left');
+  markActivePaneFocus();
+  persistAll();
+});
+
+document.getElementById('sel-right').addEventListener('change', e => {
+  _splitRight = e.target.value;
+  if (_splitLeft === _splitRight) {
+    _splitLeft = _wsOrder.find(id => id !== _splitRight) || _splitRight;
+    document.getElementById('sel-left').value = _splitLeft;
+  }
+  renderWorkspace(_splitRight, 'heatmap-right');
+  markActivePaneFocus();
+  persistAll();
+});
+
+// Clicking a split half activates it (sidebar edits that workspace)
+document.getElementById('half-left').addEventListener('click', () => {
+  if (_activeId === _splitLeft) return;
+  saveCurrentState();
+  _activeId = _splitLeft;
+  loadStateIntoDom(_activeId);
+  markActivePaneFocus();
+  renderTabBar();
+  persistAll();
+});
+
+document.getElementById('half-right').addEventListener('click', () => {
+  if (_activeId === _splitRight) return;
+  saveCurrentState();
+  _activeId = _splitRight;
+  loadStateIntoDom(_activeId);
+  markActivePaneFocus();
+  renderTabBar();
+  persistAll();
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+if (!restoreAll()) {
+  const id = newWorkspace('Workspace 1');
+  _activeId = id;
+}
+if (_splitMode) {
+  document.getElementById('pane-solo').style.display  = 'none';
+  document.getElementById('pane-split').style.display = 'flex';
+}
+renderTabBar();
+loadStateIntoDom(_activeId);
+fetchManifest();
+</script>
+</body>
+</html>
