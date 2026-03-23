@@ -118,6 +118,24 @@ class FixedContinuousContractBuilder:
             logger.warning(f"No data found for {symbol} in specified date range")
             return pd.DataFrame()
         
+        # Merge chunks from the same contract code before stitching.
+        # Multiple files for the same contract (e.g., NQU5 ending Aug 15 and
+        # NQU5 starting Aug 15) must be combined into one DataFrame so the
+        # active-window logic doesn't discard the newer file's data.
+        if len(all_data) > 1 and 'contract' in all_data[0].columns:
+            from collections import defaultdict as _dd
+            _by_contract = _dd(list)
+            for chunk in all_data:
+                _by_contract[chunk['contract'].iloc[0]].append(chunk)
+            all_data = []
+            for _contract, _chunks in _by_contract.items():
+                if len(_chunks) == 1:
+                    all_data.append(_chunks[0])
+                else:
+                    merged = pd.concat(_chunks, ignore_index=False)
+                    merged = merged[~merged.index.duplicated(keep='first')].sort_index()
+                    all_data.append(merged)
+
         # Combine all data — resolve overlapping contracts by keeping only
         # the front-month within its active window (before roll_days of expiry).
         if len(all_data) > 1 and 'contract' in all_data[0].columns:

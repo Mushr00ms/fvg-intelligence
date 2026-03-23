@@ -486,6 +486,17 @@
           <input type="number" id="bt-balance" value="76000" step="1000">
           <span class="ctrl-label">Risk%</span>
           <input type="number" id="bt-risk" value="1" min="0.1" max="5" step="0.1">
+          <span class="ctrl-label">Data</span>
+          <select id="bt-data-source">
+            <option value="ib">IB 1-sec</option>
+            <option value="databento" selected>Databento 1-min</option>
+          </select>
+          <label style="font-size:9px;color:var(--text-dim);display:flex;align-items:center;gap:3px;cursor:pointer">
+            <input type="checkbox" id="bt-slip" checked> +slip
+          </label>
+          <label style="font-size:9px;color:var(--text-dim);display:flex;align-items:center;gap:3px;cursor:pointer">
+            <input type="checkbox" id="bt-risk-tiers" checked> 3-tier risk
+          </label>
           <button class="bt-run" id="bt-run-btn" onclick="btRun()">RUN BACKTEST</button>
           <span class="ctrl-label" style="margin-left:auto">History</span>
           <select id="bt-history" onchange="btLoadHistory(this.value)"><option value="">—</option></select>
@@ -2008,7 +2019,12 @@ async function btRun() {
   try {
     const res = await fetch(`${API}/api/backtest`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ strategy_id: stratId, start_date: start, end_date: end, balance, risk_pct: riskPct }),
+      body: JSON.stringify({
+        strategy_id: stratId, start_date: start, end_date: end, balance, risk_pct: riskPct,
+        data_source: document.getElementById('bt-data-source').value,
+        slip: document.getElementById('bt-slip').checked,
+        risk_tiers: document.getElementById('bt-risk-tiers').checked,
+      }),
     });
     const { job_id } = await res.json();
 
@@ -2173,20 +2189,28 @@ function btRenderCellTable() {
 
 function btRenderTradeLog() {
   const trades = _btResults.trades || [];
+  const ec = _btResults.equity_curve || [];
+  // Build balance lookup from equity curve (balance AFTER each trade)
+  const balMap = {};
+  ec.forEach(e => { balMap[e.trade_id] = e.balance; });
+  const startBal = (_btResults.meta && _btResults.meta.balance) || 76000;
+
   let html = `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
     <th>#</th><th>Date</th><th>Time Period</th><th>Type</th><th>Setup</th><th>Side</th>
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
-    <th>Exit</th><th>Reason</th><th>P&L pts</th><th>P&L $</th>
+    <th>Exit</th><th>Reason</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
   </tr></thead><tbody>`;
-  trades.forEach(t => {
+  trades.forEach((t, i) => {
     const cls = t.exit_reason === 'TP' ? 'win' : (t.exit_reason === 'SL' ? 'loss' : 'eod');
     const setup = t.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    const bal = balMap[t.id] != null ? balMap[t.id] : (i === 0 ? startBal + t.pnl_dollars : '');
+    const balStr = typeof bal === 'number' ? '$' + Math.round(bal).toLocaleString() : '';
     html += `<tr class="${cls}"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
       <td>${t.fvg_type}</td><td>${setup}</td><td>${t.side}</td>
       <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
       <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts}</td>
       <td>${t.exit_price}</td><td>${t.exit_reason}</td>
-      <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td></tr>`;
+      <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td></tr>`;
   });
   html += '</tbody></table></div>';
   document.getElementById('bt-table-trades').innerHTML = html;

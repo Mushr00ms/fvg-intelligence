@@ -449,6 +449,9 @@ class BacktestRequest(BaseModel):
     end_date: str = ""
     balance: float = 76000
     risk_pct: float = 0.01
+    data_source: str = "ib"   # "ib" or "databento"
+    slip: bool = True         # realistic slippage (entry 1 tick deeper, TP 1 tick early)
+    risk_tiers: bool = True   # use 3-tier risk from strategy meta
 
 
 @app.post("/api/backtest")
@@ -463,12 +466,17 @@ def api_backtest_run(req: BacktestRequest):
         "--strategy", req.strategy_id,
         "--balance", str(req.balance),
         "--risk-pct", str(req.risk_pct),
+        "--data-source", req.data_source,
         "--json-output", json_out,
     ]
     if req.start_date:
         cmd += ["--start", req.start_date]
     if req.end_date:
         cmd += ["--end", req.end_date]
+    if req.slip:
+        cmd += ["--slip"]
+    if req.risk_tiers:
+        cmd += ["--risk-tiers"]
 
     proc = subprocess.Popen(
         cmd, cwd=_REPO_ROOT,

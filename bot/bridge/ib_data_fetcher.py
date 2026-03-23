@@ -24,6 +24,17 @@ import sys
 import time
 from datetime import datetime, timedelta, date
 
+import pytz
+_ET = pytz.timezone('US/Eastern')
+_UTC = pytz.utc
+
+
+def _to_utc_str(naive_et_dt):
+    """Convert a naive ET datetime to IB UTC dash-format: 'yyyymmdd-HH:MM:SS'."""
+    et_aware = _ET.localize(naive_et_dt)
+    utc_dt = et_aware.astimezone(_UTC)
+    return utc_dt.strftime('%Y%m%d-%H:%M:%S')
+
 try:
     from ib_async import IB, Future, util
     util.startLoop()
@@ -133,7 +144,7 @@ def fetch_day(ib, contract, trade_date, bar_size='1 secs'):
         ib.errorEvent += on_error
 
         for ci, end_dt in enumerate(chunks):
-            end_str = end_dt.strftime('%Y%m%d %H:%M:%S')
+            end_str = _to_utc_str(end_dt)
             bars = None
 
             for attempt in range(4):
@@ -182,7 +193,7 @@ def fetch_day(ib, contract, trade_date, bar_size='1 secs'):
 
     else:
         # For 1-min bars and above, single request works
-        end_str = trade_date.strftime('%Y%m%d') + ' 16:00:00'
+        end_str = _to_utc_str(datetime(trade_date.year, trade_date.month, trade_date.day, 16, 0, 0))
         try:
             bars = ib.reqHistoricalData(
                 contract,

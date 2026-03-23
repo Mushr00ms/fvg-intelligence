@@ -62,7 +62,7 @@ def load_1s_bars(data_dir, start_date=None, end_date=None):
         raise FileNotFoundError(f"No data files in range {start_date}-{end_date}")
 
     df = pd.concat(dfs, ignore_index=True)
-    df['date'] = pd.to_datetime(df['date'])
+    df['date'] = pd.to_datetime(df['date'], utc=True).dt.tz_convert('America/New_York')
     df = df.sort_values('date').reset_index(drop=True)
     print(f"Loaded {len(df):,} 1-second bars from {len(dfs)} files")
     return df
@@ -271,6 +271,16 @@ def run_backtest(df_1s, strategy, config=None):
     max_concurrent = config.get("max_concurrent", 3)
     max_daily_trades = config.get("max_daily_trades", 15)
     min_fvg_size = config.get("min_fvg_size", 0.25)
+    use_slip = config.get("slip", False)
+    use_risk_tiers = config.get("risk_tiers", False)
+
+    # Load risk tier config from strategy meta if enabled
+    _risk_rules = strategy.get("meta", {}).get("risk_rules", {}) if use_risk_tiers else {}
+    _small_buckets = set(_risk_rules.get("small_buckets", []))
+    _small_risk = _risk_rules.get("small_risk_pct", risk_pct)
+    _medium_risk = _risk_rules.get("medium_risk_pct", risk_pct)
+    _large_buckets = set(_risk_rules.get("large_buckets", []))
+    _large_risk = _risk_rules.get("large_risk_pct", risk_pct)
 
     strategy_lookup = build_strategy_lookup(strategy)
     print(f"Strategy: {strategy.get('meta', {}).get('name', '?')} ({len(strategy_lookup)} cells)")
@@ -284,7 +294,13 @@ def run_backtest(df_1s, strategy, config=None):
     trade_counter = 0
     running_balance = balance
 
+    # Hard gate: no trading Dec 20 onwards (holiday low-liquidity)
+    no_trade_after_dec = strategy.get("meta", {}).get("hard_gates", {}).get("no_trade_after_dec")
+
     for day in trading_days:
+        if no_trade_after_dec and day.month == 12 and day.day >= (no_trade_after_dec + 1):
+            continue
+
         day_df = df_1s[df_1s['trade_date'] == day].copy()
         if day_df.empty:
             continue
@@ -360,6 +376,15 @@ def run_backtest(df_1s, strategy, config=None):
                 else:
                     entry = round_to_tick((fvg.zone_high + fvg.zone_low) / 2)
 
+                side = "BUY" if fvg.fvg_type == "bullish" else "SELL"
+
+                # Slippage: entry 1 tick deeper into zone
+                if use_slip:
+                    if side == "BUY":
+                        entry = round_to_tick(entry - TICK_SIZE)
+                    else:
+                        entry = round_to_tick(entry + TICK_SIZE)
+
                 # Stop price
                 stop = round_to_tick(
                     fvg.middle_low if fvg.fvg_type == "bullish" else fvg.middle_high
@@ -380,14 +405,29 @@ def run_backtest(df_1s, strategy, config=None):
                 # Target
                 n = cell["rr_target"]
                 target_dist = round_to_tick(n * risk_pts)
-                side = "BUY" if fvg.fvg_type == "bullish" else "SELL"
                 if side == "BUY":
                     target = round_to_tick(entry + target_dist)
                 else:
                     target = round_to_tick(entry - target_dist)
 
-                # Position size
-                risk_budget = running_balance * risk_pct
+                # Slippage: TP 1 tick early
+                if use_slip:
+                    if side == "BUY":
+                        target = round_to_tick(target - TICK_SIZE)
+                    else:
+                        target = round_to_tick(target + TICK_SIZE)
+
+                # Position size — use risk tiers if enabled
+                if use_risk_tiers:
+                    if risk_range in _large_buckets:
+                        _rpct = _large_risk
+                    elif risk_range in _small_buckets:
+                        _rpct = _small_risk
+                    else:
+                        _rpct = _medium_risk
+                    risk_budget = running_balance * _rpct
+                else:
+                    risk_budget = running_balance * risk_pct
                 contracts = max(1, math.floor(risk_budget / (risk_pts * POINT_VALUE)))
 
                 # Per-trade risk gate
@@ -721,16 +761,48 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
+def load_databento_bars(symbol, start_date, end_date):
+    """
+    Load 1-minute bars from Databento data for backtesting.
+    Returns DataFrame in the same format as load_1s_bars (columns: date, open, high, low, close, volume).
+    """
+    import sys as _sys
+    _sys.path.insert(0, _ROOT)
+    from logic.utils.data_cache_utils import fetch_market_data
+
+    start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}" if start_date else "2020-01-02"
+    end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}" if end_date else "2025-12-31"
+
+    df = fetch_market_data(
+        symbol=symbol, timeframe='1min', expiration_dates=None,
+        period='1 year', custom_start=start_str, custom_end=end_str,
+        roll_days=8, debug=False
+    )
+    df = df.reset_index()[['date', 'open', 'high', 'low', 'close', 'volume']]
+    # Filter to RTH only (09:30-16:00 ET)
+    df = df[(df['date'].dt.hour * 60 + df['date'].dt.minute >= 570) &
+            (df['date'].dt.hour * 60 + df['date'].dt.minute < 960)]
+    df = df.sort_values('date').reset_index(drop=True)
+    print(f"Loaded {len(df):,} Databento 1-min RTH bars")
+    return df
+
+
 def main():
     parser = argparse.ArgumentParser(description="FVG Strategy Backtester")
     parser.add_argument("--strategy", help="Strategy ID from logic/strategies/")
     parser.add_argument("--strategy-file", help="Path to strategy JSON file")
+    parser.add_argument("--data-source", default="ib", choices=["ib", "databento"],
+                        help="Data source: 'ib' (1-sec parquet) or 'databento' (1-min)")
     parser.add_argument("--data-dir", default=os.path.join(_ROOT, "bot", "data"),
-                        help="Directory with cached 1s bar parquet files")
+                        help="Directory with cached 1s bar parquet files (ib only)")
     parser.add_argument("--start", help="Start date YYYYMMDD")
     parser.add_argument("--end", help="End date YYYYMMDD")
     parser.add_argument("--balance", type=float, default=76000, help="Starting balance")
-    parser.add_argument("--risk-pct", type=float, default=0.01, help="Risk per trade (0.01=1%)")
+    parser.add_argument("--risk-pct", type=float, default=0.01, help="Risk per trade (0.01=1%%)")
+    parser.add_argument("--slip", action="store_true",
+                        help="Apply realistic slippage: entry 1 tick deeper, TP 1 tick early")
+    parser.add_argument("--risk-tiers", action="store_true",
+                        help="Use 3-tier risk from strategy meta (0.5%%/1%%/1.5%%)")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
     args = parser.parse_args()
@@ -740,17 +812,22 @@ def main():
     print(f"Strategy: {strategy.get('meta', {}).get('name', 'unknown')}")
 
     # Load data
-    df_1s = load_1s_bars(args.data_dir, args.start, args.end)
+    if args.data_source == "databento":
+        df = load_databento_bars("NQ", args.start, args.end)
+    else:
+        df = load_1s_bars(args.data_dir, args.start, args.end)
 
-    # Run backtest
+    # Build config
     config = {
         "balance": args.balance,
         "risk_pct": args.risk_pct,
         "max_concurrent": 3,
         "max_daily_trades": 15,
         "min_fvg_size": 0.25,
+        "slip": args.slip,
+        "risk_tiers": args.risk_tiers,
     }
-    trades, final_balance = run_backtest(df_1s, strategy, config)
+    trades, final_balance = run_backtest(df, strategy, config)
 
     # Report
     print_report(trades, args.balance, final_balance)
@@ -758,6 +835,12 @@ def main():
     # JSON output (for dashboard API)
     if args.json_output:
         results = build_results_json(trades, args.balance, final_balance, strategy, config)
+        results["meta"]["data_source"] = args.data_source
+        results["meta"]["sizing"] = "compounding"
+        if args.slip:
+            results["meta"]["slippage"] = "entry 1tick deeper, TP 1tick early"
+        if args.risk_tiers:
+            results["meta"]["risk_tiers"] = strategy.get("meta", {}).get("risk_rules", {})
         os.makedirs(os.path.dirname(args.json_output) or '.', exist_ok=True)
         with open(args.json_output, 'w') as f:
             json.dump(results, f, indent=2)
