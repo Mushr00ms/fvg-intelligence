@@ -157,7 +157,7 @@ class Trade:
 
 
 def walk_trade_1s(df_1s, entry_time, entry_price, stop_price, target_price,
-                  side, session_end_time=time(16, 0)):
+                  side, session_end_time=time(16, 0), tp_trigger=None):
     """
     Walk a trade forward on 1-second bars to determine outcome.
 
@@ -169,13 +169,19 @@ def walk_trade_1s(df_1s, entry_time, entry_price, stop_price, target_price,
         entry_time: datetime of entry
         entry_price: limit entry price
         stop_price: stop loss price
-        target_price: take profit price
+        target_price: take profit price (fill price for TP)
         side: "BUY" or "SELL"
         session_end_time: time to force exit (default 16:00)
+        tp_trigger: price that must be reached to fill TP (default = target_price).
+                    With slippage, price must trade 1 tick past the limit to fill,
+                    so tp_trigger = target + 1 tick. Fill price is still target_price.
 
     Returns:
         (exit_time, exit_price, exit_reason) or None if not filled
     """
+    if tp_trigger is None:
+        tp_trigger = target_price
+
     # Filter to bars after entry time
     mask = df_1s['date'] > entry_time
     bars_after = df_1s[mask]
@@ -193,34 +199,33 @@ def walk_trade_1s(df_1s, entry_time, entry_price, stop_price, target_price,
         if side == "BUY":
             # Check stop first (conservative): did low touch stop?
             if bar['low'] <= stop_price:
-                # Check if target was also hit — did high reach target?
-                if bar['high'] >= target_price:
+                # Check if target was also hit — did high reach trigger?
+                if bar['high'] >= tp_trigger:
                     # Both hit in same second — use open to determine order
-                    # If open is closer to stop, stop hit first
                     if bar['open'] <= stop_price:
                         return (str(bar_time), stop_price, "SL")
-                    elif bar['open'] >= target_price:
+                    elif bar['open'] >= tp_trigger:
                         return (str(bar_time), target_price, "TP")
                     else:
                         # Ambiguous — conservative: stop hit first
                         return (str(bar_time), stop_price, "SL")
                 return (str(bar_time), stop_price, "SL")
-            # Check target
-            if bar['high'] >= target_price:
+            # Check target — trigger level for fill, target_price for P&L
+            if bar['high'] >= tp_trigger:
                 return (str(bar_time), target_price, "TP")
 
         else:  # SELL
             # Check stop first: did high touch stop?
             if bar['high'] >= stop_price:
-                if bar['low'] <= target_price:
+                if bar['low'] <= tp_trigger:
                     if bar['open'] >= stop_price:
                         return (str(bar_time), stop_price, "SL")
-                    elif bar['open'] <= target_price:
+                    elif bar['open'] <= tp_trigger:
                         return (str(bar_time), target_price, "TP")
                     else:
                         return (str(bar_time), stop_price, "SL")
                 return (str(bar_time), stop_price, "SL")
-            if bar['low'] <= target_price:
+            if bar['low'] <= tp_trigger:
                 return (str(bar_time), target_price, "TP")
 
     # Never hit stop or target — EOD
@@ -410,12 +415,16 @@ def run_backtest(df_1s, strategy, config=None):
                 else:
                     target = round_to_tick(entry - target_dist)
 
-                # Slippage: TP 1 tick early
+                # Slippage: TP limit sits at target, but price must trade
+                # 1 tick past it to guarantee fill. We pass tp_trigger to
+                # walk_trade for the fill check; actual fill price = target.
                 if use_slip:
                     if side == "BUY":
-                        target = round_to_tick(target - TICK_SIZE)
+                        tp_trigger = round_to_tick(target + TICK_SIZE)
                     else:
-                        target = round_to_tick(target + TICK_SIZE)
+                        tp_trigger = round_to_tick(target - TICK_SIZE)
+                else:
+                    tp_trigger = target
 
                 # Position size — use risk tiers if enabled
                 if use_risk_tiers:
@@ -440,7 +449,8 @@ def run_backtest(df_1s, strategy, config=None):
                     continue
 
                 # Walk trade on 1s bars
-                result = walk_trade_1s(day_df, pd.Timestamp(fill_time), entry, stop, target, side)
+                result = walk_trade_1s(day_df, pd.Timestamp(fill_time), entry, stop, target, side,
+                                       tp_trigger=tp_trigger)
                 if result is None:
                     continue
 
