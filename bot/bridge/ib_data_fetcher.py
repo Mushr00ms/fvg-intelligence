@@ -296,20 +296,47 @@ def main():
         # Resolve contract if needed
         expiry = get_nq_contract_for_date(current_date)
         if expiry != current_expiry:
-            current_expiry = expiry
-            contract = Future(
-                symbol='NQ',
-                lastTradeDateOrContractMonth=expiry.strftime('%Y%m%d'),
-                exchange='CME',
-                currency='USD',
-            )
-            qualified = ib.qualifyContracts(contract)
-            if not qualified:
-                log(f"  Failed to qualify NQ contract for expiry {expiry}")
-                current_date += timedelta(days=1)
-                continue
-            current_contract = contract
-            log(f"  Contract: NQ {expiry.strftime('%b %Y')} (conId={contract.conId})")
+            # Try exact expiry date first, then month-only format
+            resolved = False
+            for date_fmt in [expiry.strftime('%Y%m%d'), expiry.strftime('%Y%m')]:
+                new_contract = Future(
+                    symbol='NQ',
+                    lastTradeDateOrContractMonth=date_fmt,
+                    exchange='CME',
+                    currency='USD',
+                )
+                qualified = ib.qualifyContracts(new_contract)
+                if qualified and new_contract.conId > 0:
+                    current_expiry = expiry
+                    current_contract = new_contract
+                    log(f"  Contract: NQ {expiry.strftime('%b %Y')} (conId={new_contract.conId}, fmt={date_fmt})")
+                    resolved = True
+                    break
+
+            if not resolved:
+                if current_contract is not None:
+                    log(f"  Failed to qualify NQ {expiry.strftime('%b %Y')}, staying on current contract")
+                else:
+                    # No current contract — try the previous expiry as fallback
+                    prev_expiry = get_nq_contract_for_date(current_date - timedelta(days=30))
+                    for date_fmt in [prev_expiry.strftime('%Y%m%d'), prev_expiry.strftime('%Y%m')]:
+                        fallback = Future(
+                            symbol='NQ',
+                            lastTradeDateOrContractMonth=date_fmt,
+                            exchange='CME',
+                            currency='USD',
+                        )
+                        fb_qualified = ib.qualifyContracts(fallback)
+                        if fb_qualified and fallback.conId > 0:
+                            current_expiry = prev_expiry
+                            current_contract = fallback
+                            log(f"  Fallback to NQ {prev_expiry.strftime('%b %Y')} (conId={fallback.conId})")
+                            resolved = True
+                            break
+                    if not resolved:
+                        log(f"  Failed to qualify any NQ contract, skipping {current_date}")
+                        current_date += timedelta(days=1)
+                        continue
 
         # Fetch (pacing is handled inside fetch_day for chunked requests)
         log(f"  Fetching {current_date}...")

@@ -116,6 +116,7 @@ class OrderGroup:
     risk_pts: float
     n_value: float                  # R:R target (e.g. 2.75)
     target_qty: int                 # Desired number of contracts
+    risk_pct: float = 0.01          # Actual risk fraction used (respects 3-tier)
     filled_qty: int = 0
     state: str = "PENDING"
     ib_entry_order_id: Optional[int] = None
@@ -140,6 +141,7 @@ class OrderGroup:
             "risk_pts": self.risk_pts,
             "n_value": self.n_value,
             "target_qty": self.target_qty,
+            "risk_pct": self.risk_pct,
             "filled_qty": self.filled_qty,
             "state": self.state,
             "ib_entry_order_id": self.ib_entry_order_id,
@@ -166,6 +168,7 @@ class OrderGroup:
             risk_pts=d["risk_pts"],
             n_value=d["n_value"],
             target_qty=d["target_qty"],
+            risk_pct=d.get("risk_pct", 0.01),
             filled_qty=d.get("filled_qty", 0),
             state=d.get("state", "PENDING"),
             ib_entry_order_id=d.get("ib_entry_order_id"),

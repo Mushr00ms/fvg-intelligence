@@ -15,6 +15,7 @@ from datetime import datetime
 import pytz
 
 from bot.state.trade_state import OrderGroup, CLOSE_TP, CLOSE_SL, CLOSE_FLATTEN, CLOSE_CANCEL, CLOSE_EOD
+from bot.strategy.trade_calculator import POINT_VALUE
 
 NY_TZ = pytz.timezone("America/New_York")
 
@@ -313,74 +314,74 @@ class OrderManager:
             self._logger.log("eod_cancel", count=len(to_cancel), reason=reason)
 
     async def flatten_all(self, daily_state, reason=CLOSE_FLATTEN):
-        """Market-order close all open positions with P&L tracking."""
-        positions_to_close = list(daily_state.open_positions)
-        if not positions_to_close:
-            # Still cancel pending entries
-            await self.cancel_all_pending(daily_state, reason)
-            return
+        """Market-order close all open positions with P&L tracking.
 
-        for og in positions_to_close:
-            qty = og.filled_qty or og.target_qty
-
-            if not self._config.dry_run and self._conn.is_connected:
-                from ib_async import MarketOrder
-                reverse_side = "SELL" if og.side == "BUY" else "BUY"
-                mkt_order = MarketOrder(action=reverse_side, totalQuantity=qty)
-                flatten_trade = self._conn.ib.placeOrder(self._contract, mkt_order)
-
-                # Register fill callback to capture actual exit price + P&L
-                flatten_trade.filledEvent += lambda t, _og=og: self._on_flatten_fill(
-                    t, _og, daily_state, reason
-                )
-            else:
-                # Dry run / no connection: estimate P&L at last known price
-                # Use the stop price as conservative estimate (worst case)
-                if og.side == "BUY":
-                    est_exit = og.stop_price  # conservative
-                    pnl_pts = est_exit - og.entry_price
-                else:
-                    est_exit = og.stop_price
-                    pnl_pts = og.entry_price - est_exit
-                est_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
-
-                daily_state.move_to_closed(og.group_id, reason, est_pnl)
-
-                self._logger.log(
-                    "eod_exit",
-                    group_id=og.group_id,
-                    setup=og.setup,
-                    side=og.side,
-                    entry_price=og.entry_price,
-                    exit_price=est_exit,
-                    exit_reason=reason,
-                    qty=qty,
-                    pnl_pts=round(pnl_pts, 2),
-                    net_pnl=est_pnl,
-                    note="estimated (dry run)",
-                )
-
-                if self._db:
-                    balance_after = daily_state.start_balance + daily_state.realized_pnl
-                    self._db.update_trade_exit(
-                        og.group_id,
-                        actual_exit_price=est_exit,
-                        exit_reason=reason,
-                        pnl_pts=round(pnl_pts, 2),
-                        gross_pnl=est_pnl, commission=0, net_pnl=est_pnl,
-                        exit_time=self._now_iso(),
-                        balance_after=round(balance_after, 2),
-                        daily_pnl_after=round(daily_state.realized_pnl, 2),
-                    )
-
-        # Cancel any pending entries
+        Safety order: cancel pending entries FIRST (prevents new positions
+        appearing during flatten), then flatten open positions, then sweep
+        for any stragglers that snuck through.
+        """
+        # Step 1: Cancel all pending entries FIRST
         await self.cancel_all_pending(daily_state, reason)
 
-        self._logger.log(
-            "flatten",
-            reason=reason,
-            positions=len(positions_to_close),
-        )
+        # Step 2: Brief yield for IB to process cancellations
+        await asyncio.sleep(1.0)
+
+        # Step 3: Flatten all open positions
+        positions_to_close = list(daily_state.open_positions)
+        for og in positions_to_close:
+            await self._flatten_single_position(og, daily_state, reason)
+
+        # Step 4: Sweep for stragglers (positions that appeared during cancel window)
+        closed_ids = {og.group_id for og in positions_to_close}
+        stragglers = [
+            og for og in daily_state.open_positions
+            if og.group_id not in closed_ids
+        ]
+        if stragglers:
+            self._logger.log("flatten_stragglers", count=len(stragglers))
+            for og in stragglers:
+                await self._flatten_single_position(og, daily_state, reason)
+
+        total = len(positions_to_close) + len(stragglers)
+        self._logger.log("flatten", reason=reason, positions=total)
+
+    async def _flatten_single_position(self, og, daily_state, reason):
+        """Market-order close a single open position."""
+        qty = og.filled_qty or og.target_qty
+
+        if not self._config.dry_run and self._conn.is_connected:
+            from ib_async import MarketOrder
+            reverse_side = "SELL" if og.side == "BUY" else "BUY"
+            mkt_order = MarketOrder(action=reverse_side, totalQuantity=qty)
+            flatten_trade = self._conn.ib.placeOrder(self._contract, mkt_order)
+            flatten_trade.filledEvent += lambda t, _og=og: self._on_flatten_fill(
+                t, _og, daily_state, reason
+            )
+        else:
+            if og.side == "BUY":
+                est_exit = og.stop_price
+                pnl_pts = est_exit - og.entry_price
+            else:
+                est_exit = og.stop_price
+                pnl_pts = og.entry_price - est_exit
+            est_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
+
+            daily_state.move_to_closed(og.group_id, reason, est_pnl)
+            self._logger.log(
+                "eod_exit", group_id=og.group_id, setup=og.setup,
+                side=og.side, entry_price=og.entry_price, exit_price=est_exit,
+                exit_reason=reason, qty=qty, pnl_pts=round(pnl_pts, 2),
+                net_pnl=est_pnl, note="estimated (dry run)",
+            )
+            if self._db:
+                balance_after = daily_state.start_balance + daily_state.realized_pnl
+                self._db.update_trade_exit(
+                    og.group_id, actual_exit_price=est_exit, exit_reason=reason,
+                    pnl_pts=round(pnl_pts, 2), gross_pnl=est_pnl, commission=0,
+                    net_pnl=est_pnl, exit_time=self._now_iso(),
+                    balance_after=round(balance_after, 2),
+                    daily_pnl_after=round(daily_state.realized_pnl, 2),
+                )
 
     def _on_flatten_fill(self, trade, og, daily_state, reason):
         """Handle the market order fill from EOD flatten — compute actual P&L."""
@@ -431,6 +432,9 @@ class OrderManager:
 
     def _on_tp_fill(self, trade, og, daily_state):
         """Take profit filled — log P&L, commissions, trade metrics."""
+        # Cancel any unfilled entry remainder + kill partial fill timer
+        self._cleanup_entry_remainder(og)
+
         fill_price = trade.orderStatus.avgFillPrice
         qty = og.filled_qty or og.target_qty
         commission = self._get_commission(trade)
@@ -509,6 +513,9 @@ class OrderManager:
 
     def _on_sl_fill(self, trade, og, daily_state):
         """Stop loss filled — log P&L, slippage, commissions."""
+        # Cancel any unfilled entry remainder + kill partial fill timer
+        self._cleanup_entry_remainder(og)
+
         fill_price = trade.orderStatus.avgFillPrice
         qty = og.filled_qty or og.target_qty
         commission = self._get_commission(trade)
@@ -587,6 +594,28 @@ class OrderManager:
             self._logger.log("kill_switch", reason=daily_state.kill_switch_reason)
         self._state_mgr.save(daily_state)
 
+    def _cleanup_entry_remainder(self, og):
+        """Cancel unfilled entry contracts and kill partial fill timer on TP/SL fill.
+
+        Prevents naked positions: if TP/SL fills while entry is still partially
+        unfilled, the remaining entry contracts must be cancelled immediately.
+        """
+        # Cancel the partial fill timer
+        timer = self._partial_timers.pop(og.group_id, None)
+        if timer and not timer.done():
+            timer.cancel()
+
+        # Cancel unfilled entry remainder on IB
+        if og.filled_qty and og.filled_qty < og.target_qty:
+            asyncio.ensure_future(self._cancel_entry_remainder(og))
+            self._logger.log(
+                "entry_remainder_cancelled",
+                group_id=og.group_id,
+                filled=og.filled_qty,
+                cancelled=og.target_qty - og.filled_qty,
+                reason="tp_sl_filled",
+            )
+
     def _get_commission(self, trade):
         """Extract total commission from an IB trade fill."""
         total = 0.0
@@ -604,10 +633,32 @@ class OrderManager:
         """Handle entry order status changes (cancelled, rejected, etc.)."""
         status = trade.orderStatus.status
         if status in ("Cancelled", "Inactive"):
+            # Update filled qty from IB (our tracker may lag)
+            ib_filled = trade.orderStatus.filled
+            if ib_filled > 0 and ib_filled > og.filled_qty:
+                og.filled_qty = int(ib_filled)
+
             if og.filled_qty == 0:
+                # Clean cancel — no fills
                 daily_state.move_to_closed(og.group_id, CLOSE_CANCEL)
                 self._logger.log(
                     "order_cancelled",
                     group_id=og.group_id,
                     ib_status=status,
+                )
+            else:
+                # CRITICAL: Entry partially filled then cancelled (race condition).
+                # We now have contracts with no TP/SL. Flatten immediately.
+                self._logger.log(
+                    "cancelled_with_fill",
+                    group_id=og.group_id,
+                    filled_qty=og.filled_qty,
+                    ib_status=status,
+                )
+                og.state = "FILLED"
+                og.filled_at = self._now_iso()
+                og.target_qty = og.filled_qty
+                daily_state.move_to_open(og.group_id)
+                asyncio.ensure_future(
+                    self._flatten_single_position(og, daily_state, CLOSE_EOD)
                 )

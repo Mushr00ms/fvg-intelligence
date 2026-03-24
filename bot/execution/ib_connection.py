@@ -32,6 +32,8 @@ class IBConnection:
         self._reconnect_task = None
         self._ib = None
         self._reconnect_interval = 10  # seconds
+        self._reconnect_callbacks = []
+        self._initial_connect_done = False
 
     def _now(self):
         if self._clock is not None:
@@ -54,6 +56,7 @@ class IBConnection:
         )
         self._connected = True
         self._disconnect_time = None
+        self._initial_connect_done = True
 
         if self._logger:
             self._logger.log(
@@ -89,12 +92,16 @@ class IBConnection:
             loop = asyncio.get_event_loop()
             self._reconnect_task = loop.create_task(self._reconnect_loop())
 
+    def on_reconnect(self, callback):
+        """Register an async callback to fire on reconnect (not initial connect)."""
+        self._reconnect_callbacks.append(callback)
+
     def _on_connected(self):
         """Called by ib_async on successful connection."""
         self._connected = True
-        was_disconnected = self._disconnect_time is not None
+        was_reconnect = self._disconnect_time is not None
 
-        if was_disconnected and self._logger:
+        if was_reconnect and self._logger:
             duration = (self._now() - self._disconnect_time).total_seconds()
             self._logger.log(
                 "connection_restored",
@@ -102,6 +109,11 @@ class IBConnection:
             )
 
         self._disconnect_time = None
+
+        # Fire reconnect callbacks (only on REconnect, not initial connect)
+        if was_reconnect and self._initial_connect_done:
+            for cb in self._reconnect_callbacks:
+                asyncio.ensure_future(cb())
 
     async def _reconnect_loop(self):
         """Try reconnecting every N seconds until successful."""

@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FVG Bot — Live Monitor</title>
+<style>
+  :root {
+    --bg0: #0d1117; --bg1: #161b22; --bg2: #21262d; --bg3: #30363d;
+    --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --text-dimmer: #6e7681;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff; --purple: #bc8cff;
+    --green-bg: rgba(63,185,80,0.1); --red-bg: rgba(248,81,73,0.1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: var(--bg0); color: var(--text); font-size: 11px; }
+
+  .header { display: flex; align-items: center; padding: 10px 16px; background: var(--bg1); border-bottom: 1px solid var(--border); gap: 16px; }
+  .header h1 { font-size: 13px; font-weight: 700; letter-spacing: .05em; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+  .status-dot.offline { background: var(--red); }
+  .status-dot.stale { background: var(--yellow); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .kpi-bar { display: flex; gap: 2px; padding: 8px 16px; background: var(--bg1); border-bottom: 1px solid var(--border); }
+  .kpi { flex: 1; padding: 8px 12px; background: var(--bg2); border-radius: 4px; }
+  .kpi-label { font-size: 9px; color: var(--text-dimmer); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }
+  .kpi-value { font-size: 16px; font-weight: 700; }
+  .kpi-value.pos { color: var(--green); }
+  .kpi-value.neg { color: var(--red); }
+  .kpi-value.warn { color: var(--yellow); }
+
+  .main { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr; height: calc(100vh - 95px); }
+
+  .tables-area { grid-column: 1; grid-row: 1 / 3; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .feed-area { grid-column: 2; grid-row: 1 / 3; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+
+  .panel { background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .panel-title { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 8px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); color: var(--text-dim); display: flex; justify-content: space-between; align-items: center; }
+  .panel-title .badge { font-size: 9px; background: var(--bg3); padding: 2px 6px; border-radius: 8px; color: var(--text-dimmer); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dimmer); padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  td { padding: 5px 8px; border-bottom: 1px solid rgba(48,54,61,0.5); font-size: 10px; }
+  tr.win td { background: var(--green-bg); }
+  tr.loss td { background: var(--red-bg); }
+  tr:hover td { background: rgba(88,166,255,0.06); }
+
+  .feed-title { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 10px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); color: var(--text-dim); }
+  .feed { flex: 1; overflow-y: auto; padding: 0; }
+  .feed-item { padding: 6px 12px; border-bottom: 1px solid rgba(48,54,61,0.3); font-size: 10px; line-height: 1.5; }
+  .feed-item .ts { color: var(--text-dimmer); margin-right: 6px; }
+  .feed-item .evt { font-weight: 600; margin-right: 4px; }
+  .feed-item.fvg .evt { color: var(--blue); }
+  .feed-item.trade .evt { color: var(--purple); }
+  .feed-item.win .evt { color: var(--green); }
+  .feed-item.loss .evt { color: var(--red); }
+  .feed-item.system .evt { color: var(--text-dimmer); }
+  .feed-item.alert .evt { color: var(--yellow); }
+
+  .tag { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
+  .tag.buy { background: rgba(63,185,80,0.2); color: var(--green); }
+  .tag.sell { background: rgba(248,81,73,0.2); color: var(--red); }
+  .tag.bullish { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag.bearish { background: rgba(248,81,73,0.15); color: var(--red); }
+  .tag.tp { background: rgba(63,185,80,0.2); color: var(--green); }
+  .tag.sl { background: rgba(248,81,73,0.2); color: var(--red); }
+  .tag.eod { background: rgba(210,153,34,0.2); color: var(--yellow); }
+
+  .empty { padding: 20px; text-align: center; color: var(--text-dimmer); font-style: italic; }
+
+  .nav-link { position: absolute; right: 16px; top: 10px; font-size: 10px; color: var(--blue); text-decoration: none; }
+  .nav-link:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="header" style="position:relative">
+  <span class="status-dot offline" id="status-dot"></span>
+  <h1>FVG INTELLIGENCE — LIVE MONITOR</h1>
+  <span id="header-status" style="color:var(--text-dimmer);font-size:10px">Connecting...</span>
+  <span id="header-strategy" style="color:var(--text-dimmer);font-size:10px;margin-left:auto"></span>
+  <a class="nav-link" href="/rr">← Dashboard</a>
+</div>
+
+<div class="kpi-bar">
+  <div class="kpi"><div class="kpi-label">Balance</div><div class="kpi-value" id="kpi-balance">—</div></div>
+  <div class="kpi"><div class="kpi-label">Daily P&L</div><div class="kpi-value" id="kpi-pnl">—</div></div>
+  <div class="kpi"><div class="kpi-label">Trades</div><div class="kpi-value" id="kpi-trades">—</div></div>
+  <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="kpi-wr">—</div></div>
+  <div class="kpi"><div class="kpi-label">Open Positions</div><div class="kpi-value" id="kpi-open">—</div></div>
+  <div class="kpi"><div class="kpi-label">Active FVGs</div><div class="kpi-value" id="kpi-fvgs">—</div></div>
+  <div class="kpi"><div class="kpi-label">Kill Switch</div><div class="kpi-value" id="kpi-kill">OFF</div></div>
+</div>
+
+<div class="main">
+  <div class="tables-area">
+    <!-- Active FVGs -->
+    <div class="panel">
+      <div class="panel-title">Active FVGs <span class="badge" id="fvg-count">0</span></div>
+      <table>
+        <thead><tr><th>ID</th><th>Type</th><th>Zone</th><th>Size</th><th>Time Period</th><th>Formation</th></tr></thead>
+        <tbody id="tbl-fvgs"></tbody>
+      </table>
+      <div class="empty" id="fvg-empty">No active FVGs</div>
+    </div>
+
+    <!-- Open Positions -->
+    <div class="panel">
+      <div class="panel-title">Open Positions <span class="badge" id="pos-count">0</span></div>
+      <table>
+        <thead><tr><th>Setup</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>R:R</th><th>Qty</th><th>Entered</th></tr></thead>
+        <tbody id="tbl-positions"></tbody>
+      </table>
+      <div class="empty" id="pos-empty">No open positions</div>
+    </div>
+
+    <!-- Pending Orders -->
+    <div class="panel">
+      <div class="panel-title">Pending Orders <span class="badge" id="ord-count">0</span></div>
+      <table>
+        <thead><tr><th>Setup</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>R:R</th><th>Qty</th><th>Status</th></tr></thead>
+        <tbody id="tbl-orders"></tbody>
+      </table>
+      <div class="empty" id="ord-empty">No pending orders</div>
+    </div>
+
+    <!-- Closed Trades (Today) -->
+    <div class="panel">
+      <div class="panel-title">Closed Trades <span class="badge" id="closed-count">0</span></div>
+      <table>
+        <thead><tr><th>Setup</th><th>Side</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Risk</th><th>R:R</th><th>Qty</th><th>P&L</th><th>Duration</th></tr></thead>
+        <tbody id="tbl-closed"></tbody>
+      </table>
+      <div class="empty" id="closed-empty">No trades yet today</div>
+    </div>
+  </div>
+
+  <!-- Event Feed -->
+  <div class="feed-area">
+    <div class="feed-title">Event Feed <span style="font-weight:400;color:var(--text-dimmer)">— live</span></div>
+    <div class="feed" id="feed"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let _state = null;
+let _evtSource = null;
+let _eventCount = 0;
+
+// ═══════════════════════════════════════
+// KPI UPDATES
+// ═══════════════════════════════════════
+function updateKPIs(state) {
+  if (!state || state.error) return;
+  const bal = (state.start_balance || 76000) + (state.realized_pnl || 0);
+  const pnl = state.realized_pnl || 0;
+  const trades = state.trade_count || 0;
+  const closed = state.closed_trades || [];
+  const wins = closed.filter(t => t.close_reason === 'TP').length;
+  const wr = trades > 0 ? (wins / trades * 100) : 0;
+
+  document.getElementById('kpi-balance').textContent = '$' + Math.round(bal).toLocaleString();
+
+  const pnlEl = document.getElementById('kpi-pnl');
+  pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(pnl)).toLocaleString();
+  pnlEl.className = 'kpi-value ' + (pnl >= 0 ? 'pos' : 'neg');
+
+  document.getElementById('kpi-trades').textContent = trades;
+  document.getElementById('kpi-wr').textContent = trades > 0 ? wr.toFixed(0) + '%' : '—';
+  document.getElementById('kpi-open').textContent = (state.open_positions || []).length;
+  document.getElementById('kpi-fvgs').textContent = (state.active_fvgs || []).length;
+
+  const killEl = document.getElementById('kpi-kill');
+  if (state.kill_switch_active) {
+    killEl.textContent = 'ACTIVE';
+    killEl.className = 'kpi-value neg';
+  } else {
+    killEl.textContent = 'OFF';
+    killEl.className = 'kpi-value';
+  }
+
+  // Status dot
+  const dot = document.getElementById('status-dot');
+  const statusText = document.getElementById('header-status');
+  if (state.running) {
+    dot.className = 'status-dot live';
+    statusText.textContent = 'Bot running';
+    statusText.style.color = 'var(--green)';
+  } else {
+    dot.className = 'status-dot stale';
+    statusText.textContent = 'Bot stopped';
+    statusText.style.color = 'var(--yellow)';
+  }
+}
+
+// ═══════════════════════════════════════
+// TABLE RENDERERS
+// ═══════════════════════════════════════
+function renderFVGs(fvgs) {
+  const tbody = document.getElementById('tbl-fvgs');
+  const empty = document.getElementById('fvg-empty');
+  document.getElementById('fvg-count').textContent = fvgs.length;
+  if (!fvgs.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = fvgs.map(f => {
+    const cls = f.fvg_type === 'bullish' ? 'bullish' : 'bearish';
+    return `<tr><td>${(f.fvg_id||'').slice(0,8)}</td>
+      <td><span class="tag ${cls}">${f.fvg_type}</span></td>
+      <td>${f.zone_low?.toFixed(2)} → ${f.zone_high?.toFixed(2)}</td>
+      <td>${(f.zone_high - f.zone_low)?.toFixed(2)}</td>
+      <td>${f.time_period}</td>
+      <td>${f.time_candle3?.split('T')[1]?.slice(0,8) || ''}</td></tr>`;
+  }).join('');
+}
+
+function renderPositions(positions) {
+  const tbody = document.getElementById('tbl-positions');
+  const empty = document.getElementById('pos-empty');
+  document.getElementById('pos-count').textContent = positions.length;
+  if (!positions.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = positions.map(p => {
+    const cls = p.side === 'BUY' ? 'buy' : 'sell';
+    const setup = (p.setup || '').replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    return `<tr><td>${setup}</td>
+      <td><span class="tag ${cls}">${p.side}</span></td>
+      <td>${p.entry_price}</td><td>${p.stop_price}</td><td>${p.target_price}</td>
+      <td>${p.risk_pts}</td><td>${p.n_value}R</td><td>${p.filled_qty || p.target_qty}</td>
+      <td>${p.filled_at?.split('T')[1]?.slice(0,8) || ''}</td></tr>`;
+  }).join('');
+}
+
+function renderOrders(orders) {
+  const tbody = document.getElementById('tbl-orders');
+  const empty = document.getElementById('ord-empty');
+  document.getElementById('ord-count').textContent = orders.length;
+  if (!orders.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = orders.map(o => {
+    const cls = o.side === 'BUY' ? 'buy' : 'sell';
+    const setup = (o.setup || '').replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    return `<tr><td>${setup}</td>
+      <td><span class="tag ${cls}">${o.side}</span></td>
+      <td>${o.entry_price}</td><td>${o.stop_price}</td><td>${o.target_price}</td>
+      <td>${o.risk_pts}</td><td>${o.n_value}R</td><td>${o.target_qty}</td>
+      <td>${o.state}</td></tr>`;
+  }).join('');
+}
+
+function renderClosed(trades) {
+  const tbody = document.getElementById('tbl-closed');
+  const empty = document.getElementById('closed-empty');
+  document.getElementById('closed-count').textContent = trades.length;
+  if (!trades.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = trades.slice().reverse().map(t => {
+    const reason = t.close_reason || '';
+    const cls = reason === 'TP' ? 'win' : (reason === 'SL' ? 'loss' : '');
+    const tagCls = reason === 'TP' ? 'tp' : (reason === 'SL' ? 'sl' : 'eod');
+    const setup = (t.setup || '').replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+    const sideCls = t.side === 'BUY' ? 'buy' : 'sell';
+    const pnl = t.realized_pnl || 0;
+    // Duration
+    let dur = '';
+    if (t.filled_at && t.closed_at) {
+      const secs = Math.round((new Date(t.closed_at) - new Date(t.filled_at)) / 1000);
+      if (secs < 60) dur = secs + 's';
+      else if (secs < 3600) dur = Math.floor(secs/60) + 'm';
+      else dur = Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+    }
+    return `<tr class="${cls}"><td>${setup}</td>
+      <td><span class="tag ${sideCls}">${t.side}</span></td>
+      <td>${t.entry_price}</td><td>${t.close_price || '—'}</td>
+      <td><span class="tag ${tagCls}">${reason}</span></td>
+      <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.filled_qty || t.target_qty}</td>
+      <td style="color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${Math.round(pnl).toLocaleString()}</td>
+      <td>${dur}</td></tr>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════
+// EVENT FEED
+// ═══════════════════════════════════════
+const EVENT_CLASSES = {
+  fvg_detected: 'fvg', mitigation: 'fvg',
+  setup_accepted: 'trade', order_placed: 'trade', order_filled: 'trade',
+  tp_filled: 'win', sl_filled: 'loss', eod_exit: 'alert',
+  kill_switch: 'alert', bot_error: 'alert', connection_lost: 'alert',
+  bot_start: 'system', bot_stop: 'system', bars_subscribed: 'system',
+  strategy_loaded: 'system', startup_complete: 'system', contract_resolved: 'system',
+  eod_scheduled: 'system', reconciliation: 'system', state_loaded: 'system',
+  setup_rejected: 'system', order_cancelled: 'system',
+};
+
+function formatEvent(evt) {
+  const e = evt.event || evt.bridge_event || 'unknown';
+  const cls = EVENT_CLASSES[e] || 'system';
+  let ts = '';
+  if (evt.ts) {
+    if (typeof evt.ts === 'string') ts = evt.ts.split('T')[1]?.slice(0,8) || evt.ts;
+    else ts = new Date(evt.ts * 1000).toTimeString().slice(0,8);
+  }
+
+  let detail = '';
+  switch(e) {
+    case 'fvg_detected':
+      detail = `<span class="tag ${evt.type}">${evt.type}</span> zone=${JSON.stringify(evt.zone)} size=${evt.size} ${evt.time_period||''}`;
+      break;
+    case 'mitigation':
+      detail = `<span class="tag ${evt.type}">${evt.type}</span> FVG mitigated`;
+      break;
+    case 'setup_accepted':
+      detail = `<span class="tag ${evt.side?.toLowerCase()}">${evt.side}</span> ${evt.setup} entry=${evt.entry} SL=${evt.stop} TP=${evt.target} ${evt.n}R qty=${evt.qty}`;
+      break;
+    case 'order_placed':
+      detail = `<span class="tag ${evt.side?.toLowerCase()}">${evt.side}</span> ${evt.setup} ${evt.contracts}ct @ ${evt.entry}`;
+      break;
+    case 'order_filled':
+      detail = `filled ${evt.qty}ct @ ${evt.avg_price} (slip: ${evt.slippage_pts}pts)`;
+      break;
+    case 'tp_filled':
+      detail = `<span class="tag tp">TP</span> +$${Math.round(evt.net_pnl||0)} (${evt.duration||''})`;
+      break;
+    case 'sl_filled':
+      detail = `<span class="tag sl">SL</span> -$${Math.abs(Math.round(evt.net_pnl||0))} (${evt.duration||''})`;
+      break;
+    case 'kill_switch':
+      detail = `⚠ ${evt.action}: ${evt.reason}`;
+      break;
+    case 'setup_rejected':
+      detail = `gate=${evt.gate} ${evt.reason||''}`;
+      break;
+    case 'contract_resolved':
+      detail = `${evt.symbol} conId=${evt.conId}`;
+      break;
+    case 'bot_start':
+      detail = evt.mode ? `${evt.mode} dry_run=${evt.dry_run}` : `${evt.host}:${evt.port}`;
+      break;
+    default:
+      // Show all fields except ts and event
+      const fields = Object.entries(evt).filter(([k]) => !['ts','event'].includes(k));
+      detail = fields.map(([k,v]) => `${k}=${typeof v==='object'?JSON.stringify(v):v}`).join(' ');
+  }
+
+  return `<div class="feed-item ${cls}"><span class="ts">${ts}</span><span class="evt">${e}</span> ${detail}</div>`;
+}
+
+function addFeedEvent(evt) {
+  const feed = document.getElementById('feed');
+  feed.insertAdjacentHTML('afterbegin', formatEvent(evt));
+  // Keep max 200 items
+  while (feed.children.length > 200) feed.removeChild(feed.lastChild);
+  _eventCount++;
+}
+
+// ═══════════════════════════════════════
+// SSE CONNECTION
+// ═══════════════════════════════════════
+function connectSSE() {
+  if (_evtSource) _evtSource.close();
+
+  _evtSource = new EventSource(`${API}/api/bot/events`);
+
+  _evtSource.onmessage = (e) => {
+    try {
+      const evt = JSON.parse(e.data);
+      if (evt.event === 'connected') return; // Skip internal event
+      addFeedEvent(evt);
+
+      // Trigger state refresh on trade events
+      if (['order_filled','tp_filled','sl_filled','eod_exit','kill_switch','order_placed','order_cancelled'].includes(evt.event)) {
+        refreshState();
+      }
+    } catch(err) {}
+  };
+
+  _evtSource.onerror = () => {
+    document.getElementById('status-dot').className = 'status-dot offline';
+    document.getElementById('header-status').textContent = 'SSE disconnected — retrying...';
+    document.getElementById('header-status').style.color = 'var(--red)';
+  };
+
+  _evtSource.onopen = () => {
+    document.getElementById('header-status').textContent = 'SSE connected';
+  };
+}
+
+// ═══════════════════════════════════════
+// STATE POLLING
+// ═══════════════════════════════════════
+async function refreshState() {
+  try {
+    const res = await fetch(`${API}/api/bot/state`);
+    _state = await res.json();
+    updateKPIs(_state);
+    renderFVGs(_state.active_fvgs || []);
+    renderPositions(_state.open_positions || []);
+    renderOrders(_state.pending_orders || []);
+    renderClosed(_state.closed_trades || []);
+
+    // Strategy name
+    const stratEl = document.getElementById('header-strategy');
+    if (_state.strategy_id) stratEl.textContent = _state.strategy_id;
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════
+async function init() {
+  // Load event history first
+  try {
+    const res = await fetch(`${API}/api/bot/events/history`);
+    const data = await res.json();
+    // Show last 100 events
+    (data.events || []).slice(-100).forEach(evt => addFeedEvent(evt));
+  } catch(e) {}
+
+  // Start SSE
+  connectSSE();
+
+  // Initial state + poll every 5s
+  refreshState();
+  setInterval(refreshState, 5000);
+}
+
+init();
+</script>
+</body>
+</html>

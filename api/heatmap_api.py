@@ -574,6 +574,148 @@ def api_backtest_history():
     return JSONResponse({"runs": runs})
 
 
+# ── Live Bot endpoints ─────────────────────────────────────────────────────
+
+_BOT_STATE_DIR = os.path.join(_REPO_ROOT, "bot", "bot_state")
+_BOT_LOG_DIR = os.path.join(_REPO_ROOT, "bot", "logs")
+_BOT_DB_PATH = os.path.join(_REPO_ROOT, "bot", "fvg_bot.db")
+
+
+def _today_str():
+    """Current date in ET as YYYY-MM-DD."""
+    import pytz
+    from datetime import datetime
+    return datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+
+
+@app.get("/live")
+async def live_page():
+    """Live bot monitoring dashboard."""
+    return FileResponse(os.path.join(_DASHBOARD_DIR, "live_dashboard.html"))
+
+
+@app.get("/api/bot/state")
+def api_bot_state():
+    """Return the current bot DailyState JSON."""
+    # Find the most recent state file
+    os.makedirs(_BOT_STATE_DIR, exist_ok=True)
+    state_file = os.path.join(_BOT_STATE_DIR, "daily_state.json")
+    if not os.path.exists(state_file):
+        # Try date-stamped file
+        state_file = os.path.join(_BOT_STATE_DIR, f"{_today_str()}.json")
+    if not os.path.exists(state_file):
+        # Try any .json in the dir
+        for f in sorted(os.listdir(_BOT_STATE_DIR), reverse=True):
+            if f.endswith(".json"):
+                state_file = os.path.join(_BOT_STATE_DIR, f)
+                break
+    if not os.path.exists(state_file):
+        return JSONResponse({"error": "No bot state found", "running": False})
+    try:
+        with open(state_file) as f:
+            state = json.load(f)
+        state["running"] = True
+        # Check if stale (last_updated > 60s ago → probably not running)
+        from datetime import datetime
+        try:
+            last = datetime.fromisoformat(state.get("last_updated", ""))
+            import pytz
+            now = datetime.now(pytz.timezone("America/New_York"))
+            if hasattr(last, 'tzinfo') and last.tzinfo:
+                age = (now - last).total_seconds()
+            else:
+                age = 999
+            state["running"] = age < 120  # Consider stale after 2 minutes
+            state["state_age_seconds"] = round(age, 1)
+        except Exception:
+            pass
+        return JSONResponse(state)
+    except Exception as e:
+        return JSONResponse({"error": str(e), "running": False})
+
+
+@app.get("/api/bot/events")
+async def api_bot_events():
+    """SSE stream of live bot events. Tails today's JSONL log file."""
+    log_file = os.path.join(_BOT_LOG_DIR, f"{_today_str()}.jsonl")
+
+    async def event_stream():
+        """Tail the JSONL log file, yielding new lines as SSE events."""
+        # Start from the end of existing file (don't replay history on connect)
+        file_pos = 0
+        if os.path.exists(log_file):
+            file_pos = os.path.getsize(log_file)
+
+        # Send initial connection event
+        yield f"data: {json.dumps({'event': 'connected', 'log_file': log_file, 'position': file_pos})}\n\n"
+
+        while True:
+            try:
+                if os.path.exists(log_file):
+                    size = os.path.getsize(log_file)
+                    if size > file_pos:
+                        with open(log_file, 'r') as f:
+                            f.seek(file_pos)
+                            new_data = f.read()
+                            file_pos = f.tell()
+                        for line in new_data.strip().split('\n'):
+                            if line.strip():
+                                try:
+                                    evt = json.loads(line)
+                                    yield f"data: {json.dumps(evt)}\n\n"
+                                except json.JSONDecodeError:
+                                    yield f"data: {json.dumps({'event': 'raw', 'line': line})}\n\n"
+                    elif size < file_pos:
+                        # File was truncated/rotated
+                        file_pos = 0
+                else:
+                    file_pos = 0
+            except Exception as e:
+                yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/bot/events/history")
+def api_bot_events_history():
+    """Return all events from today's log (for initial page load)."""
+    log_file = os.path.join(_BOT_LOG_DIR, f"{_today_str()}.jsonl")
+    events = []
+    if os.path.exists(log_file):
+        with open(log_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    return JSONResponse({"events": events, "count": len(events)})
+
+
+@app.get("/api/bot/stats")
+def api_bot_stats():
+    """Return aggregate stats from the bot's SQLite database."""
+    if not os.path.exists(_BOT_DB_PATH):
+        return JSONResponse({"error": "No bot database found"})
+    try:
+        sys.path.insert(0, os.path.join(_REPO_ROOT, "bot"))
+        from db import TradeDB
+        db = TradeDB(_BOT_DB_PATH)
+        return JSONResponse({
+            "daily": db.get_daily_summary(days=30),
+            "cells": db.get_cell_performance(),
+            "equity": db.get_equity_curve(limit=500),
+            "hourly": db.get_hourly_performance(),
+            "funnel": db.get_funnel(_today_str()),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8765)

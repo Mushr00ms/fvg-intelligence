@@ -37,6 +37,18 @@ from bot.alerts.telegram import TelegramAlerter
 from bot.db import TradeDB
 
 NY_TZ = pytz.timezone("America/New_York")
+CME_TZ = pytz.timezone("America/Chicago")  # CME exchange timezone
+
+
+def _bar_date_to_et(bar_date):
+    """Convert IB bar date (naive, in CME/Central time) to ET datetime."""
+    if bar_date is None:
+        return bar_date
+    if hasattr(bar_date, 'tzinfo') and bar_date.tzinfo is not None:
+        # Already timezone-aware — just convert to ET
+        return bar_date.astimezone(NY_TZ)
+    # Naive datetime from IB — assume CME (Central) timezone
+    return CME_TZ.localize(bar_date).astimezone(NY_TZ)
 
 
 class BotEngine:
@@ -80,6 +92,7 @@ class BotEngine:
         self._bars_5min = None
         self._bars_1min = None
         self._shutdown = False
+        self._mitigation_lock = asyncio.Lock()
         self._eod_tasks = []
         self._periodic_tasks = []
 
@@ -157,6 +170,14 @@ class BotEngine:
         if not self.config.dry_run and self.ib_conn.is_connected:
             await self._subscribe_bars()
 
+            # 6b. Backfill FVGs from today's existing 5-min bars
+            # On crash/restart mid-session, the bot needs to know about
+            # FVGs that formed before it came back online.
+            await self._backfill_fvgs()
+
+            # 6c. Register reconnect handler (re-subscribe bars if IB drops)
+            self.ib_conn.on_reconnect(self._on_reconnect)
+
         # 7. Schedule EOD actions
         self._schedule_eod()
 
@@ -175,7 +196,11 @@ class BotEngine:
         )
 
     async def _event_loop(self):
-        """Run until shutdown signal, session end, or kill switch."""
+        """Run until shutdown signal, session end, or kill switch.
+
+        Uses ib.sleep() instead of asyncio.sleep() to ensure ib_async
+        processes its internal events (bar updates, fill callbacks, etc.).
+        """
         while not self._shutdown:
             if self.daily_state and self.daily_state.kill_switch_active:
                 await self._trigger_kill_switch()
@@ -186,6 +211,8 @@ class BotEngine:
                 break
 
             # Let asyncio process events (IB callbacks, timers, etc.)
+            # Yield to event loop — ib_async processes bar updates and fill
+            # callbacks during asyncio.sleep via nest_asyncio patching
             await asyncio.sleep(0.1)
 
     async def _resolve_contract(self):
@@ -200,31 +227,44 @@ class BotEngine:
         expirations = generate_nq_expirations(now.year - 1, now.year + 1)
         exp_date = get_contract_for_date(now, expirations, roll_days=8)
 
-        contract = Future(
-            symbol=self.config.ticker,
-            lastTradeDateOrContractMonth=exp_date.strftime("%Y%m%d"),
-            exchange=self.config.exchange,
-            currency=self.config.currency,
-        )
+        # Try exact expiry date first, then month-only format (for newly listed contracts)
+        # Suppress IB error 200 ("no security definition") during this probe
+        ib = self.ib_conn.ib
+        _suppress_200 = [True]
+        def _quiet_error(reqId, errorCode, errorString, contract):
+            if errorCode == 200 and _suppress_200[0]:
+                return  # Expected during contract probing
+        ib.errorEvent += _quiet_error
 
-        qualified = await self.ib_conn.ib.qualifyContractsAsync(contract)
-        if qualified:
-            self.logger.log(
-                "contract_resolved",
-                symbol=contract.symbol,
-                expiry=exp_date.strftime("%Y%m%d"),
-                conId=contract.conId,
+        for date_fmt in [exp_date.strftime("%Y%m%d"), exp_date.strftime("%Y%m")]:
+            contract = Future(
+                symbol=self.config.ticker,
+                lastTradeDateOrContractMonth=date_fmt,
+                exchange=self.config.exchange,
+                currency=self.config.currency,
             )
-            return contract
-        else:
-            raise RuntimeError(f"Failed to qualify contract: {contract}")
+            qualified = await ib.qualifyContractsAsync(contract)
+            if qualified and contract.conId > 0:
+                _suppress_200[0] = False
+                ib.errorEvent -= _quiet_error
+                self.logger.log(
+                    "contract_resolved",
+                    symbol=contract.symbol,
+                    expiry=date_fmt,
+                    conId=contract.conId,
+                )
+                return contract
+
+        _suppress_200[0] = False
+        ib.errorEvent -= _quiet_error
+        raise RuntimeError(f"Failed to qualify NQ contract for expiry {exp_date}")
 
     async def _subscribe_bars(self):
         """Subscribe to 5min and 1min keepUpToDate historical bars."""
         ib = self.ib_conn.ib
 
-        # 5-minute bars
-        self._bars_5min = ib.reqHistoricalData(
+        # 5-minute bars (use async version to avoid event loop conflict)
+        self._bars_5min = await ib.reqHistoricalDataAsync(
             self._contract,
             endDateTime="",
             durationStr="1 D",
@@ -236,7 +276,7 @@ class BotEngine:
         self._bars_5min.updateEvent += self._on_5min_update
 
         # 1-minute bars
-        self._bars_1min = ib.reqHistoricalData(
+        self._bars_1min = await ib.reqHistoricalDataAsync(
             self._contract,
             endDateTime="",
             durationStr="1 D",
@@ -249,18 +289,120 @@ class BotEngine:
 
         self.logger.log("bars_subscribed", timeframes=["5min", "1min"])
 
-    def _on_5min_update(self, bars, hasNewBar):
-        """Callback when 5min bar data updates."""
-        if not hasNewBar or len(bars) < 1:
+    async def _backfill_fvgs(self):
+        """
+        Scan today's existing 5-min bars for un-mitigated FVGs.
+
+        On crash/restart mid-session, the bot loses its active FVG list.
+        This replays the already-loaded 5-min bars (from the keepUpToDate
+        subscription which includes today's history) to rebuild the list.
+        Then checks 1-min bars to see if any were already mitigated.
+        """
+        if self._bars_5min is None or len(self._bars_5min) < 3:
             return
 
-        bar = bars[-1]
+        from bot.strategy.fvg_detector import check_fvg_3bars, _assign_time_period, SESSION_INTERVALS
+        from bot.strategy.trade_calculator import round_to_tick
+
+        # Build set of already-traded zones to prevent duplicate entries on restart
+        _traded_zones = set()
+        for og in (self.daily_state.pending_orders
+                   + self.daily_state.open_positions
+                   + self.daily_state.closed_trades):
+            _traded_zones.add((round(og.entry_price, 2), round(og.stop_price, 2)))
+
+        # Replay all completed 5-min bars to detect FVGs
+        detected = 0
+        for i in range(2, len(self._bars_5min)):
+            bar1 = self._bars_5min[i - 2]
+            bar2 = self._bars_5min[i - 1]
+            bar3 = self._bars_5min[i]
+
+            b1 = {"open": bar1.open, "high": bar1.high, "low": bar1.low, "close": bar1.close, "date": _bar_date_to_et(bar1.date)}
+            b2 = {"open": bar2.open, "high": bar2.high, "low": bar2.low, "close": bar2.close, "date": _bar_date_to_et(bar2.date)}
+            b3 = {"open": bar3.open, "high": bar3.high, "low": bar3.low, "close": bar3.close, "date": _bar_date_to_et(bar3.date)}
+
+            fvg = check_fvg_3bars(b1, b2, b3, self.config.min_fvg_size)
+            if fvg is None:
+                continue
+
+            fvg.time_period = _assign_time_period(b3["date"], SESSION_INTERVALS)
+            if not fvg.time_period:
+                continue
+
+            fvg.formation_date = str(b3["date"].date()) if hasattr(b3["date"], "date") else ""
+
+            # Check if any strategy cell matches this time period
+            has_cell = any(
+                tp == fvg.time_period for tp, _ in self.strategy._lookup.keys()
+            )
+            if not has_cell:
+                continue
+
+            # Check if already mitigated by scanning 1-min bars after formation
+            formation_time = b3["date"]
+            already_mitigated = False
+            if self._bars_1min:
+                for bar_1m in self._bars_1min:
+                    bar_1m_et = _bar_date_to_et(bar_1m.date)
+                    if bar_1m_et <= formation_time:
+                        continue
+                    if bar_1m.low <= fvg.zone_high and bar_1m.high >= fvg.zone_low:
+                        already_mitigated = True
+                        break
+
+            if not already_mitigated:
+                # Check if this zone was already traded (prevents duplicate on restart)
+                mit_entry = round_to_tick(fvg.zone_high if fvg.fvg_type == "bullish" else fvg.zone_low)
+                mid_entry = round_to_tick((fvg.zone_high + fvg.zone_low) / 2)
+                stop = round_to_tick(fvg.middle_low if fvg.fvg_type == "bullish" else fvg.middle_high)
+                if (round(mit_entry, 2), round(stop, 2)) in _traded_zones or \
+                   (round(mid_entry, 2), round(stop, 2)) in _traded_zones:
+                    continue  # Already traded this zone
+
+                self.fvg_mgr._active[fvg.fvg_id] = fvg
+                detected += 1
+
+        if detected > 0:
+            self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
+            self.state_mgr.save(self.daily_state)
+
+        self.logger.log(
+            "fvg_backfill",
+            bars_scanned=len(self._bars_5min),
+            fvgs_found=detected,
+            total_active=self.fvg_mgr.active_count,
+        )
+
+    async def _on_reconnect(self):
+        """Re-subscribe bars and backfill FVGs after IB reconnect."""
+        self.logger.log("reconnect_resubscribe")
+        try:
+            await self._subscribe_bars()
+            await self._backfill_fvgs()
+            self.logger.log("reconnect_resubscribe_done",
+                            active_fvgs=self.fvg_mgr.active_count)
+        except Exception as e:
+            self.logger.log("reconnect_resubscribe_error", error=str(e))
+
+    def _on_5min_update(self, bars, hasNewBar):
+        """Callback when 5min bar data updates.
+
+        With keepUpToDate=True, hasNewBar=True means a new bar STARTED.
+        bars[-1] is the new incomplete bar, bars[-2] is the just-completed bar.
+        We detect FVGs on the COMPLETED bar (bars[-2]), never on the incomplete one.
+        """
+        if not hasNewBar or len(bars) < 2:
+            return
+
+        # Use the just-completed bar, NOT the new incomplete one
+        bar = bars[-2]
         bar_dict = {
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
-            "date": bar.date,
+            "date": _bar_date_to_et(bar.date),
         }
 
         # Detect FVG on the completed bar
@@ -277,17 +419,21 @@ class BotEngine:
             )
 
     def _on_1min_update(self, bars, hasNewBar):
-        """Callback when 1min bar data updates."""
-        if not hasNewBar or len(bars) < 1:
+        """Callback when 1min bar data updates.
+
+        Same as 5min: bars[-1] is incomplete, bars[-2] is just-completed.
+        Mitigation scanning uses the completed bar.
+        """
+        if not hasNewBar or len(bars) < 2:
             return
 
-        bar = bars[-1]
+        bar = bars[-2]
         bar_dict = {
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
-            "date": bar.date,
+            "date": _bar_date_to_et(bar.date),
         }
 
         # Scan for mitigations
@@ -304,8 +450,9 @@ class BotEngine:
             )
             self.db.update_fvg(fvg.fvg_id, mitigated=1, mitigation_time=mit_time)
 
-            # Process trade setup (synchronous — sequential for race safety)
-            asyncio.ensure_future(self._process_mitigation(fvg, bar_dict))
+            # Process trade setup — serialized via lock to prevent concurrent
+            # mitigations from bypassing the position limit
+            asyncio.ensure_future(self._guarded_process_mitigation(fvg, bar_dict))
 
             # Remove from active list
             self.fvg_mgr.remove(fvg.fvg_id)
@@ -313,6 +460,11 @@ class BotEngine:
         if mitigated:
             self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
             self.state_mgr.save(self.daily_state)
+
+    async def _guarded_process_mitigation(self, fvg, bar):
+        """Serialize mitigation processing to prevent concurrent position limit bypass."""
+        async with self._mitigation_lock:
+            await self._process_mitigation(fvg, bar)
 
     async def _process_mitigation(self, fvg, bar):
         """
@@ -340,6 +492,8 @@ class BotEngine:
                 continue
 
             # Look up strategy cell
+            from bot.strategy.trade_calculator import risk_to_range
+            risk_range = risk_to_range(risk_pts) or ""
             cell = self.strategy.find_cell(fvg.time_period, risk_pts)
             if cell is None:
                 continue
@@ -350,7 +504,7 @@ class BotEngine:
 
             # Calculate full setup
             balance = self.daily_state.start_balance + self.daily_state.realized_pnl
-            order = calculate_setup(fvg, cell, balance, self.config.risk_per_trade)
+            order = calculate_setup(fvg, cell, balance, self.config.risk_per_trade, config=self.config)
             if order is None:
                 self.logger.log(
                     "setup_rejected", fvg_id=fvg.fvg_id,

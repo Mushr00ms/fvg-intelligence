@@ -277,6 +277,45 @@ def run_backtest(df_1s, strategy, config=None):
     max_daily_trades = config.get("max_daily_trades", 15)
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
+
+    # IB tiered commission: per-side IB rate (marginal) + $1.40 exchange/reg
+    # Round-trip = 2 sides. Monthly volume determines IB rate tier.
+    _EXCHANGE_FEE_PER_SIDE = 1.40
+    _IB_TIERS = [  # (cumulative_threshold, per_side_ib_rate)
+        (1000,  0.85),
+        (10000, 0.65),
+        (20000, 0.45),
+        (float('inf'), 0.25),
+    ]
+    _monthly_contracts = 0  # reset each month
+    _current_month = None
+
+    def _calc_commission(num_contracts, trade_date):
+        """Calculate round-trip commission with IB tiered pricing."""
+        nonlocal _monthly_contracts, _current_month
+        # Reset on new month
+        trade_month = (trade_date.year, trade_date.month) if hasattr(trade_date, 'year') else None
+        if trade_month != _current_month:
+            _monthly_contracts = 0
+            _current_month = trade_month
+
+        total_comm = 0.0
+        remaining = num_contracts
+        vol = _monthly_contracts
+        for threshold, rate in _IB_TIERS:
+            if remaining <= 0:
+                break
+            available = threshold - vol
+            if available <= 0:
+                continue
+            batch = min(remaining, available)
+            per_side = rate + _EXCHANGE_FEE_PER_SIDE
+            total_comm += batch * per_side * 2  # round-trip = 2 sides
+            remaining -= batch
+            vol += batch
+
+        _monthly_contracts += num_contracts
+        return round(total_comm, 2)
     use_risk_tiers = config.get("risk_tiers", False)
 
     # Load risk tier config from strategy meta if enabled
@@ -456,12 +495,13 @@ def run_backtest(df_1s, strategy, config=None):
 
                 exit_time, exit_price, exit_reason = result
 
-                # Calculate P&L
+                # Calculate P&L (net of IB tiered commissions)
                 if side == "BUY":
                     pnl_pts = exit_price - entry
                 else:
                     pnl_pts = entry - exit_price
-                pnl_dollars = round(pnl_pts * contracts * POINT_VALUE, 2)
+                commission = _calc_commission(contracts, day)
+                pnl_dollars = round(pnl_pts * contracts * POINT_VALUE - commission, 2)
 
                 trade_counter += 1
                 trade = Trade(
@@ -542,6 +582,7 @@ def print_report(trades, start_balance, final_balance):
         dd_pct = dd / peak if peak > 0 else 0
         if dd > max_dd:
             max_dd = dd
+        if dd_pct > max_dd_pct:
             max_dd_pct = dd_pct
 
     # Per-day stats
@@ -654,6 +695,7 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
         dd_pct = dd / peak if peak > 0 else 0
         if dd > max_dd:
             max_dd = dd
+        if dd_pct > max_dd_pct:
             max_dd_pct = dd_pct
         equity_curve.append({
             "trade_id": t.trade_id, "date": t.date,

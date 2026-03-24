@@ -2198,18 +2198,29 @@ function btRenderTradeLog() {
   let html = `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
     <th>#</th><th>Date</th><th>Time Period</th><th>Type</th><th>Setup</th><th>Side</th>
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
-    <th>Exit</th><th>Reason</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
+    <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
   </tr></thead><tbody>`;
   trades.forEach((t, i) => {
     const cls = t.exit_reason === 'TP' ? 'win' : (t.exit_reason === 'SL' ? 'loss' : 'eod');
     const setup = t.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
     const bal = balMap[t.id] != null ? balMap[t.id] : (i === 0 ? startBal + t.pnl_dollars : '');
     const balStr = typeof bal === 'number' ? '$' + Math.round(bal).toLocaleString() : '';
+    let durStr = '';
+    if (t.entry_time && t.exit_time) {
+      const entryMs = new Date(t.entry_time).getTime();
+      const exitMs = new Date(t.exit_time).getTime();
+      if (!isNaN(entryMs) && !isNaN(exitMs)) {
+        const secs = Math.round((exitMs - entryMs) / 1000);
+        if (secs < 60) durStr = secs + 's';
+        else if (secs < 3600) durStr = Math.floor(secs/60) + 'm ' + (secs%60) + 's';
+        else durStr = Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+      }
+    }
     html += `<tr class="${cls}"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
       <td>${t.fvg_type}</td><td>${setup}</td><td>${t.side}</td>
       <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
       <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts}</td>
-      <td>${t.exit_price}</td><td>${t.exit_reason}</td>
+      <td>${t.exit_price}</td><td>${t.exit_reason}</td><td>${durStr}</td>
       <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td></tr>`;
   });
   html += '</tbody></table></div>';

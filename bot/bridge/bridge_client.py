@@ -38,13 +38,37 @@ class BridgeClient:
         client.on_event = callback              # Set event handler
     """
 
+    @staticmethod
+    def _detect_windows_host():
+        """Detect the Windows host IP from WSL2. Falls back to 127.0.0.1."""
+        try:
+            with open('/etc/resolv.conf') as f:
+                for line in f:
+                    if line.strip().startswith('nameserver'):
+                        ip = line.strip().split()[-1]
+                        if ip != '127.0.0.1':
+                            return ip
+        except FileNotFoundError:
+            pass
+        # Fallback: try default gateway
+        try:
+            import subprocess
+            result = subprocess.run(['ip', 'route', 'show', 'default'],
+                                    capture_output=True, text=True, timeout=3)
+            for part in result.stdout.split():
+                if '.' in part and part[0].isdigit():
+                    return part
+        except Exception:
+            pass
+        return "127.0.0.1"
+
     def __init__(self, config, logger=None):
         self._config = config
         self._logger = logger
         self._reader = None
         self._writer = None
         self._bridge_process = None
-        self._tcp_host = "127.0.0.1"
+        self._tcp_host = self._detect_windows_host()
         self._tcp_port = getattr(config, 'bridge_port', 9100)
         self._connected = False
         self._event_handlers = {}       # event_name -> [callbacks]

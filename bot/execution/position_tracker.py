@@ -45,15 +45,17 @@ def determine_close_reason(order_group, fill_price):
 
 
 async def get_account_balance(ib_connection):
-    """Query IB for current NetLiquidation value."""
+    """Query IB for AvailableFunds (cash available for trading)."""
     if not ib_connection.is_connected:
         return None
 
     ib = ib_connection.ib
     account_values = ib.accountValues()
-    for av in account_values:
-        if av.tag == "NetLiquidation" and av.currency == "USD":
-            return float(av.value)
+    # Prefer AvailableFunds, fallback to TotalCashValue, then NetLiquidation
+    for tag in ["AvailableFunds", "TotalCashValue", "NetLiquidation"]:
+        for av in account_values:
+            if av.tag == tag and av.currency == "USD":
+                return float(av.value)
     return None
 
 

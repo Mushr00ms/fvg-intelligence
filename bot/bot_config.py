@@ -29,14 +29,25 @@ class BotConfig:
     strategy_dir: str = ""          # Path to logic/strategies/ (auto-detected)
     min_fvg_size: float = 0.25      # Minimum FVG size in points
 
-    # Risk Management
-    risk_per_trade: float = 0.01    # 1% per trade
+    # Risk Management — 3-tier Kelly-inspired sizing
+    risk_per_trade: float = 0.01    # Default fallback (used if tiers disabled)
+    risk_small_pct: float = 0.005   # 0.5% for 5-10pt, 10-15pt risk buckets
+    risk_medium_pct: float = 0.015  # 1.5% for 15-20pt, 20-25pt, 25-30pt, 30-40pt
+    risk_large_pct: float = 0.03    # 3.0% for 40-80pt risk buckets
+    small_buckets: list = field(default_factory=lambda: ["5-10", "10-15"])
+    large_buckets: list = field(default_factory=lambda: ["40-80"])
+    use_risk_tiers: bool = True     # Enable 3-tier risk (False = uniform risk_per_trade)
     max_trade_loss_pct: float = 0.015  # 1.5% max single trade loss (slippage buffer)
     max_concurrent: int = 3         # Max open positions at any time
     max_daily_trades: int = 15      # Max trades per session
     kill_switch_pct: float = -0.03  # -3% daily loss triggers kill switch
     point_value: float = 20.0       # NQ = $20/point
     tick_size: float = 0.25         # NQ tick size
+
+    # Slippage model — BACKTESTER ONLY. In live trading, IB handles fills at
+    # exact limit prices. Keep False for the live bot.
+    use_slippage: bool = False      # Only enable in backtester (--slip flag)
+    slippage_ticks: int = 1         # Number of ticks for slippage (backtester)
 
     # Session Times (ET)
     session_start: str = "09:30"
@@ -76,6 +87,12 @@ class BotConfig:
         bot_dir = os.path.dirname(os.path.abspath(__file__))
         project_dir = os.path.dirname(bot_dir)
 
+        # WSL2: auto-detect Windows host IP if ib_host is still localhost
+        if self.ib_host == "127.0.0.1":
+            detected = _detect_wsl_windows_host()
+            if detected:
+                self.ib_host = detected
+
         if not self.strategy_dir:
             self.strategy_dir = os.path.join(project_dir, "logic", "strategies")
         if not self.state_dir:
@@ -98,6 +115,31 @@ class BotConfig:
         os.makedirs(self.log_dir, exist_ok=True)
 
 
+def _detect_wsl_windows_host():
+    """Detect the Windows host IP from WSL2. Returns None if not in WSL."""
+    # First try default gateway (most reliable for WSL2 mirrored networking)
+    try:
+        import subprocess
+        result = subprocess.run(['ip', 'route', 'show', 'default'],
+                                capture_output=True, text=True, timeout=3)
+        for part in result.stdout.split():
+            if '.' in part and part[0].isdigit():
+                return part
+    except Exception:
+        pass
+    # Fallback: resolv.conf nameserver
+    try:
+        with open('/etc/resolv.conf') as f:
+            for line in f:
+                if line.strip().startswith('nameserver'):
+                    ip = line.strip().split()[-1]
+                    if ip != '127.0.0.1':
+                        return ip
+    except FileNotFoundError:
+        pass
+    return None
+
+
 # Environment variable overrides (BOT_ prefix)
 _ENV_MAP = {
     "BOT_IB_HOST": ("ib_host", str),
@@ -105,6 +147,10 @@ _ENV_MAP = {
     "BOT_IB_CLIENT_ID": ("ib_client_id", int),
     "BOT_TICKER": ("ticker", str),
     "BOT_RISK_PER_TRADE": ("risk_per_trade", float),
+    "BOT_RISK_SMALL_PCT": ("risk_small_pct", float),
+    "BOT_RISK_MEDIUM_PCT": ("risk_medium_pct", float),
+    "BOT_RISK_LARGE_PCT": ("risk_large_pct", float),
+    "BOT_USE_RISK_TIERS": ("use_risk_tiers", lambda x: x.lower() in ("1", "true", "yes")),
     "BOT_MAX_CONCURRENT": ("max_concurrent", int),
     "BOT_MAX_DAILY_TRADES": ("max_daily_trades", int),
     "BOT_KILL_SWITCH_PCT": ("kill_switch_pct", float),

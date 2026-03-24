@@ -91,11 +91,12 @@ class RiskGates:
 
     def _check_per_trade_risk(self, daily_state, proposed_order):
         """
-        Reject if trade risk exceeds 1% of current balance.
-        risk = risk_pts * point_value * qty
+        Reject if trade risk exceeds the order's risk tier % of current balance.
+        Uses proposed_order.risk_pct (set by 3-tier sizing) instead of uniform %.
         """
         balance = daily_state.start_balance + daily_state.realized_pnl
-        max_risk = balance * self.risk_per_trade
+        actual_risk_pct = getattr(proposed_order, 'risk_pct', self.risk_per_trade)
+        max_risk = balance * actual_risk_pct
         trade_risk = (
             proposed_order.risk_pts * self.point_value * proposed_order.target_qty
         )
@@ -103,18 +104,18 @@ class RiskGates:
         if trade_risk > max_risk * 1.01:  # 1% tolerance for rounding
             return GateResult.fail(
                 "per_trade_risk",
-                f"Trade risk ${trade_risk:.0f} exceeds {self.risk_per_trade*100:.0f}% "
+                f"Trade risk ${trade_risk:.0f} exceeds {actual_risk_pct*100:.1f}% "
                 f"of balance ${balance:.0f} (max ${max_risk:.0f})"
             )
         return GateResult.ok()
 
     def _check_max_trade_loss(self, daily_state, proposed_order):
         """
-        Reject if potential max loss exceeds 1.5% of balance.
-        This accounts for slippage on the stop.
+        Reject if potential max loss (with slippage) exceeds risk tier + 0.5% buffer.
         """
         balance = daily_state.start_balance + daily_state.realized_pnl
-        max_loss = balance * self.max_trade_loss_pct
+        actual_risk_pct = getattr(proposed_order, 'risk_pct', self.risk_per_trade)
+        max_loss = balance * (actual_risk_pct + 0.005)  # risk tier + 0.5% slippage buffer
         # Worst case: 1 tick slippage on stop
         worst_risk_pts = proposed_order.risk_pts + 0.25
         potential_loss = worst_risk_pts * self.point_value * proposed_order.target_qty
@@ -123,7 +124,7 @@ class RiskGates:
             return GateResult.fail(
                 "max_trade_loss",
                 f"Potential loss ${potential_loss:.0f} (with slippage) exceeds "
-                f"{self.max_trade_loss_pct*100:.1f}% of balance (max ${max_loss:.0f})"
+                f"{(actual_risk_pct+0.005)*100:.1f}% of balance (max ${max_loss:.0f})"
             )
         return GateResult.ok()
 
@@ -131,21 +132,33 @@ class RiskGates:
         """
         Check if daily P&L has breached the kill switch threshold.
 
+        Includes worst-case unrealized P&L: assumes every open position
+        is at its stop loss (maximum possible loss per position).
+
         Returns:
-            True if kill switch should be triggered (daily loss >= threshold).
+            True if kill switch should be triggered.
         """
         if daily_state.kill_switch_active:
-            return False  # Already active
+            return False
 
         if daily_state.start_balance <= 0:
             return False
 
-        pnl_pct = daily_state.daily_pnl_pct
+        # Worst-case unrealized: every open position at its stop
+        worst_unrealized = 0.0
+        for og in daily_state.open_positions:
+            qty = og.filled_qty or og.target_qty
+            worst_unrealized -= og.risk_pts * self.point_value * qty
+
+        total_pnl = daily_state.realized_pnl + worst_unrealized
+        pnl_pct = total_pnl / daily_state.start_balance
+
         if pnl_pct <= self.kill_switch_pct:
             daily_state.kill_switch_active = True
             daily_state.kill_switch_reason = (
-                f"Daily P&L {pnl_pct*100:.1f}% breached "
-                f"{self.kill_switch_pct*100:.0f}% threshold"
+                f"Daily P&L (realized ${daily_state.realized_pnl:.0f} + "
+                f"worst unrealized ${worst_unrealized:.0f}) = "
+                f"{pnl_pct*100:.1f}% breached {self.kill_switch_pct*100:.0f}% threshold"
             )
             return True
 
