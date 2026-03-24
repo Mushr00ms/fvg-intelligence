@@ -1,9 +1,3 @@
-fastapi
-uvicorn[standard]
-pandas
-numpy
-pyarrow
-databento
-pytz
-matplotlib
-plotly
+# Dependency declarations now live in requirements.in + requirements.lock.
+# Keep this shim for tooling that still expects requirements.txt.
+-r requirements.lock
