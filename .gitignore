@@ -34,3 +34,8 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Security tooling artifacts
+.tools-venv/
+vendor/
+security/sbom.json
