@@ -35,6 +35,20 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Claude Code (session state, memory, settings)
+.claude/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Local env
+.envrc
+CLAUDE.template.md
+snapshot.md
+
+# Databento downloads
+GLBX-*.zip
+
 # Security tooling artifacts
 .tools-venv/
 vendor/

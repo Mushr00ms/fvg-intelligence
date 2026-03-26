@@ -134,6 +134,34 @@
       </table>
       <div class="empty" id="closed-empty">No trades yet today</div>
     </div>
+
+    <!-- Equity Curve -->
+    <div class="panel">
+      <div class="panel-title">Equity Curve <span class="badge" id="eq-count">—</span></div>
+      <div id="equity-chart" style="height:180px;padding:8px;"></div>
+    </div>
+
+    <!-- Cell Performance (30d) -->
+    <div class="panel">
+      <div class="panel-title">Cell Performance (30d) <span class="badge" id="cell-count">0</span></div>
+      <table>
+        <thead><tr><th>Setup</th><th>Time</th><th>Risk</th><th>Trades</th><th>WR</th><th>P&L</th><th>Avg P&L</th><th>Slippage</th></tr></thead>
+        <tbody id="tbl-cells"></tbody>
+      </table>
+      <div class="empty" id="cell-empty">No cell data</div>
+    </div>
+
+    <!-- Funnel -->
+    <div class="panel">
+      <div class="panel-title">Today's Funnel</div>
+      <div id="funnel-data" style="padding:10px;display:flex;gap:16px;flex-wrap:wrap;">
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">FVGs</div><div class="kpi-value" id="fn-fvgs">0</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Mitigated</div><div class="kpi-value" id="fn-mit">0</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Placed</div><div class="kpi-value" id="fn-placed">0</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Filled</div><div class="kpi-value" id="fn-filled">0</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Won</div><div class="kpi-value pos" id="fn-won">0</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- Event Feed -->
@@ -407,6 +435,69 @@ async function refreshState() {
 }
 
 // ═══════════════════════════════════════
+// ANALYTICS PANELS
+// ═══════════════════════════════════════
+async function refreshAnalytics() {
+  // Equity curve
+  try {
+    const res = await fetch(`${API}/api/bot/equity-curve`);
+    const data = await res.json();
+    const eq = data.equity || [];
+    document.getElementById('eq-count').textContent = eq.length + ' trades';
+    if (eq.length > 1) {
+      const chart = document.getElementById('equity-chart');
+      const balances = eq.map(t => t.balance_after || 0);
+      const labels = eq.map(t => (t.exit_time || '').split('T')[1]?.slice(0,5) || '');
+      const colors = eq.map(t => (t.net_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)');
+      // Simple SVG line chart
+      const w = chart.clientWidth - 16, h = 160;
+      const minB = Math.min(...balances) * 0.9999, maxB = Math.max(...balances) * 1.0001;
+      const rangeB = maxB - minB || 1;
+      const pts = balances.map((b,i) => `${(i/(balances.length-1))*w},${h - ((b-minB)/rangeB)*h}`).join(' ');
+      chart.innerHTML = `<svg width="${w}" height="${h}" style="overflow:visible">
+        <polyline points="${pts}" fill="none" stroke="var(--green)" stroke-width="1.5" opacity="0.8"/>
+        <text x="0" y="12" fill="var(--text-dimmer)" font-size="9">$${Math.round(maxB).toLocaleString()}</text>
+        <text x="0" y="${h}" fill="var(--text-dimmer)" font-size="9">$${Math.round(minB).toLocaleString()}</text>
+      </svg>`;
+    }
+  } catch(e) {}
+
+  // Cell performance
+  try {
+    const res = await fetch(`${API}/api/bot/cell-performance`);
+    const data = await res.json();
+    const cells = data.cells || [];
+    document.getElementById('cell-count').textContent = cells.length;
+    const tbody = document.getElementById('tbl-cells');
+    const empty = document.getElementById('cell-empty');
+    if (!cells.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+    empty.style.display = 'none';
+    tbody.innerHTML = cells.slice(0, 20).map(c => {
+      const pnl = c.total_pnl || 0;
+      const setup = (c.setup || '').replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+      return `<tr><td>${setup}</td><td>${c.time_period}</td><td>${c.risk_range}</td>
+        <td>${c.trades}</td><td>${c.win_rate}%</td>
+        <td style="color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${Math.round(pnl)}</td>
+        <td>$${Math.round(c.avg_pnl||0)}</td>
+        <td>${(c.avg_entry_slippage||0).toFixed(2)}pt</td></tr>`;
+    }).join('');
+  } catch(e) {}
+
+  // Funnel
+  try {
+    const res = await fetch(`${API}/api/bot/funnel`);
+    const fn = await res.json();
+    if (!fn.error) {
+      document.getElementById('fn-fvgs').textContent = fn.fvgs_detected || 0;
+      document.getElementById('fn-mit').textContent = fn.fvgs_mitigated || 0;
+      document.getElementById('fn-placed').textContent = fn.trades_placed || 0;
+      document.getElementById('fn-filled').textContent = fn.trades_filled || 0;
+      document.getElementById('fn-won').textContent = fn.trades_won || 0;
+    }
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════
 async function init() {
@@ -424,6 +515,10 @@ async function init() {
   // Initial state + poll every 5s
   refreshState();
   setInterval(refreshState, 5000);
+
+  // Analytics panels (less frequent — every 30s)
+  refreshAnalytics();
+  setInterval(refreshAnalytics, 30000);
 }
 
 init();

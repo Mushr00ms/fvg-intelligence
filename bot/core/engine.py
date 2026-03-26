@@ -570,19 +570,39 @@ class BotEngine:
     async def _process_backfilled_fvgs(self):
         """Place orders for backfilled FVGs that don't already have pending/open orders."""
         if self.fvg_mgr.active_count == 0:
+            self.logger.log("backfill_process", action="skip", reason="no_active_fvgs")
             return
 
-        # Build set of fvg_ids that already have orders
+        # Build set of fvg_ids that already have ACTIVE or SUCCESSFULLY FILLED orders.
+        # Cancelled/rejected orders don't count — the zone was never actually traded.
+        _skip_reasons = {"CANCEL", "RECONCILE_ORPHAN", "REJECTED"}
         ordered_fvg_ids = set()
-        for og in (self.daily_state.pending_orders
-                   + self.daily_state.open_positions
-                   + self.daily_state.closed_trades):
+        for og in self.daily_state.pending_orders + self.daily_state.open_positions:
             ordered_fvg_ids.add(og.fvg_id)
+        for og in self.daily_state.closed_trades:
+            if og.close_reason not in _skip_reasons:
+                ordered_fvg_ids.add(og.fvg_id)
 
         # Process detection for FVGs without orders (copy list — detection may modify active)
+        processed = 0
+        skipped = 0
         for fvg in list(self.fvg_mgr.active_fvgs):
             if fvg.fvg_id not in ordered_fvg_ids:
+                self.logger.log(
+                    "backfill_process", action="evaluating",
+                    fvg_id=fvg.fvg_id, type=fvg.fvg_type,
+                    zone=[fvg.zone_low, fvg.zone_high],
+                    time_period=fvg.time_period,
+                )
                 await self._guarded_process_detection(fvg)
+                processed += 1
+            else:
+                skipped += 1
+
+        self.logger.log(
+            "backfill_process", action="done",
+            processed=processed, skipped_ordered=skipped,
+        )
 
     async def _on_reconnect(self):
         """Re-subscribe bars/ticks and backfill FVGs after IB reconnect."""
