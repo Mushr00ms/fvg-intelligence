@@ -17,8 +17,8 @@ _DEFAULT_STORE_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "strategies")
 )
 
-# Valid R:R target values
-VALID_RR_TARGETS = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]
+# Valid R:R target values — any positive float (optimizer may produce values outside 1.0-3.0)
+VALID_RR_TARGETS = None  # No fixed list; validated as positive number below
 
 # Valid setup types
 VALID_SETUPS = ["mit_extreme", "mid_extreme"]
@@ -161,10 +161,10 @@ def validate_strategy(strategy):
                 f"(expected one of {VALID_SETUPS})"
             )
 
-        if cell.get("rr_target") and cell["rr_target"] not in VALID_RR_TARGETS:
+        rr = cell.get("rr_target")
+        if rr is not None and (not isinstance(rr, (int, float)) or rr <= 0):
             errors.append(
-                f"Cell {i} has invalid rr_target: {cell['rr_target']} "
-                f"(expected one of {VALID_RR_TARGETS})"
+                f"Cell {i} has invalid rr_target: {rr} (must be positive number)"
             )
 
     return errors

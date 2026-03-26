@@ -220,9 +220,18 @@ class TestValidation:
     def test_invalid_rr_target(self):
         strategy = _make_strategy()
         strategy["schema_version"] = SCHEMA_VERSION
-        strategy["cells"][0]["rr_target"] = 4.5  # Not in valid list
+        strategy["cells"][0]["rr_target"] = -1.0  # Negative is invalid
         errors = validate_strategy(strategy)
         assert any("rr_target" in e.lower() for e in errors)
+
+    def test_valid_rr_target_outside_legacy_range(self):
+        """Optimizer may produce targets like 0.5R or 4.5R — these are valid."""
+        strategy = _make_strategy()
+        strategy["schema_version"] = SCHEMA_VERSION
+        for rr in [0.25, 0.5, 4.5, 10.0]:
+            strategy["cells"][0]["rr_target"] = rr
+            errors = validate_strategy(strategy)
+            assert not any("rr_target" in e.lower() for e in errors), f"rr_target={rr} should be valid"
 
     def test_missing_required_field(self):
         strategy = _make_strategy()
