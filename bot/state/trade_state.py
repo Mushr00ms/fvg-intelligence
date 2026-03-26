@@ -22,6 +22,10 @@ def _new_id():
     return uuid.uuid4().hex[:12]
 
 
+# State schema version — increment on breaking changes, add migration in state_manager.py
+STATE_VERSION = "1.0"
+
+
 # ---------------------------------------------------------------------------
 # FVG Record
 # ---------------------------------------------------------------------------
@@ -101,6 +105,7 @@ CLOSE_SL = "SL"
 CLOSE_FLATTEN = "FLATTEN"
 CLOSE_CANCEL = "CANCEL"
 CLOSE_EOD = "EOD"
+CLOSE_REJECTED = "REJECTED"
 
 
 @dataclass
@@ -128,6 +133,8 @@ class OrderGroup:
     close_reason: str = ""
     realized_pnl: float = 0.0
     partial_fill_timer_start: Optional[str] = None
+    actual_entry_price: float = 0.0
+    entry_slippage_pts: float = 0.0
 
     def to_dict(self):
         return {
@@ -153,6 +160,8 @@ class OrderGroup:
             "close_reason": self.close_reason,
             "realized_pnl": self.realized_pnl,
             "partial_fill_timer_start": self.partial_fill_timer_start,
+            "actual_entry_price": self.actual_entry_price,
+            "entry_slippage_pts": self.entry_slippage_pts,
         }
 
     @classmethod
@@ -180,6 +189,8 @@ class OrderGroup:
             close_reason=d.get("close_reason", ""),
             realized_pnl=d.get("realized_pnl", 0.0),
             partial_fill_timer_start=d.get("partial_fill_timer_start"),
+            actual_entry_price=d.get("actual_entry_price", 0.0),
+            entry_slippage_pts=d.get("entry_slippage_pts", 0.0),
         )
 
     @property
@@ -209,6 +220,7 @@ class DailyState:
 
     def to_dict(self):
         return {
+            "version": STATE_VERSION,
             "date": self.date,
             "start_balance": self.start_balance,
             "realized_pnl": self.realized_pnl,

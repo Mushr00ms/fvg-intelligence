@@ -12,7 +12,7 @@ def _make_config():
     class C:
         session_start = "09:30"
         session_end = "16:00"
-        last_entry_time = "15:45"
+        last_entry_time = "15:30"
         cancel_unfilled_time = "15:50"
         flatten_time = "15:55"
     return C()
@@ -44,13 +44,13 @@ class TestCanEnter:
 
     def test_just_before_last_entry(self):
         gates = TimeGates(_make_config())
-        allowed, _ = gates.can_enter(_make_dt(15, 44))
+        allowed, _ = gates.can_enter(_make_dt(15, 29))
         assert allowed is True
 
     def test_at_last_entry_time(self):
-        """15:45 should be REJECTED (>= boundary)."""
+        """15:30 should be REJECTED (>= boundary)."""
         gates = TimeGates(_make_config())
-        allowed, _ = gates.can_enter(_make_dt(15, 45))
+        allowed, _ = gates.can_enter(_make_dt(15, 30))
         assert allowed is False
 
     def test_after_last_entry(self):

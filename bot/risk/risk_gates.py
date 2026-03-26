@@ -39,6 +39,7 @@ class RiskGates:
         self.max_daily_trades = config.max_daily_trades    # 15
         self.kill_switch_pct = config.kill_switch_pct      # -0.03
         self.point_value = config.point_value              # 20.0
+        self.max_cumulative_risk_pct = getattr(config, 'max_cumulative_risk_pct', 0.05)  # 5%
 
     def check_all(self, daily_state, proposed_order):
         """
@@ -52,6 +53,7 @@ class RiskGates:
             self._check_kill_switch,
             self._check_daily_trades,
             self._check_concurrent_positions,
+            self._check_cumulative_risk,
             self._check_per_trade_risk,
             self._check_max_trade_loss,
         ]
@@ -86,6 +88,36 @@ class RiskGates:
             return GateResult.fail(
                 "concurrent_positions",
                 f"Max concurrent positions reached: {active}/{self.max_concurrent}"
+            )
+        return GateResult.ok()
+
+    def _check_cumulative_risk(self, daily_state, proposed_order):
+        """Reject if total open risk (all positions + proposed) exceeds cumulative limit."""
+        balance = daily_state.start_balance + daily_state.realized_pnl
+        if balance <= 0:
+            return GateResult.ok()
+
+        # Sum risk dollars from all open positions
+        total_risk = 0.0
+        for og in daily_state.open_positions:
+            qty = og.filled_qty or og.target_qty
+            total_risk += og.risk_pts * self.point_value * qty
+        for og in daily_state.pending_orders:
+            qty = og.target_qty
+            total_risk += og.risk_pts * self.point_value * qty
+
+        # Add proposed order risk
+        proposed_risk = (
+            proposed_order.risk_pts * self.point_value * proposed_order.target_qty
+        )
+        total_with_new = total_risk + proposed_risk
+        max_risk = balance * self.max_cumulative_risk_pct
+
+        if total_with_new > max_risk * 1.01:  # 1% rounding tolerance
+            return GateResult.fail(
+                "cumulative_risk",
+                f"Cumulative risk ${total_with_new:.0f} exceeds "
+                f"{self.max_cumulative_risk_pct*100:.1f}% of balance (max ${max_risk:.0f})"
             )
         return GateResult.ok()
 

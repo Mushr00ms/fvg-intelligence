@@ -23,7 +23,7 @@ class TimeGates:
     def __init__(self, config, clock=None):
         self.session_start = _parse_time(config.session_start)      # 09:30
         self.session_end = _parse_time(config.session_end)           # 16:00
-        self.last_entry = _parse_time(config.last_entry_time)        # 15:45
+        self.last_entry = _parse_time(config.last_entry_time)        # 15:30
         self.cancel_unfilled = _parse_time(config.cancel_unfilled_time)  # 15:50
         self.flatten_time = _parse_time(config.flatten_time)         # 15:55
         self._clock = clock
@@ -37,7 +37,7 @@ class TimeGates:
     def can_enter(self, now=None):
         """
         Check if new entries are allowed at the given time.
-        Entries allowed between session_start (09:30) and last_entry (15:45) ET.
+        Entries allowed between session_start (09:30) and last_entry (15:30) ET.
 
         Returns:
             (allowed: bool, reason: str)

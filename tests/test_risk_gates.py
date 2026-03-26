@@ -14,6 +14,7 @@ def _make_config():
         max_daily_trades = 15
         kill_switch_pct = -0.03
         point_value = 20.0
+        max_cumulative_risk_pct = 0.05  # 5%
     return C()
 
 
@@ -143,6 +144,51 @@ class TestRiskGates:
         state = _make_state()
         order = _make_order(risk_pts=7.5, qty=5)
         result = gates.check_all(state, order)
+        assert result.passed is True
+
+
+class TestCumulativeRisk:
+    """Tests for cumulative risk gate (total open exposure)."""
+
+    def test_cumulative_risk_pass_no_positions(self):
+        """No open positions — proposed order risk is well within 5%."""
+        gates = RiskGates(_make_config())
+        state = _make_state()  # $76k balance, no positions
+        order = _make_order(risk_pts=10, qty=3)  # $600 < $3800 (5%)
+        result = gates._check_cumulative_risk(state, order)
+        assert result.passed is True
+
+    def test_cumulative_risk_fail_with_open_positions(self):
+        """2 open positions + new order exceeds 5% cumulative risk.
+        Each open: 10 * 20 * 3 = $600. Two = $1200.
+        New order: 10 * 20 * 10 = $2000. Total = $3200.
+        But with 10 contracts: 10 * 20 * 10 = $2000. 1200 + 2000 = $3200 < $3800.
+        Use higher qty to trigger: 10 * 20 * 15 = $3000. 1200 + 3000 = $4200 > $3800.
+        """
+        gates = RiskGates(_make_config())
+        state = _make_state(open_pos=2)  # 2 * $600 = $1200 at risk
+        order = _make_order(risk_pts=10, qty=15)  # $3000 proposed
+        result = gates._check_cumulative_risk(state, order)
+        assert result.passed is False
+        assert result.gate == "cumulative_risk"
+
+    def test_cumulative_risk_includes_pending(self):
+        """Pending orders count toward cumulative risk."""
+        gates = RiskGates(_make_config())
+        state = _make_state(pending=2)  # 2 * $600 = $1200 at risk
+        order = _make_order(risk_pts=10, qty=15)  # $3000 proposed
+        result = gates._check_cumulative_risk(state, order)
+        assert result.passed is False
+
+    def test_cumulative_risk_pass_with_losses(self):
+        """Balance reduced by losses, but risk still within limit.
+        Balance: $76k - $2k = $74k. 5% = $3700.
+        Open: $600. Proposed: $600. Total: $1200 < $3700.
+        """
+        gates = RiskGates(_make_config())
+        state = _make_state(pnl=-2000, open_pos=1)
+        order = _make_order(risk_pts=10, qty=3)
+        result = gates._check_cumulative_risk(state, order)
         assert result.passed is True
 
 

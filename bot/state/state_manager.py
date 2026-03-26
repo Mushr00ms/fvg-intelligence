@@ -12,7 +12,7 @@ from datetime import datetime, date
 
 import pytz
 
-from bot.state.trade_state import DailyState
+from bot.state.trade_state import DailyState, STATE_VERSION
 
 NY_TZ = pytz.timezone("America/New_York")
 
@@ -97,6 +97,24 @@ class StateManager:
                 )
             return None
 
+        # Check state schema version
+        file_version = data.get("version", "0.0")
+        if file_version != STATE_VERSION:
+            if self._logger:
+                self._logger.log(
+                    "state_version_mismatch",
+                    file_version=file_version,
+                    expected=STATE_VERSION,
+                )
+            # Back up old state before migration
+            backup_path = self._state_path + f".v{file_version}.bak"
+            try:
+                import shutil
+                shutil.copy2(self._state_path, backup_path)
+            except OSError:
+                pass
+            data = self._migrate_state(data, file_version)
+
         state = DailyState.from_dict(data)
 
         if self._logger:
@@ -177,3 +195,22 @@ class StateManager:
             )
 
         return daily_state
+
+    def _migrate_state(self, data, old_version):
+        """Migrate state data from old schema versions.
+
+        Each version bump should add a migration step here.
+        Migrations are applied sequentially: 0.0 → 1.0 → future versions.
+        """
+        if old_version == "0.0":
+            # Pre-versioned state: add version field, all fields are compatible
+            data["version"] = STATE_VERSION
+            if self._logger:
+                self._logger.log("state_migrated", from_version="0.0", to_version=STATE_VERSION)
+
+        # Future migrations go here:
+        # if old_version <= "1.0":
+        #     data["new_field"] = default_value
+        #     data["version"] = "1.1"
+
+        return data

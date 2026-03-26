@@ -41,6 +41,7 @@ class BotConfig:
     max_concurrent: int = 3         # Max open positions at any time
     max_daily_trades: int = 15      # Max trades per session
     kill_switch_pct: float = -0.03  # -3% daily loss triggers kill switch
+    max_cumulative_risk_pct: float = 0.05  # 5% max cumulative open risk
     point_value: float = 20.0       # NQ = $20/point
     tick_size: float = 0.25         # NQ tick size
 
@@ -52,9 +53,13 @@ class BotConfig:
     # Session Times (ET)
     session_start: str = "09:30"
     session_end: str = "16:00"
-    last_entry_time: str = "15:30"
-    cancel_unfilled_time: str = "15:50"
-    flatten_time: str = "15:55"
+    # Backtest parity defaults:
+    # - no new entries at/after 15:45
+    # - pending entries remain valid until session end
+    # - open positions flatten at session end
+    last_entry_time: str = "15:45"
+    cancel_unfilled_time: str = "16:00"
+    flatten_time: str = "16:00"
 
     # Operational Modes
     paper_mode: bool = True         # True = port 7497, False = port 7496
