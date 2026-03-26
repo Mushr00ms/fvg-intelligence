@@ -2076,6 +2076,10 @@ function btRenderAll() {
   _btRendered.daily = true;
   _btRendered.dist = true;
 
+  // Reset vol filter on new result load
+  _btVolFilter = 'all';
+  _btTradePage = 0;
+
   // Render all tables immediately
   btRenderCellTable();
   btRenderTradeLog();
@@ -2113,7 +2117,18 @@ function btRenderStats() {
     <div class="bt-stat"><span class="label">Avg Win</span><span class="value pos">$${Math.round(s.avg_win).toLocaleString()}</span></div>
     <div class="bt-stat"><span class="label">Avg Loss</span><span class="value neg">$${Math.round(s.avg_loss).toLocaleString()}</span></div>
     <div class="bt-stat"><span class="label">Trades/Day</span><span class="value">${s.trades_per_day}</span></div>
+    ${_btAdjustedPnlStat()}
   `;
+}
+
+function _btAdjustedPnlStat() {
+  const trades = _btResults.trades || [];
+  if (!trades.some(t => t.adjusted_pnl_dollars != null)) return '';
+  const rawPnl = trades.reduce((s,t) => s + (t.pnl_dollars || 0), 0);
+  const adjPnl = trades.reduce((s,t) => s + (t.adjusted_pnl_dollars != null ? t.adjusted_pnl_dollars : t.pnl_dollars), 0);
+  const loConf = trades.filter(t => t.fill_probability != null && t.fill_probability < 1).length;
+  const cls = adjPnl >= 0 ? 'pos' : 'neg';
+  return `<div class="bt-stat"><span class="label">Adj P&L <span style="font-size:9px;opacity:0.6">(${loConf} discounted)</span></span><span class="value ${cls}">${adjPnl >= 0 ? '+' : ''}$${Math.round(adjPnl).toLocaleString()}</span></div>`;
 }
 
 function btRenderEquityCurve() {
@@ -2213,22 +2228,54 @@ function btRenderTradeLog() {
   btRenderTradePage();
 }
 
-function btRenderTradePage() {
+let _btVolFilter = 'all'; // 'all' | 'hi' (≥30) | 'lo' (<30)
+
+function _btFilteredTrades() {
   const trades = _btResults.trades || [];
+  if (_btVolFilter === 'all') return trades;
+  return trades.filter(t => {
+    const v = t.volume_at_entry;
+    if (v == null) return _btVolFilter === 'lo'; // no data → treat as thin
+    return _btVolFilter === 'hi' ? v >= 30 : v < 30;
+  });
+}
+
+function _btVolCell(v, exitReason) {
+  if (v == null) return '<td style="color:var(--text-dim)">—</td>';
+  const col = v >= 30 ? 'var(--green)' : v >= 10 ? 'var(--amber)' : 'var(--red)';
+  const note = (exitReason === 'SL' || exitReason === 'EOD') ? '<span style="font-size:9px;opacity:0.5"> ★</span>' : '';
+  return `<td style="color:${col};font-family:var(--mono)">${v}${note}</td>`;
+}
+
+function btRenderTradePage() {
+  const allTrades = _btResults.trades || [];
+  const trades = _btFilteredTrades();
   const startBal = (_btResults.meta && _btResults.meta.balance) || 100000;
   const totalPages = Math.ceil(trades.length / BT_PAGE_SIZE);
   const start = _btTradePage * BT_PAGE_SIZE;
   const page = trades.slice(start, start + BT_PAGE_SIZE);
 
-  let html = `<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:10px;color:var(--text-dim);font-family:var(--mono)">
+  // Vol filter stats
+  const hasVol = allTrades.some(t => t.volume_at_entry != null);
+  const hiCount = hasVol ? allTrades.filter(t => t.volume_at_entry != null && t.volume_at_entry >= 30).length : 0;
+  const loCount = hasVol ? allTrades.filter(t => t.volume_at_entry == null || t.volume_at_entry < 30).length : 0;
+  const volFilterHtml = hasVol ? `
+    <span style="font-size:10px;color:var(--text-dim);font-family:var(--mono);margin-left:8px">Vol@Entry:</span>
+    <button onclick="_btVolFilter='all';_btTradePage=0;btRenderTradePage()" style="padding:2px 7px;cursor:pointer;font-size:10px;font-family:var(--mono);${_btVolFilter==='all'?'background:var(--accent);color:#fff;border-color:var(--accent)':''}">All</button>
+    <button onclick="_btVolFilter='hi';_btTradePage=0;btRenderTradePage()" style="padding:2px 7px;cursor:pointer;font-size:10px;font-family:var(--mono);color:var(--green);${_btVolFilter==='hi'?'background:rgba(0,214,143,0.2);border-color:var(--green)':''}">≥30 (${hiCount})</button>
+    <button onclick="_btVolFilter='lo';_btTradePage=0;btRenderTradePage()" style="padding:2px 7px;cursor:pointer;font-size:10px;font-family:var(--mono);color:var(--red);${_btVolFilter==='lo'?'background:rgba(255,77,106,0.2);border-color:var(--red)':''}"><30 (${loCount})</button>` : '';
+
+  let html = `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:10px;color:var(--text-dim);font-family:var(--mono);flex-wrap:wrap">
     <button onclick="_btTradePage=Math.max(0,_btTradePage-1);btRenderTradePage()" ${_btTradePage===0?'disabled':''} style="padding:2px 8px;cursor:pointer">&lt;</button>
-    <span>Page ${_btTradePage+1}/${totalPages} (${trades.length} trades)</span>
-    <button onclick="_btTradePage=Math.min(${totalPages-1},_btTradePage+1);btRenderTradePage()" ${_btTradePage>=totalPages-1?'disabled':''} style="padding:2px 8px;cursor:pointer">&gt;</button>
+    <span>Page ${_btTradePage+1}/${Math.max(1,totalPages)} (${trades.length} trades${trades.length!==allTrades.length?' / '+allTrades.length+' total':''})</span>
+    <button onclick="_btTradePage=Math.min(${Math.max(0,totalPages-1)},_btTradePage+1);btRenderTradePage()" ${_btTradePage>=totalPages-1?'disabled':''} style="padding:2px 8px;cursor:pointer">&gt;</button>
+    ${volFilterHtml}
   </div>`;
   html += `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
     <th>#</th><th>Date</th><th>Time Period</th><th>Type</th><th>Setup</th><th>Side</th>
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
     <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
+    ${hasVol ? '<th title="Tick volume at exact entry price (formation→exit). ★=SL/EOD trade (already in market)">Vol@Entry</th>' : ''}
   </tr></thead><tbody>`;
   page.forEach((t, pi) => {
     const i = start + pi;
@@ -2252,7 +2299,8 @@ function btRenderTradePage() {
       <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
       <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts}</td>
       <td>${t.exit_price}</td><td>${t.exit_reason}</td><td>${durStr}</td>
-      <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td></tr>`;
+      <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td>
+      ${hasVol ? _btVolCell(t.volume_at_entry, t.exit_reason) : ''}</tr>`;
   });
   html += '</tbody></table></div>';
   document.getElementById('bt-table-trades').innerHTML = html;

@@ -102,6 +102,8 @@ class BotEngine:
         )
         self.fvg_mgr = None         # Initialized after strategy loads
         self.order_mgr = None        # Initialized after IB connects
+        self.margin_tracker = None   # Initialized after contract resolution
+        self.margin_priority = None  # Initialized after margin tracker
         self.daily_state = None
         self._contract = None
         self._bars_5min = None
@@ -150,6 +152,23 @@ class BotEngine:
                 clock=self.clock, db=self.db,
                 on_kill_switch=self._trigger_kill_switch,
             )
+
+            # 4b. Initialize margin management
+            if self.config.margin_management_enabled:
+                from bot.risk.margin_tracker import MarginTracker
+                from bot.risk.margin_priority import MarginPriorityManager
+                self.margin_tracker = MarginTracker(
+                    self.ib_conn, self._contract, self.logger, self.config,
+                    clock=self.clock,
+                )
+                await self.margin_tracker.initialize()
+                self.margin_priority = MarginPriorityManager(
+                    self.margin_tracker, self.order_mgr,
+                    self.risk_gates, self.time_gates,
+                    self.logger, self.config, clock=self.clock,
+                )
+                # Register margin re-evaluation callback on order resolution
+                self.order_mgr._on_order_resolved = self._on_order_resolved
 
         # 5. Load or create daily state
         self.daily_state = self.state_mgr.load()
@@ -256,6 +275,25 @@ class BotEngine:
             # Yield to event loop — ib_async processes bar updates and fill
             # callbacks during asyncio.sleep via nest_asyncio patching
             await asyncio.sleep(0.1)
+
+    def _get_current_price(self) -> float:
+        """Get the most recent trade price from bar data."""
+        if self._bars_5min and len(self._bars_5min) > 0:
+            return self._bars_5min[-1].close
+        return 0.0
+
+    async def _on_order_resolved(self):
+        """Called when any order resolves (TP/SL/cancel). Re-evaluates suspended orders."""
+        if not self.margin_priority or not self.daily_state or not self.daily_state.suspended_orders:
+            return
+        async with self._detection_lock:
+            current_price = self._get_current_price()
+            count = await self.margin_priority.try_reactivate_suspended(
+                self.daily_state, current_price,
+            )
+            if count > 0:
+                self.logger.log("suspended_reactivated", count=count)
+                self.state_mgr.save(self.daily_state)
 
     async def _resolve_contract(self):
         """Resolve the NQ front-month futures contract."""
@@ -830,6 +868,20 @@ class BotEngine:
                 )
                 continue
 
+            # Drawdown scaling — reduce size on bad days, never block
+            dd_mult = self.risk_gates.drawdown_multiplier(self.daily_state)
+            if dd_mult < 1.0:
+                scaled_qty = max(1, int(order.target_qty * dd_mult))
+                self.logger.log(
+                    "dd_scale",
+                    group_id=order.group_id,
+                    original_qty=order.target_qty,
+                    scaled_qty=scaled_qty,
+                    multiplier=dd_mult,
+                    daily_pnl=round(self.daily_state.realized_pnl, 2),
+                )
+                order.target_qty = scaled_qty
+
             # Place the bracket order
             risk_dollars = round(order.risk_pts * order.target_qty * 20, 2)
             reward_dollars = round(order.risk_pts * order.n_value * order.target_qty * 20, 2)
@@ -855,7 +907,25 @@ class BotEngine:
             )
 
             if self.order_mgr and (self.config.dry_run or self.ib_conn.is_connected):
-                await self.order_mgr.place_bracket(order, self.daily_state)
+                if self.margin_priority and not self.config.dry_run:
+                    current_price = self._get_current_price()
+                    margin_result = await self.margin_priority.evaluate_and_place(
+                        order, fvg, self.daily_state, current_price,
+                    )
+                    if margin_result == "SUSPENDED":
+                        self.logger.log(
+                            "setup_suspended_margin",
+                            group_id=order.group_id,
+                            fvg_id=fvg.fvg_id,
+                            entry=order.entry_price,
+                            reason=order.suspend_reason,
+                        )
+                        # Still save state and link FVG (done below), but skip DB insert
+                        fvg.orders_placed.append(order.group_id)
+                        self.state_mgr.save(self.daily_state)
+                        return
+                else:
+                    await self.order_mgr.place_bracket(order, self.daily_state)
             elif self.order_mgr and not self.ib_conn.is_connected:
                 self.logger.log(
                     "setup_rejected", fvg_id=fvg.fvg_id,
@@ -982,16 +1052,29 @@ class BotEngine:
                 except Exception as e:
                     self.logger.log("alert_retry_error", error=str(e))
 
+        async def periodic_margin_refresh():
+            while not self._shutdown:
+                await asyncio.sleep(self.config.margin_refresh_interval)
+                if self.margin_tracker:
+                    await self.margin_tracker.refresh_if_stale()
+
         self._periodic_tasks.append(asyncio.ensure_future(periodic_save()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_strategy_check()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_clock_sync()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_alert_retry()))
+        if self.margin_tracker:
+            self._periodic_tasks.append(asyncio.ensure_future(periodic_margin_refresh()))
 
     async def _eod_cancel(self):
         """Cancel all unfilled entry orders at configured EOD cancel time."""
         self.logger.log("eod_cancel", time=self.config.cancel_unfilled_time)
         if self.order_mgr:
             await self.order_mgr.cancel_all_pending(self.daily_state, "EOD")
+        # Clear all suspended orders at EOD
+        if self.margin_priority:
+            count = await self.margin_priority.clear_all_suspended(self.daily_state, "EOD")
+            if count > 0:
+                self.logger.log("eod_suspended_cleared", count=count)
         self.state_mgr.save(self.daily_state, force=True)
 
     async def _eod_flatten(self):

@@ -669,7 +669,8 @@ def run_backtest(df_1s, strategy, config=None):
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
     mit_entry_ticks = config.get("mit_entry_ticks", 0)  # MIT entry slippage (0=limit, 1-4=MIT)
-    confirmed_limit = config.get("confirmed_limit", False)  # fill confirmation: require 1 tick past, fill at limit
+    # confirmed_limit removed — volume analysis showed 95% of trades have ≥30
+    # contracts at entry price, making touch=fill the correct default model
     tp_mode = config.get("tp_mode", "fixed")  # fixed, runner, runner-be, split
 
     # IB tiered commission: per-side IB rate (marginal) + $1.40 exchange/reg
@@ -711,6 +712,8 @@ def run_backtest(df_1s, strategy, config=None):
         _monthly_contracts += num_contracts
         return round(total_comm, 2)
     use_risk_tiers = config.get("risk_tiers", False)
+    margin_per_contract = config.get("margin_per_contract", 22924.0)  # NQ intraday maintenance
+    margin_buffer_pct = config.get("margin_buffer_pct", 0.05)
 
     # Load risk tier config from strategy meta if enabled
     _risk_rules = strategy.get("meta", {}).get("risk_rules", {}) if use_risk_tiers else {}
@@ -757,6 +760,8 @@ def run_backtest(df_1s, strategy, config=None):
         open_positions = 0
         daily_trades = 0
         daily_pnl = 0.0
+        day_start_balance = running_balance
+        emergency_halt = False
 
         # Process each 5-min bar for FVG detection
         for i in range(2, len(bars_5min)):
@@ -810,6 +815,8 @@ def run_backtest(df_1s, strategy, config=None):
 
             # Calculate setup and match to strategy
             for setup_type in ["mit_extreme", "mid_extreme"]:
+                if emergency_halt:
+                    break
                 if daily_trades >= max_daily_trades:
                     break
                 if open_positions >= max_concurrent:
@@ -845,12 +852,9 @@ def run_backtest(df_1s, strategy, config=None):
 
                 # Apply entry slippage for fill simulation:
                 # --slip: legacy 1-tick model (entry + TP slippage)
-                # --confirmed-limit: require 1 tick past to confirm fill, but fill at limit price
                 # --mit-entry N: MIT order slippage (N ticks on entry only, TP = limit touch)
-                if confirmed_limit:
-                    # Fill at exact limit price; confirmation handled at entry check below
-                    entry_fill = entry_exact
-                elif use_slip:
+                # default: touch = fill (validated by volume analysis — 95% have ≥30 cts)
+                if use_slip:
                     # Legacy: entry 1 tick deeper + TP 1 tick past
                     if side == "BUY":
                         entry_fill = round_to_tick(entry_exact - TICK_SIZE)
@@ -903,23 +907,36 @@ def run_backtest(df_1s, strategy, config=None):
                     risk_budget = running_balance * risk_pct
                 contracts = max(1, math.floor(risk_budget / (risk_pts * POINT_VALUE)))
 
-                # Per-trade risk gate
-                if risk_pts * POINT_VALUE * contracts > running_balance * risk_pct * 1.01:
-                    contracts = max(1, math.floor(running_balance * risk_pct / (risk_pts * POINT_VALUE)))
+                # Per-trade risk gate — use same rate that sized the position
+                _gate_pct = _rpct if use_risk_tiers else risk_pct
+                if risk_pts * POINT_VALUE * contracts > running_balance * _gate_pct * 1.01:
+                    contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * POINT_VALUE)))
+
+                # Margin cap — can't exceed what balance supports
+                buffered_margin = margin_per_contract * (1.0 + margin_buffer_pct)
+                max_by_margin = math.floor(running_balance / buffered_margin)
+                if contracts > max_by_margin:
+                    contracts = max(1, max_by_margin)
+
+                # Drawdown scaling — reduce size as daily losses accumulate
+                if day_start_balance > 0:
+                    dd_pct = daily_pnl / day_start_balance  # negative when losing
+                    if dd_pct <= -0.06:
+                        dd_mult = 0.25
+                    elif dd_pct <= -0.04:
+                        dd_mult = 0.25
+                    elif dd_pct <= -0.02:
+                        dd_mult = 0.50
+                    else:
+                        dd_mult = 1.0
+                    if dd_mult < 1.0:
+                        contracts = max(1, math.floor(contracts * dd_mult))
 
                 # Check entry fill:
-                # --slip: price must reach slipped level (1 tick into zone) to confirm fill
-                # --confirmed-limit: price must go 1 tick past to confirm limit fill
+                # --slip: price must reach slipped level (1 tick into zone)
                 # --mit-entry: MIT triggers on touch at exact price, fills worse (market)
                 # default: limit at exact price, touch = fill
-                if confirmed_limit:
-                    # BUY: price must dip 1 tick below entry to confirm fill
-                    # SELL: price must rise 1 tick above entry to confirm fill
-                    if side == "BUY":
-                        entry_check_price = round_to_tick(entry_exact - TICK_SIZE)
-                    else:
-                        entry_check_price = round_to_tick(entry_exact + TICK_SIZE)
-                elif use_slip:
+                if use_slip:
                     entry_check_price = entry_fill
                 else:
                     entry_check_price = entry_exact
@@ -1009,12 +1026,13 @@ def run_backtest(df_1s, strategy, config=None):
                 daily_trades += 1
                 daily_pnl += pnl_dollars
 
+                # Emergency halt: -10% of day-start balance → catastrophic protection
+                if not emergency_halt and day_start_balance > 0 and daily_pnl <= -(day_start_balance * 0.10):
+                    emergency_halt = True
+                    print(f"  {day}: EMERGENCY HALT at ${daily_pnl:.0f} ({daily_trades} trades)")
+
                 # Only one setup per FVG
                 break
-
-        # Daily kill switch check
-        if daily_pnl <= -(balance * 0.03):
-            print(f"  {day}: KILL SWITCH at ${daily_pnl:.0f} ({daily_trades} trades)")
 
     return all_trades, running_balance
 
@@ -1348,10 +1366,10 @@ def main():
                         help="Use 3-tier risk from strategy meta (0.5%%/1%%/1.5%%)")
     parser.add_argument("--mit-entry", type=int, default=0, metavar="TICKS",
                         help="MIT entry: N ticks slippage on entry fill (0=limit, 1-4=realistic)")
-    parser.add_argument("--confirmed-limit", action="store_true",
-                        help="Confirmed limit fills: require 1 tick past entry+TP, fill at limit price")
     parser.add_argument("--tp-mode", default="fixed", choices=["fixed", "runner", "runner-be", "split"],
                         help="TP exit mode: fixed, runner, runner-be, or split ((n-1) at TP + 1 trailing runner)")
+    parser.add_argument("--margin", type=float, default=22924.0,
+                        help="Margin per contract (default: NQ intraday maintenance $22,924)")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
     args = parser.parse_args()
@@ -1374,10 +1392,10 @@ def main():
         "max_daily_trades": 15,
         "min_fvg_size": 0.25,
         "slip": args.slip,
-        "confirmed_limit": args.confirmed_limit,
         "risk_tiers": args.risk_tiers,
         "mit_entry_ticks": args.mit_entry,
         "tp_mode": args.tp_mode,
+        "margin_per_contract": args.margin,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 
@@ -1397,6 +1415,7 @@ def main():
             results["meta"]["tp_mode"] = args.tp_mode
         if args.risk_tiers:
             results["meta"]["risk_tiers"] = strategy.get("meta", {}).get("risk_rules", {})
+        results["meta"]["margin_per_contract"] = args.margin
         os.makedirs(os.path.dirname(args.json_output) or '.', exist_ok=True)
         with open(args.json_output, 'w') as f:
             json.dump(results, f, indent=2)

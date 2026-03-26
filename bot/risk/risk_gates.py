@@ -37,9 +37,11 @@ class RiskGates:
         self.max_trade_loss_pct = config.max_trade_loss_pct  # 0.015
         self.max_concurrent = config.max_concurrent        # 3
         self.max_daily_trades = config.max_daily_trades    # 15
-        self.kill_switch_pct = config.kill_switch_pct      # -0.03
+        self.kill_switch_pct = config.kill_switch_pct      # -0.10 (emergency halt)
         self.point_value = config.point_value              # 20.0
         self.max_cumulative_risk_pct = getattr(config, 'max_cumulative_risk_pct', 0.05)  # 5%
+        self.dd_tier1_pct = getattr(config, 'dd_scale_tier1_pct', -0.02)
+        self.dd_tier2_pct = getattr(config, 'dd_scale_tier2_pct', -0.04)
 
     def check_all(self, daily_state, proposed_order):
         """
@@ -63,12 +65,28 @@ class RiskGates:
                 return result
         return GateResult.ok()
 
+    def drawdown_multiplier(self, daily_state):
+        """
+        Return position size multiplier based on daily drawdown.
+
+        Scales down as losses accumulate — never blocks trades, just reduces size.
+        Returns 1.0 (full), 0.5 (half), or 0.25 (quarter).
+        """
+        if daily_state.start_balance <= 0:
+            return 1.0
+        dd_pct = daily_state.realized_pnl / daily_state.start_balance
+        if dd_pct <= self.dd_tier2_pct:
+            return 0.25
+        if dd_pct <= self.dd_tier1_pct:
+            return 0.50
+        return 1.0
+
     def _check_kill_switch(self, daily_state, proposed_order):
-        """Reject if kill switch is already active."""
+        """Reject if emergency halt is active (-10% catastrophic protection)."""
         if daily_state.kill_switch_active:
             return GateResult.fail(
-                "kill_switch",
-                f"Kill switch active: {daily_state.kill_switch_reason}"
+                "emergency_halt",
+                f"Emergency halt active: {daily_state.kill_switch_reason}"
             )
         return GateResult.ok()
 
@@ -162,13 +180,16 @@ class RiskGates:
 
     def evaluate_kill_switch(self, daily_state):
         """
-        Check if daily P&L has breached the kill switch threshold.
+        Check if daily P&L has breached the emergency halt threshold (-10%).
+
+        This is catastrophic protection only — normal drawdown is handled by
+        drawdown_multiplier() which scales position size instead of halting.
 
         Includes worst-case unrealized P&L: assumes every open position
         is at its stop loss (maximum possible loss per position).
 
         Returns:
-            True if kill switch should be triggered.
+            True if emergency halt should be triggered.
         """
         if daily_state.kill_switch_active:
             return False

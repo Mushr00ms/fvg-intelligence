@@ -2,11 +2,15 @@
 fetch_data.py — WSL-side launcher for IB historical data fetcher.
 
 Spawns python.exe to run ib_data_fetcher.py on Windows, which connects
-to IB TWS and fetches 1-second bars day-by-day into bot/data/.
+to IB TWS and fetches 1-second bars or tick data day-by-day into bot/data/.
 
 Usage:
     python3 bot/backtest/fetch_data.py --start 20260102 --end 20260322
     python3 bot/backtest/fetch_data.py --ytd          # Jan 2 to today
+
+    # Fetch tick data for a specific time window
+    python3 bot/backtest/fetch_data.py --start 20260326 --end 20260326 \\
+        --ticks --time-range 14:00-14:10 --what-to-show TRADES
 """
 
 import argparse
@@ -40,6 +44,10 @@ def main():
     parser.add_argument("--end", help="End date YYYYMMDD (default: today)")
     parser.add_argument("--ytd", action="store_true", help="Fetch YTD 2026 (Jan 2 to today)")
     parser.add_argument("--bar-size", default="1 secs", help="Bar size (default: '1 secs')")
+    parser.add_argument("--ticks", action="store_true", help="Fetch tick data instead of bars")
+    parser.add_argument("--time-range", help="Time range in ET for ticks, e.g. '14:00-14:10'")
+    parser.add_argument("--what-to-show", default="TRADES", choices=["TRADES", "BID_ASK"],
+                        help="Tick data type (default: TRADES)")
     parser.add_argument("--ib-port", type=int, default=7497, help="IB TWS port")
     parser.add_argument("--client-id", type=int, default=20, help="IB client ID")
     args = parser.parse_args()
@@ -53,7 +61,10 @@ def main():
 
     os.makedirs(_DATA_DIR, exist_ok=True)
 
-    print(f"Fetching NQ {args.bar_size} bars: {start} → {end}")
+    mode_label = f"ticks ({args.what_to_show})" if args.ticks else f"{args.bar_size} bars"
+    print(f"Fetching NQ {mode_label}: {start} → {end}")
+    if args.ticks and args.time_range:
+        print(f"Time range (ET): {args.time_range}")
     print(f"Output: {_DATA_DIR}")
     print(f"Using IB port: {args.ib_port}")
     print()
@@ -67,6 +78,12 @@ def main():
         '--ib-port', str(args.ib_port),
         '--client-id', str(args.client_id),
     ]
+
+    if args.ticks:
+        cmd.append('--ticks')
+        cmd.extend(['--what-to-show', args.what_to_show])
+        if args.time_range:
+            cmd.extend(['--time-range', args.time_range])
 
     print(f"Running: {' '.join(cmd)}")
     print("-" * 60)

@@ -40,7 +40,9 @@ class BotConfig:
     max_trade_loss_pct: float = 0.015  # 1.5% max single trade loss (slippage buffer)
     max_concurrent: int = 3         # Max open positions at any time
     max_daily_trades: int = 15      # Max trades per session
-    kill_switch_pct: float = -0.03  # -3% daily loss triggers kill switch
+    kill_switch_pct: float = -0.10  # -10% daily loss = emergency halt (catastrophic only)
+    dd_scale_tier1_pct: float = -0.02  # -2% daily → 50% size
+    dd_scale_tier2_pct: float = -0.04  # -4% daily → 25% size
     max_cumulative_risk_pct: float = 0.05  # 5% max cumulative open risk
     point_value: float = 20.0       # NQ = $20/point
     tick_size: float = 0.25         # NQ tick size
@@ -82,6 +84,18 @@ class BotConfig:
     # Bridge (WSL → Windows)
     bridge_port: int = 9100          # TCP port for WSL↔Windows bridge
     auto_launch_bridge: bool = True  # Auto-launch bridge via python.exe
+
+    # Margin Management — time-aware (IB intraday vs overnight)
+    # Intraday maintenance applies during RTH: 09:30–16:00 ET (08:30–15:00 CT)
+    # Overnight initial applies outside RTH (we're always flat before this)
+    margin_intraday_maintenance: float = 22924.0   # NQ intraday maintenance margin
+    margin_overnight_initial: float = 46373.0      # NQ overnight initial margin
+    margin_fallback_per_contract: float = 22924.0  # Ultimate fallback (= intraday maintenance)
+    margin_intraday_start: str = "09:30"           # ET — intraday margin begins
+    margin_intraday_end: str = "16:00"             # ET — intraday margin ends (15 min before RTH close)
+    margin_buffer_pct: float = 0.05                # 5% safety buffer above required margin
+    margin_refresh_interval: int = 1800            # Re-fetch margin every 30 minutes
+    margin_management_enabled: bool = True         # Enable intelligent margin priority system
 
     # Connection Recovery
     max_disconnect_minutes: int = 5  # Flatten if disconnected longer than this
@@ -166,6 +180,12 @@ _ENV_MAP = {
     "BOT_STRATEGY_DIR": ("strategy_dir", str),
     "BOT_STATE_DIR": ("state_dir", str),
     "BOT_LOG_DIR": ("log_dir", str),
+    "BOT_MARGIN_INTRADAY": ("margin_intraday_maintenance", float),
+    "BOT_MARGIN_OVERNIGHT": ("margin_overnight_initial", float),
+    "BOT_MARGIN_FALLBACK": ("margin_fallback_per_contract", float),
+    "BOT_MARGIN_BUFFER_PCT": ("margin_buffer_pct", float),
+    "BOT_MARGIN_REFRESH": ("margin_refresh_interval", int),
+    "BOT_MARGIN_ENABLED": ("margin_management_enabled", lambda x: x.lower() in ("1", "true", "yes")),
 }
 
 

@@ -171,6 +171,11 @@
         <button class="fbtn" data-f="loss">Loss</button>
         <button class="fbtn" data-f="eod">EOD</button>
       </div>
+      <div id="filter-row" style="margin-top:3px">
+        <button class="fbtn on" data-v="all">Vol:All</button>
+        <button class="fbtn" data-v="hi">≥30</button>
+        <button class="fbtn" data-v="lo">&lt;30</button>
+      </div>
     </div>
     <div id="tcount">Loading...</div>
     <div id="tlist"></div>
@@ -212,7 +217,7 @@
 
 <script>
 'use strict';
-const S = { trades:[], filtered:[], idx:-1, filter:'all', tf:'5min', full:false, q:'', loading:false };
+const S = { trades:[], filtered:[], idx:-1, filter:'all', vfilter:'all', tf:'5min', full:false, q:'', loading:false };
 const $=id=>document.getElementById(id);
 
 // ── Utils ──
@@ -246,11 +251,13 @@ function buildTopbar(meta){
 
 // ── Filter ──
 function applyFilter(){
-  const q=S.q.toLowerCase(), f=S.filter;
+  const q=S.q.toLowerCase(), f=S.filter, v=S.vfilter;
   S.filtered = S.trades.filter(t=>{
     if(f==='win' && !(t.exit_reason==='TP'||t.pnl_dollars>0)) return false;
     if(f==='loss' && t.exit_reason!=='SL') return false;
     if(f==='eod' && t.exit_reason!=='EOD') return false;
+    if(v==='hi' && !(t.volume_at_entry != null && t.volume_at_entry >= 30)) return false;
+    if(v==='lo' && !(t.volume_at_entry != null && t.volume_at_entry < 30)) return false;
     if(q){ const s=[t.date,t.side,t.setup,t.risk_range,t.time_period,String(t.id)].join(' ').toLowerCase();
       if(!s.includes(q)) return false; }
     return true;
@@ -269,9 +276,10 @@ function renderList(){
     const pc=t.pnl_dollars>0?'p+':t.pnl_dollars<0?'p-':'';
     const dc=t.exit_reason==='EOD'?'td-e':t.pnl_dollars>=0?'td-w':'td-l';
     const st=t.side==='BUY'?'<span class="stag stag-b">BUY</span>':'<span class="stag stag-s">SELL</span>';
+    const vb=volBadge(t);
     d.innerHTML=`<div class="td ${dc}"></div><div class="tm">
       <div class="tm-top"><span class="tm-id">#${t.id} ${t.date}</span><span class="tm-pnl ${pc}">${fpnl(t.pnl_dollars)}</span></div>
-      <div class="tm-bot">${st} ${t.time_period} ${t.risk_range} ${t.setup}</div></div>`;
+      <div class="tm-bot">${st} ${t.time_period} ${t.risk_range} ${t.setup}${vb}</div></div>`;
     d.onclick=()=>sel(i);
     f.appendChild(d);
   });
@@ -455,13 +463,43 @@ function render(bars,trade){
     ${trade.tp_touched && trade.excursion_pts > 0 ? `
     <div class="isec"></div>
     <div class="ir"><span class="ik">Past TP</span><span class="iv" style="color:#ffb84d">+${trade.excursion_pts.toFixed(1)} pts (${trade.excursion_r}R)</span></div>
-    <div class="ir"><span class="ik">$ left</span><span class="iv" style="color:#ffb84d">${fpnl(trade.excursion_pts * trade.contracts * 20)}</span></div>` : ''}`;
+    <div class="ir"><span class="ik">$ left</span><span class="iv" style="color:#ffb84d">${fpnl(trade.excursion_pts * trade.contracts * 20)}</span></div>` : ''}
+    ${volRow(trade)}`;
+}
+
+function volBadge(trade){
+  const v = trade.volume_at_entry;
+  if(v == null) return '';
+  const col = v >= 30 ? 'var(--green)' : v >= 10 ? 'var(--yellow)' : 'var(--red)';
+  return ` <span style="font-family:var(--mono);font-size:9px;color:${col}">v${v}</span>`;
+}
+
+function volRow(trade){
+  const v = trade.volume_at_entry;
+  if(v == null) return '';
+  // Color: ≥30 green (plain limit likely fills), 10-29 yellow (borderline), <10 red (thin)
+  const col = v >= 30 ? 'var(--green)' : v >= 10 ? 'var(--yellow)' : 'var(--red)';
+  const lbl = v >= 30 ? '≥30 ✓' : v >= 10 ? 'borderline' : 'thin';
+  const exitNote = (trade.exit_reason === 'SL' || trade.exit_reason === 'EOD')
+    ? ' <span style="font-size:9px;color:var(--text2)">(in mkt)</span>' : '';
+  return `
+    <div class="isec"></div>
+    <div class="ir">
+      <span class="ik">Vol@Entry</span>
+      <span class="iv" style="color:${col}">${v} cts <span style="font-size:9px">${lbl}</span>${exitNote}</span>
+    </div>`;
 }
 
 // ── Event Wiring ──
-document.querySelectorAll('.fbtn').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on'));
+document.querySelectorAll('[data-f]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[data-f]').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); S.filter=b.dataset.f; S.idx=-1; applyFilter();
+  if(S.filtered.length>0) sel(0);
+});
+
+document.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[data-v]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); S.vfilter=b.dataset.v; S.idx=-1; applyFilter();
   if(S.filtered.length>0) sel(0);
 });
 

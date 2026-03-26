@@ -127,6 +127,7 @@ class StateManager:
                 active_fvgs=len(state.active_fvgs),
                 pending_orders=len(state.pending_orders),
                 open_positions=len(state.open_positions),
+                suspended_orders=len(state.suspended_orders),
             )
 
         return state
@@ -204,13 +205,19 @@ class StateManager:
         """
         if old_version == "0.0":
             # Pre-versioned state: add version field, all fields are compatible
-            data["version"] = STATE_VERSION
+            data["version"] = "1.0"
             if self._logger:
-                self._logger.log("state_migrated", from_version="0.0", to_version=STATE_VERSION)
+                self._logger.log("state_migrated", from_version="0.0", to_version="1.0")
 
-        # Future migrations go here:
-        # if old_version <= "1.0":
-        #     data["new_field"] = default_value
-        #     data["version"] = "1.1"
+        if data.get("version") == "1.0":
+            # v1.1: Add suspended_orders list and new OrderGroup fields
+            data["suspended_orders"] = []
+            for key in ("pending_orders", "open_positions", "closed_trades"):
+                for og in data.get(key, []):
+                    og.setdefault("suspended_at", None)
+                    og.setdefault("suspend_reason", "")
+            data["version"] = "1.1"
+            if self._logger:
+                self._logger.log("state_migrated", from_version="1.0", to_version="1.1")
 
         return data

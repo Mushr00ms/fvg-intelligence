@@ -1,20 +1,28 @@
 """
-ib_data_fetcher.py — Fetch historical 1-second bars from IB TWS.
+ib_data_fetcher.py — Fetch historical bars or tick data from IB TWS.
 
 Runs on Windows Python (via python.exe from WSL) to bypass Hyper-V isolation.
 Fetches NQ futures data day-by-day, handles contract rolls, writes parquet.
 
 Usage from WSL:
+    # 1-second bars (existing)
     python.exe C:\\path\\to\\ib_data_fetcher.py \\
         --start 20260102 --end 20260322 \\
         --out-dir C:\\path\\to\\bot\\data \\
         --ib-port 7497
+
+    # Historical ticks for a specific time window
+    python.exe C:\\path\\to\\ib_data_fetcher.py \\
+        --start 20260326 --end 20260326 \\
+        --out-dir C:\\path\\to\\bot\\data \\
+        --ticks --time-range 14:00-14:10 --what-to-show TRADES
 
 The fetcher handles:
     - NQ quarterly contract rolls (H/M/U/Z, 8-day roll before expiry)
     - IB pacing limits (max 60 requests / 10 min, auto-throttle)
     - Resume capability (skips days already fetched)
     - Parquet output with consistent schema
+    - Tick-by-tick historical data via reqHistoricalTicks
 """
 
 import argparse
@@ -236,6 +244,148 @@ def fetch_day(ib, contract, trade_date, bar_size='1 secs'):
     return deduped
 
 
+def _et_to_utc(naive_et_dt):
+    """Convert a naive ET datetime to a UTC-aware datetime."""
+    return _ET.localize(naive_et_dt).astimezone(_UTC)
+
+
+def _utc_to_et_str(utc_dt):
+    """Format a UTC datetime as an ET string for display."""
+    return utc_dt.astimezone(_ET).strftime('%H:%M:%S.%f')[:-3]
+
+
+def fetch_ticks(ib, contract, trade_date, start_time, end_time, what_to_show='TRADES'):
+    """
+    Fetch historical ticks for a time window using reqHistoricalTicks.
+
+    IB returns max 1000 ticks per request. We paginate forward using
+    startDateTime, advancing past the last received tick each iteration.
+
+    All times are converted to UTC for the IB API call and stored as UTC
+    in output (consistent with bar data). An 'time_et' column is included
+    for readability.
+
+    Args:
+        ib: connected IB instance
+        contract: qualified Future contract
+        trade_date: date object
+        start_time: tuple (hour, minute) in ET, e.g. (14, 0)
+        end_time: tuple (hour, minute) in ET, e.g. (14, 10)
+        what_to_show: 'TRADES' or 'BID_ASK'
+
+    Returns:
+        list of tick dicts or None
+    """
+    all_ticks = []
+    seen_keys = set()
+
+    # Build boundaries in UTC (user thinks in ET, IB API wants UTC)
+    start_utc = _et_to_utc(datetime(
+        trade_date.year, trade_date.month, trade_date.day,
+        start_time[0], start_time[1], 0
+    ))
+    end_utc = _et_to_utc(datetime(
+        trade_date.year, trade_date.month, trade_date.day,
+        end_time[0], end_time[1], 0
+    ))
+
+    cursor_utc = start_utc
+    page = 0
+
+    while cursor_utc < end_utc:
+        page += 1
+        # Convert cursor to IB UTC dash-format string
+        cursor_str = cursor_utc.strftime('%Y%m%d-%H:%M:%S')
+        log(f"    Page {page}: requesting from {cursor_str} UTC ({_utc_to_et_str(cursor_utc)} ET)")
+
+        try:
+            ticks = ib.reqHistoricalTicks(
+                contract,
+                startDateTime=cursor_str,
+                endDateTime='',
+                numberOfTicks=1000,
+                whatToShow=what_to_show,
+                useRth=True,
+            )
+        except Exception as e:
+            log(f"    Exception on tick page {page}: {e}")
+            time.sleep(15)
+            continue
+
+        if not ticks:
+            log(f"    Page {page}: no ticks returned, done.")
+            break
+
+        new_count = 0
+        last_tick_utc = None
+
+        for tick in ticks:
+            # IB returns tick.time as UTC datetime (may be naive)
+            tick_utc = tick.time
+            if tick_utc.tzinfo is None:
+                tick_utc = _UTC.localize(tick_utc)
+
+            # Stop if past our end boundary
+            if tick_utc >= end_utc:
+                log(f"    Page {page}: reached end boundary at {_utc_to_et_str(tick_utc)} ET")
+                break
+
+            if what_to_show == 'TRADES':
+                key = (str(tick_utc), tick.price, tick.size)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                all_ticks.append({
+                    'time_utc': tick_utc.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'time_et': tick_utc.astimezone(_ET).strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'price': tick.price,
+                    'size': tick.size,
+                    'exchange': getattr(tick, 'exchange', ''),
+                    'conditions': getattr(tick, 'specialConditions', ''),
+                })
+            else:  # BID_ASK
+                key = (str(tick_utc), tick.priceBid, tick.priceAsk)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                all_ticks.append({
+                    'time_utc': tick_utc.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'time_et': tick_utc.astimezone(_ET).strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'price_bid': tick.priceBid,
+                    'price_ask': tick.priceAsk,
+                    'size_bid': tick.sizeBid,
+                    'size_ask': tick.sizeAsk,
+                })
+
+            new_count += 1
+            last_tick_utc = tick_utc
+
+        log(f"    Page {page}: {len(ticks)} ticks received, {new_count} new (total: {len(all_ticks)})")
+
+        if last_tick_utc is None:
+            break
+
+        # Advance cursor 1 second past last tick to avoid re-fetching
+        cursor_utc = last_tick_utc + timedelta(seconds=1)
+
+        # Check if last tick was past our end boundary
+        if last_tick_utc >= end_utc:
+            break
+
+        # If IB returned fewer than 1000, we've exhausted the range
+        if len(ticks) < 1000:
+            break
+
+        # Pacing: reqHistoricalTicks has same limits
+        time.sleep(11)
+
+    if not all_ticks:
+        return None
+
+    all_ticks.sort(key=lambda x: x['time_utc'])
+    return all_ticks
+
+
 def is_trading_day(d):
     """Check if a date is a weekday (rough filter, doesn't handle holidays)."""
     return d.weekday() < 5
@@ -246,11 +396,15 @@ def log(msg):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch NQ 1-second bars from IB")
+    parser = argparse.ArgumentParser(description="Fetch NQ historical data from IB")
     parser.add_argument("--start", required=True, help="Start date YYYYMMDD")
     parser.add_argument("--end", required=True, help="End date YYYYMMDD")
     parser.add_argument("--out-dir", required=True, help="Output directory for parquet files")
     parser.add_argument("--bar-size", default="1 secs", help="Bar size (default: '1 secs')")
+    parser.add_argument("--ticks", action="store_true", help="Fetch tick data instead of bars")
+    parser.add_argument("--time-range", help="Time range in ET for ticks, e.g. '14:00-14:10'")
+    parser.add_argument("--what-to-show", default="TRADES", choices=["TRADES", "BID_ASK"],
+                        help="Tick data type (default: TRADES)")
     parser.add_argument("--ib-host", default="127.0.0.1")
     parser.add_argument("--ib-port", type=int, default=7497)
     parser.add_argument("--client-id", type=int, default=20)
@@ -261,7 +415,20 @@ def main():
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    log(f"Fetching NQ {args.bar_size} bars: {start} → {end}")
+    # Parse time range for tick mode
+    tick_start_time = (9, 30)   # default: RTH open
+    tick_end_time = (16, 0)     # default: RTH close
+    if args.ticks and args.time_range:
+        parts = args.time_range.split('-')
+        sh, sm = parts[0].split(':')
+        eh, em = parts[1].split(':')
+        tick_start_time = (int(sh), int(sm))
+        tick_end_time = (int(eh), int(em))
+
+    mode_label = f"ticks ({args.what_to_show})" if args.ticks else f"{args.bar_size} bars"
+    log(f"Fetching NQ {mode_label}: {start} → {end}")
+    if args.ticks:
+        log(f"Time range (ET): {tick_start_time[0]:02d}:{tick_start_time[1]:02d} - {tick_end_time[0]:02d}:{tick_end_time[1]:02d}")
     log(f"Output: {out_dir}")
 
     # Connect to IB
@@ -284,14 +451,23 @@ def main():
             current_date += timedelta(days=1)
             continue
 
-        # Check if already fetched
-        bar_label = args.bar_size.replace(' ', '')
-        out_file = os.path.join(out_dir, f"nq_{bar_label}_{current_date.strftime('%Y%m%d')}.parquet")
-        if os.path.exists(out_file):
-            log(f"  {current_date} — already cached, skipping")
-            days_skipped += 1
-            current_date += timedelta(days=1)
-            continue
+        # Build output filename
+        if args.ticks:
+            time_label = f"{tick_start_time[0]:02d}{tick_start_time[1]:02d}-{tick_end_time[0]:02d}{tick_end_time[1]:02d}"
+            out_file = os.path.join(
+                out_dir,
+                f"nq_ticks_{args.what_to_show.lower()}_{current_date.strftime('%Y%m%d')}_{time_label}.parquet"
+            )
+            # Always re-fetch ticks (investigative, not bulk caching)
+        else:
+            bar_label = args.bar_size.replace(' ', '')
+            out_file = os.path.join(out_dir, f"nq_{bar_label}_{current_date.strftime('%Y%m%d')}.parquet")
+
+            if os.path.exists(out_file):
+                log(f"  {current_date} — already cached, skipping")
+                days_skipped += 1
+                current_date += timedelta(days=1)
+                continue
 
         # Resolve contract if needed
         expiry = get_nq_contract_for_date(current_date)
@@ -338,19 +514,25 @@ def main():
                         current_date += timedelta(days=1)
                         continue
 
-        # Fetch (pacing is handled inside fetch_day for chunked requests)
         log(f"  Fetching {current_date}...")
-        records = fetch_day(ib, current_contract, current_date, args.bar_size)
+
+        if args.ticks:
+            records = fetch_ticks(
+                ib, current_contract, current_date,
+                tick_start_time, tick_end_time, args.what_to_show,
+            )
+        else:
+            records = fetch_day(ib, current_contract, current_date, args.bar_size)
 
         if records:
             df = pd.DataFrame(records)
             df.to_parquet(out_file, index=False)
             days_fetched += 1
-            log(f"  {current_date} — {len(records)} bars → {os.path.basename(out_file)}")
+            label = "ticks" if args.ticks else "bars"
+            log(f"  {current_date} — {len(records)} {label} → {os.path.basename(out_file)}")
         else:
             log(f"  {current_date} — no data (holiday?)")
 
-        # Small pause between days (main pacing is per-chunk inside fetch_day)
         time.sleep(1)
         current_date += timedelta(days=1)
 

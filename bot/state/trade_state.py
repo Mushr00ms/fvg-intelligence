@@ -23,7 +23,7 @@ def _new_id():
 
 
 # State schema version — increment on breaking changes, add migration in state_manager.py
-STATE_VERSION = "1.0"
+STATE_VERSION = "1.1"
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,9 @@ class FVGRecord:
 # ---------------------------------------------------------------------------
 
 # State machine: PENDING → SUBMITTED → PARTIAL → FILLED → CLOSED
-ORDER_STATES = ("PENDING", "SUBMITTED", "PARTIAL", "FILLED", "CLOSED")
+#                               ↓                          ↑
+#                          SUSPENDED ─── (reactivate) ─────┘
+ORDER_STATES = ("PENDING", "SUBMITTED", "PARTIAL", "FILLED", "SUSPENDED", "CLOSED")
 
 # Close reasons
 CLOSE_TP = "TP"
@@ -106,6 +108,7 @@ CLOSE_FLATTEN = "FLATTEN"
 CLOSE_CANCEL = "CANCEL"
 CLOSE_EOD = "EOD"
 CLOSE_REJECTED = "REJECTED"
+CLOSE_MARGIN_SUSPEND = "MARGIN_SUSPEND"
 
 
 @dataclass
@@ -134,7 +137,10 @@ class OrderGroup:
     realized_pnl: float = 0.0
     partial_fill_timer_start: Optional[str] = None
     actual_entry_price: float = 0.0
+    actual_exit_price: float = 0.0
     entry_slippage_pts: float = 0.0
+    suspended_at: Optional[str] = None
+    suspend_reason: str = ""
 
     def to_dict(self):
         return {
@@ -161,7 +167,11 @@ class OrderGroup:
             "realized_pnl": self.realized_pnl,
             "partial_fill_timer_start": self.partial_fill_timer_start,
             "actual_entry_price": self.actual_entry_price,
+            "actual_exit_price": self.actual_exit_price,
+            "close_price": self.actual_exit_price or None,
             "entry_slippage_pts": self.entry_slippage_pts,
+            "suspended_at": self.suspended_at,
+            "suspend_reason": self.suspend_reason,
         }
 
     @classmethod
@@ -190,7 +200,10 @@ class OrderGroup:
             realized_pnl=d.get("realized_pnl", 0.0),
             partial_fill_timer_start=d.get("partial_fill_timer_start"),
             actual_entry_price=d.get("actual_entry_price", 0.0),
+            actual_exit_price=d.get("actual_exit_price", 0.0) or d.get("close_price", 0.0),
             entry_slippage_pts=d.get("entry_slippage_pts", 0.0),
+            suspended_at=d.get("suspended_at"),
+            suspend_reason=d.get("suspend_reason", ""),
         )
 
     @property
@@ -216,6 +229,7 @@ class DailyState:
     pending_orders: list = field(default_factory=list)     # List[OrderGroup] in SUBMITTED/PARTIAL
     open_positions: list = field(default_factory=list)     # List[OrderGroup] in FILLED
     closed_trades: list = field(default_factory=list)      # List[OrderGroup] in CLOSED
+    suspended_orders: list = field(default_factory=list)   # List[OrderGroup] in SUSPENDED
     last_updated: str = ""
 
     def to_dict(self):
@@ -231,6 +245,7 @@ class DailyState:
             "pending_orders": [o.to_dict() for o in self.pending_orders],
             "open_positions": [o.to_dict() for o in self.open_positions],
             "closed_trades": [o.to_dict() for o in self.closed_trades],
+            "suspended_orders": [o.to_dict() for o in self.suspended_orders],
             "last_updated": self.last_updated or _now_iso(),
         }
 
@@ -247,6 +262,7 @@ class DailyState:
             pending_orders=[OrderGroup.from_dict(o) for o in d.get("pending_orders", [])],
             open_positions=[OrderGroup.from_dict(o) for o in d.get("open_positions", [])],
             closed_trades=[OrderGroup.from_dict(o) for o in d.get("closed_trades", [])],
+            suspended_orders=[OrderGroup.from_dict(o) for o in d.get("suspended_orders", [])],
             last_updated=d.get("last_updated", ""),
         )
 
@@ -282,7 +298,7 @@ class DailyState:
 
     def move_to_closed(self, group_id, reason, pnl=0.0):
         """Move an order group to closed trades."""
-        for lst in (self.pending_orders, self.open_positions):
+        for lst in (self.pending_orders, self.open_positions, self.suspended_orders):
             for i, og in enumerate(lst):
                 if og.group_id == group_id:
                     og.state = "CLOSED"
@@ -292,4 +308,25 @@ class DailyState:
                     self.closed_trades.append(lst.pop(i))
                     self.realized_pnl += pnl
                     return og
+        return None
+
+    def move_to_suspended(self, group_id, reason=""):
+        """Move a SUBMITTED order from pending_orders to suspended_orders."""
+        for i, og in enumerate(self.pending_orders):
+            if og.group_id == group_id:
+                og.state = "SUSPENDED"
+                og.suspended_at = _now_iso()
+                og.suspend_reason = reason
+                self.suspended_orders.append(self.pending_orders.pop(i))
+                return og
+        return None
+
+    def move_suspended_to_pending(self, group_id):
+        """Pop a suspended order for re-placement. Caller must re-place via place_bracket."""
+        for i, og in enumerate(self.suspended_orders):
+            if og.group_id == group_id:
+                og.state = "PENDING"
+                og.suspended_at = None
+                og.suspend_reason = ""
+                return self.suspended_orders.pop(i)
         return None

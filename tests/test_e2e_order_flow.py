@@ -622,11 +622,11 @@ class TestKillSwitch:
         }])
         return _make_engine_deps(_make_config(), strategy)
 
-    def test_kill_switch_blocks_new_orders(self):
-        """Active kill switch → risk gate rejects all new orders."""
+    def test_emergency_halt_blocks_new_orders(self):
+        """Active emergency halt → risk gate rejects all new orders."""
         shell = self._make_shell_with_strategy()
         shell.daily_state.kill_switch_active = True
-        shell.daily_state.kill_switch_reason = "Daily loss exceeded -3%"
+        shell.daily_state.kill_switch_reason = "Daily loss exceeded -10%"
 
         fvg = _generate_fvg("bullish", zone_low=24100, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
@@ -635,16 +635,16 @@ class TestKillSwitch:
 
         assert len(shell.daily_state.pending_orders) == 0
         rejected = shell.logger.events("setup_rejected")
-        assert any(r["gate"] == "kill_switch" for r in rejected)
+        assert any(r["gate"] == "emergency_halt" for r in rejected)
 
-    def test_kill_switch_triggers_on_loss_threshold(self):
-        """-3% P&L on $76k = -$2280. Verify risk gate catches it."""
-        config = _make_config(kill_switch_pct=-0.03)
+    def test_emergency_halt_triggers_on_loss_threshold(self):
+        """-10% P&L on $76k = -$7600. Verify risk gate catches it."""
+        config = _make_config(kill_switch_pct=-0.10)
         gates = RiskGates(config)
 
         state = DailyState(date="2026-03-26", start_balance=76000.0)
         state.kill_switch_active = True
-        state.kill_switch_reason = "PnL hit -3%"
+        state.kill_switch_reason = "PnL hit -10%"
 
         dummy_order = OrderGroup(
             group_id="x", fvg_id="x", setup="mit_extreme", side="BUY",
@@ -654,7 +654,7 @@ class TestKillSwitch:
 
         result = gates.check_all(state, dummy_order)
         assert not result.passed
-        assert result.gate == "kill_switch"
+        assert result.gate == "emergency_halt"
 
     def test_negative_pnl_below_threshold_still_allows(self):
         """P&L at -2% (above -3% threshold) should still allow trades."""

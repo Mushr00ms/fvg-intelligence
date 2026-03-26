@@ -40,6 +40,7 @@ class OrderManager:
         self._clock = clock
         self._db = db
         self._on_kill_switch = on_kill_switch  # Callback for immediate kill switch
+        self._on_order_resolved = None         # Callback for margin re-evaluation
         self._partial_timers = {}  # group_id -> asyncio.Task
         self._adjustment_lock = asyncio.Lock()  # Serialize partial fill qty adjustments
 
@@ -53,7 +54,18 @@ class OrderManager:
         Place a bracket order (entry + TP + SL) with IB.
 
         In DRY_RUN mode: logs the order but skips actual placement.
+        Increments trade_count (first-time placement). For reactivation, use
+        reactivate_order() which skips the trade_count increment.
         Returns the updated OrderGroup.
+        """
+        daily_state.trade_count += 1
+        return await self._place_bracket_internal(order_group, daily_state)
+
+    async def _place_bracket_internal(self, order_group, daily_state):
+        """Internal bracket placement. Does NOT increment trade_count.
+
+        Used by both place_bracket() and reactivate_order(). The caller is
+        responsible for trade_count management.
         """
         ib = self._conn.ib
         og = order_group
@@ -62,7 +74,6 @@ class OrderManager:
             og.state = "SUBMITTED"
             og.submitted_at = self._now_iso()
             daily_state.pending_orders.append(og)
-            daily_state.trade_count += 1
             self._logger.log(
                 "order_placed",
                 mode="DRY_RUN",
@@ -87,7 +98,6 @@ class OrderManager:
         og.state = "SUBMITTED"
         og.submitted_at = self._now_iso()
         daily_state.pending_orders.append(og)
-        daily_state.trade_count += 1
         self._state_mgr.save(daily_state)
 
         # Step 3: Place bracket order
@@ -154,6 +164,83 @@ class OrderManager:
         )
 
         return og
+
+    # ── Margin Management: Suspend / Reactivate ──────────────────────────────
+
+    async def suspend_order(self, og, daily_state, reason="margin_priority"):
+        """Cancel IB orders for a SUBMITTED order and move to SUSPENDED state.
+
+        Only SUBMITTED orders (0 fills) can be suspended. This preserves the
+        order and its FVG for re-placement when margin becomes available.
+        Does NOT modify trade_count.
+        """
+        if og.state != "SUBMITTED" or og.filled_qty > 0:
+            self._logger.log(
+                "suspend_refused",
+                group_id=og.group_id,
+                state=og.state,
+                filled=og.filled_qty,
+            )
+            return
+
+        # Cancel the entry order at IB (children auto-cancel via parentId)
+        if not self._config.dry_run and self._conn.is_connected:
+            ib = self._conn.ib
+            if og.ib_entry_order_id:
+                for trade in ib.openTrades():
+                    if trade.order.orderId == og.ib_entry_order_id:
+                        ib.cancelOrder(trade.order)
+                        break
+
+        result = daily_state.move_to_suspended(og.group_id, reason)
+        if result is None:
+            # Race: order already moved (filled between decision and cancel)
+            self._logger.log(
+                "suspend_race",
+                group_id=og.group_id,
+                reason="order not found in pending",
+            )
+            return
+
+        self._logger.log(
+            "order_suspended",
+            group_id=og.group_id,
+            entry=og.entry_price,
+            qty=og.target_qty,
+            reason=reason,
+        )
+        self._state_mgr.save(daily_state)
+
+    async def reactivate_order(self, og, daily_state):
+        """Re-place a SUSPENDED order with IB.
+
+        Pops from suspended_orders, clears old IB IDs, places via internal
+        method (no trade_count increment — already counted on first placement).
+        Returns the updated OrderGroup or None on failure.
+        """
+        reactivated = daily_state.move_suspended_to_pending(og.group_id)
+        if reactivated is None:
+            return None
+
+        # Clear stale IB order IDs (will get fresh ones)
+        reactivated.ib_entry_order_id = None
+        reactivated.ib_tp_order_id = None
+        reactivated.ib_sl_order_id = None
+
+        result = await self._place_bracket_internal(reactivated, daily_state)
+
+        self._logger.log(
+            "order_reactivated",
+            group_id=og.group_id,
+            entry=og.entry_price,
+            qty=reactivated.target_qty,
+        )
+        return result
+
+    def _notify_order_resolved(self):
+        """Trigger margin re-evaluation callback if registered."""
+        if self._on_order_resolved:
+            asyncio.ensure_future(self._on_order_resolved())
 
     def _on_entry_fill(self, trade, og, daily_state):
         """Handle entry order fill (full or partial)."""
@@ -364,6 +451,7 @@ class OrderManager:
             group_id=og.group_id,
             reason=reason,
         )
+        self._notify_order_resolved()
 
     async def cancel_all_pending(self, daily_state, reason=CLOSE_EOD):
         """Cancel all unfilled entry orders (EOD cleanup)."""
@@ -427,6 +515,7 @@ class OrderManager:
                 pnl_pts = og.entry_price - est_exit
             est_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
 
+            og.actual_exit_price = est_exit
             daily_state.move_to_closed(og.group_id, reason, est_pnl)
             self._logger.log(
                 "eod_exit", group_id=og.group_id, setup=og.setup,
@@ -458,6 +547,7 @@ class OrderManager:
         gross_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
         net_pnl = round(gross_pnl - commission, 2)
 
+        og.actual_exit_price = fill_price
         daily_state.move_to_closed(og.group_id, reason, net_pnl)
 
         self._logger.log(
@@ -518,6 +608,7 @@ class OrderManager:
             except Exception:
                 pass
 
+        og.actual_exit_price = fill_price
         daily_state.move_to_closed(og.group_id, CLOSE_TP, net_pnl)
 
         self._logger.log(
@@ -575,6 +666,7 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
+        self._notify_order_resolved()
 
     def _on_sl_fill(self, trade, og, daily_state):
         """Stop loss filled — log P&L, slippage, commissions."""
@@ -603,6 +695,7 @@ class OrderManager:
             except Exception:
                 pass
 
+        og.actual_exit_price = fill_price
         daily_state.move_to_closed(og.group_id, CLOSE_SL, net_pnl)
 
         self._logger.log(
@@ -661,6 +754,7 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
+        self._notify_order_resolved()
 
     def _cleanup_entry_remainder(self, og):
         """Cancel unfilled entry contracts and kill partial fill timer on TP/SL fill.
