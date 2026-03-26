@@ -74,6 +74,10 @@ class BridgeClient:
         self._event_handlers = {}       # event_name -> [callbacks]
         self._response_queue = asyncio.Queue()
         self._recv_task = None
+        self._heartbeat_task = None
+        self._on_disconnect_callback = None  # Engine sets this to pause trading
+        self._heartbeat_interval = getattr(config, 'bridge_heartbeat_interval', 30)
+        self._heartbeat_timeout = getattr(config, 'bridge_heartbeat_timeout', 5)
 
     async def start(self, launch_bridge=True):
         """
@@ -89,6 +93,9 @@ class BridgeClient:
 
         # Connect to bridge TCP
         await self._connect()
+
+        # Start heartbeat monitor
+        self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
     async def _connect(self, retries=5, delay=2):
         """Connect to the bridge TCP server."""
@@ -189,6 +196,56 @@ class BridgeClient:
         else:
             self._event_handlers.pop(event_type, None)
 
+    def on_disconnect(self, callback):
+        """Register a callback for bridge disconnection (engine uses this to pause trading)."""
+        self._on_disconnect_callback = callback
+
+    async def _heartbeat_loop(self):
+        """Periodic heartbeat: ping bridge, reconnect if unresponsive."""
+        try:
+            while True:
+                await asyncio.sleep(self._heartbeat_interval)
+                if not self._connected:
+                    # Already disconnected — attempt reconnect
+                    await self._attempt_reconnect()
+                    continue
+
+                # Send ping, expect pong
+                try:
+                    result = await self.send_and_wait(
+                        {"action": "ping"}, "pong", timeout=self._heartbeat_timeout
+                    )
+                    if result is None:
+                        # Pong timeout — bridge is unresponsive
+                        if self._logger:
+                            self._logger.log("bridge_heartbeat_timeout")
+                        self._connected = False
+                        if self._on_disconnect_callback:
+                            cb_result = self._on_disconnect_callback()
+                            if asyncio.iscoroutine(cb_result):
+                                await cb_result
+                        await self._attempt_reconnect()
+                except (ConnectionError, OSError):
+                    self._connected = False
+                    await self._attempt_reconnect()
+        except asyncio.CancelledError:
+            pass
+
+    async def _attempt_reconnect(self):
+        """Try to reconnect to the bridge with backoff."""
+        if self._logger:
+            self._logger.log("bridge_reconnecting")
+        try:
+            # Cancel old recv task
+            if self._recv_task and not self._recv_task.done():
+                self._recv_task.cancel()
+            await self._connect(retries=3, delay=3)
+            if self._logger:
+                self._logger.log("bridge_reconnected")
+        except ConnectionError:
+            if self._logger:
+                self._logger.log("bridge_reconnect_failed")
+
     async def _recv_loop(self):
         """Background task: read JSON events from bridge and dispatch."""
         try:
@@ -238,6 +295,13 @@ class BridgeClient:
     async def stop(self):
         """Disconnect from bridge and optionally kill the process."""
         self._connected = False
+
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         if self._recv_task and not self._recv_task.done():
             self._recv_task.cancel()

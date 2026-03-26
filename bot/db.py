@@ -153,6 +153,19 @@ def init_db(db_path=None):
         )
     ''')
 
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            sent INTEGER DEFAULT 0,
+            send_attempts INTEGER DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            sent_at TEXT
+        )
+    ''')
+
     # Indexes for common queries
     c.execute('CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(trade_date)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_trades_setup ON trades(setup)')
@@ -414,6 +427,48 @@ class TradeDB:
             params.append(f'-{days} days')
         sql += ' GROUP BY time_period ORDER BY time_period'
         return self.query(sql, params)
+
+    # ── Alert Queue ─────────────────────────────────────────────────────
+
+    def queue_alert(self, event_type, message):
+        """Queue an alert for delivery with retry support."""
+        conn = self._conn()
+        conn.execute(
+            'INSERT INTO alerts (event_type, message) VALUES (?, ?)',
+            [event_type, message]
+        )
+        conn.commit()
+        conn.close()
+
+    def get_unsent_alerts(self, max_attempts=3, limit=10):
+        """Get alerts that haven't been delivered yet."""
+        return self.query(
+            'SELECT * FROM alerts WHERE sent = 0 AND send_attempts < ? '
+            'ORDER BY created_at ASC LIMIT ?',
+            [max_attempts, limit]
+        )
+
+    def mark_alert_sent(self, alert_id):
+        """Mark an alert as successfully sent."""
+        conn = self._conn()
+        conn.execute(
+            'UPDATE alerts SET sent = 1, sent_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [alert_id]
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_alert_failed(self, alert_id, error):
+        """Increment attempt count and record error for a failed alert."""
+        conn = self._conn()
+        conn.execute(
+            'UPDATE alerts SET send_attempts = send_attempts + 1, last_error = ? WHERE id = ?',
+            [error, alert_id]
+        )
+        conn.commit()
+        conn.close()
+
+    # ── Queries ───────────────────────────────────────────────────────────
 
     def get_equity_curve(self, limit=500):
         """Trade-by-trade equity curve."""

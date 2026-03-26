@@ -8,6 +8,7 @@ Supports hot-reload: checks file mtime every 60s and swaps the lookup atomically
 import importlib.util
 import os
 import sys
+import threading
 import time
 
 # Import strategy_store directly to avoid logic.utils.__init__ pulling in heavy deps
@@ -43,6 +44,7 @@ class StrategyLoader:
         self._strategy = None
         self._strategy_id = None
         self._lookup = {}           # {(time_period, risk_range): cell_config}
+        self._reload_lock = threading.RLock()  # Protects _lookup during hot-reload
         self._last_mtime = None
         self._last_check = 0
 
@@ -65,7 +67,8 @@ class StrategyLoader:
 
         self._strategy = strategy
         self._strategy_id = strategy["meta"]["id"]
-        self._lookup = self._build_lookup(strategy)
+        with self._reload_lock:
+            self._lookup = self._build_lookup(strategy)
         self._last_mtime = get_strategy_mtime(self._strategy_id, self._strategy_dir)
 
         if self._logger:
@@ -120,7 +123,8 @@ class StrategyLoader:
         risk_range = self._risk_to_range(risk_pts)
         if not risk_range:
             return None
-        return self._lookup.get((time_period, risk_range))
+        with self._reload_lock:
+            return self._lookup.get((time_period, risk_range))
 
     @property
     def strategy(self):

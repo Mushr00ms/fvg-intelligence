@@ -14,7 +14,7 @@ from datetime import datetime
 
 import pytz
 
-from bot.state.trade_state import OrderGroup, CLOSE_TP, CLOSE_SL, CLOSE_FLATTEN, CLOSE_CANCEL, CLOSE_EOD
+from bot.state.trade_state import OrderGroup, CLOSE_TP, CLOSE_SL, CLOSE_FLATTEN, CLOSE_CANCEL, CLOSE_EOD, CLOSE_REJECTED
 from bot.strategy.trade_calculator import POINT_VALUE
 
 NY_TZ = pytz.timezone("America/New_York")
@@ -30,7 +30,8 @@ class OrderManager:
     3. Place bracket order with IB
     """
 
-    def __init__(self, ib_connection, contract, state_manager, logger, config, clock=None, db=None):
+    def __init__(self, ib_connection, contract, state_manager, logger, config, clock=None, db=None,
+                 on_kill_switch=None):
         self._conn = ib_connection
         self._contract = contract
         self._state_mgr = state_manager
@@ -38,7 +39,9 @@ class OrderManager:
         self._config = config
         self._clock = clock
         self._db = db
+        self._on_kill_switch = on_kill_switch  # Callback for immediate kill switch
         self._partial_timers = {}  # group_id -> asyncio.Task
+        self._adjustment_lock = asyncio.Lock()  # Serialize partial fill qty adjustments
 
     def _now_iso(self):
         if self._clock is not None:
@@ -115,7 +118,7 @@ class OrderManager:
         sl = StopOrder(
             action=reverse_side,
             totalQuantity=og.target_qty,
-            auxPrice=og.stop_price,
+            stopPrice=og.stop_price,
             orderId=og.ib_sl_order_id,
             parentId=og.ib_entry_order_id,
             transmit=True,  # Transmit the whole bracket
@@ -161,6 +164,8 @@ class OrderManager:
             og.filled_at = self._now_iso()
             avg_fill = trade.orderStatus.avgFillPrice
             slippage = round(abs(avg_fill - og.entry_price), 2)
+            og.actual_entry_price = avg_fill
+            og.entry_slippage_pts = slippage
             daily_state.move_to_open(og.group_id)
             self._logger.log(
                 "order_filled",
@@ -199,10 +204,9 @@ class OrderManager:
         )
 
         # Adjust child order quantities (if not dry run)
+        # Awaited under lock to prevent race with subsequent partial fills
         if not self._config.dry_run and self._conn.is_connected:
-            asyncio.ensure_future(
-                self._adjust_child_qty(og, filled_qty)
-            )
+            asyncio.ensure_future(self._locked_adjust_child_qty(og, filled_qty))
 
         # Start 5-minute timer for unfilled remainder
         if og.group_id not in self._partial_timers:
@@ -211,6 +215,11 @@ class OrderManager:
                 self._partial_fill_timeout(og.group_id, daily_state, timeout)
             )
             self._partial_timers[og.group_id] = task
+
+    async def _locked_adjust_child_qty(self, og, new_qty):
+        """Serialize TP/SL qty adjustments to prevent race conditions between partial fills."""
+        async with self._adjustment_lock:
+            await self._adjust_child_qty(og, new_qty)
 
     async def _adjust_child_qty(self, og, new_qty):
         """Modify TP and SL order quantities to match partial fill."""
@@ -280,6 +289,55 @@ class OrderManager:
             if trade.order.orderId == og.ib_entry_order_id:
                 ib.cancelOrder(trade.order)
                 break
+
+    async def restore_partial_fill_timers(self, daily_state):
+        """Restore partial fill timers from persisted state after crash/restart.
+
+        Scans pending orders for PARTIAL state with a timer start timestamp.
+        If the timer has expired, immediately cancels the unfilled remainder.
+        If time remains, spawns a new timer with the adjusted timeout.
+        """
+        for og in list(daily_state.pending_orders):
+            if og.state != "PARTIAL" or not og.partial_fill_timer_start:
+                continue
+
+            try:
+                start_time = datetime.fromisoformat(og.partial_fill_timer_start)
+                now = datetime.fromisoformat(self._now_iso())
+                elapsed = (now - start_time).total_seconds()
+                remaining = self._config.partial_fill_timeout - elapsed
+
+                if remaining <= 0:
+                    # Timer already expired — cancel remainder immediately
+                    self._logger.log(
+                        "partial_fill_timeout_restored",
+                        group_id=og.group_id,
+                        action="expired",
+                        elapsed=round(elapsed, 1),
+                    )
+                    await self._cancel_entry_remainder(og)
+                    og.target_qty = og.filled_qty
+                    og.state = "FILLED"
+                    og.filled_at = self._now_iso()
+                    daily_state.move_to_open(og.group_id)
+                else:
+                    # Timer still active — resume with remaining time
+                    self._logger.log(
+                        "partial_fill_timeout_restored",
+                        group_id=og.group_id,
+                        action="resumed",
+                        remaining=round(remaining, 1),
+                    )
+                    task = asyncio.ensure_future(
+                        self._partial_fill_timeout(og.group_id, daily_state, remaining)
+                    )
+                    self._partial_timers[og.group_id] = task
+            except (ValueError, TypeError) as e:
+                self._logger.log(
+                    "partial_fill_timer_restore_error",
+                    group_id=og.group_id,
+                    error=str(e),
+                )
 
     async def cancel_order_group(self, og, daily_state, reason=CLOSE_CANCEL):
         """Cancel all orders in an order group."""
@@ -490,9 +548,9 @@ class OrderManager:
                     pass
             self._db.update_trade_exit(
                 og.group_id,
-                actual_entry_price=og.entry_price,
+                actual_entry_price=og.actual_entry_price or og.entry_price,
                 actual_exit_price=fill_price,
-                entry_slippage_pts=0,
+                entry_slippage_pts=og.entry_slippage_pts,
                 stop_slippage_pts=0,
                 exit_reason="TP",
                 pnl_pts=round(pnl_pts, 2),
@@ -508,7 +566,11 @@ class OrderManager:
         # Check kill switch after every close
         from bot.risk.risk_gates import RiskGates
         gates = RiskGates(self._config)
-        gates.evaluate_kill_switch(daily_state)
+        if gates.evaluate_kill_switch(daily_state):
+            self._logger.log("kill_switch", reason=daily_state.kill_switch_reason,
+                             trigger="tp_fill")
+            if self._on_kill_switch:
+                asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
 
     def _on_sl_fill(self, trade, og, daily_state):
@@ -573,9 +635,9 @@ class OrderManager:
                     pass
             self._db.update_trade_exit(
                 og.group_id,
-                actual_entry_price=og.entry_price,
+                actual_entry_price=og.actual_entry_price or og.entry_price,
                 actual_exit_price=fill_price,
-                entry_slippage_pts=0,
+                entry_slippage_pts=og.entry_slippage_pts,
                 stop_slippage_pts=stop_slippage,
                 exit_reason="SL",
                 pnl_pts=round(pnl_pts, 2),
@@ -591,7 +653,10 @@ class OrderManager:
         from bot.risk.risk_gates import RiskGates
         gates = RiskGates(self._config)
         if gates.evaluate_kill_switch(daily_state):
-            self._logger.log("kill_switch", reason=daily_state.kill_switch_reason)
+            self._logger.log("kill_switch", reason=daily_state.kill_switch_reason,
+                             trigger="sl_fill")
+            if self._on_kill_switch:
+                asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
 
     def _cleanup_entry_remainder(self, og):
@@ -662,3 +727,20 @@ class OrderManager:
                 asyncio.ensure_future(
                     self._flatten_single_position(og, daily_state, CLOSE_EOD)
                 )
+        elif status == "Rejected":
+            # IB rejected the order (insufficient margin, invalid price, etc.)
+            self._logger.log(
+                "order_rejected",
+                group_id=og.group_id,
+                ib_status=status,
+                why_held=getattr(trade.orderStatus, 'whyHeld', ''),
+            )
+            daily_state.move_to_closed(og.group_id, CLOSE_REJECTED)
+            self._state_mgr.save(daily_state)
+        elif status not in ("Submitted", "PreSubmitted", "Filled"):
+            # Unexpected status — log for investigation
+            self._logger.log(
+                "order_status_unexpected",
+                group_id=og.group_id,
+                ib_status=status,
+            )

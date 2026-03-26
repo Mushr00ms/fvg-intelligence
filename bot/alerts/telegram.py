@@ -25,10 +25,11 @@ class TelegramAlerter:
     4. Set bot_token and chat_id in bot_config.json
     """
 
-    def __init__(self, bot_token, chat_id, logger=None):
+    def __init__(self, bot_token, chat_id, logger=None, db=None):
         self._token = bot_token
         self._chat_id = chat_id
         self._logger = logger
+        self._db = db  # TradeDB for alert queue (optional)
         self._enabled = bool(bot_token and chat_id)
 
     @property
@@ -74,15 +75,59 @@ class TelegramAlerter:
             if self._logger:
                 self._logger.log("telegram_error", error=str(e))
 
+    async def send_queued(self, event_type, message):
+        """Send with DB-backed queue for retry on failure.
+
+        Falls back to fire-and-forget if DB is not configured.
+        """
+        if self._db:
+            self._db.queue_alert(event_type, message)
+
+        success = await self._try_send(message)
+        if success and self._db:
+            # Mark the most recent unsent alert as sent
+            unsent = self._db.get_unsent_alerts(limit=1)
+            if unsent:
+                self._db.mark_alert_sent(unsent[0]['id'])
+
+    async def _try_send(self, message):
+        """Attempt to send, return True on success."""
+        if not self._enabled:
+            return False
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(None, self.send_sync, message)
+            return result
+        except Exception as e:
+            if self._logger:
+                self._logger.log("telegram_error", error=str(e))
+            return False
+
+    async def retry_unsent(self):
+        """Retry delivery of queued but unsent alerts. Call periodically from engine."""
+        if not self._db or not self._enabled:
+            return 0
+
+        unsent = self._db.get_unsent_alerts(max_attempts=3, limit=10)
+        sent_count = 0
+        for alert in unsent:
+            success = await self._try_send(alert['message'])
+            if success:
+                self._db.mark_alert_sent(alert['id'])
+                sent_count += 1
+            else:
+                self._db.mark_alert_failed(alert['id'], "send_failed")
+        return sent_count
+
     async def alert_kill_switch(self, reason, daily_pnl, balance):
-        """Send kill switch alert."""
+        """Send kill switch alert (queued for guaranteed delivery)."""
         msg = (
             "<b>KILL SWITCH ACTIVATED</b>\n\n"
             f"Reason: {reason}\n"
             f"Daily P&L: ${daily_pnl:,.0f}\n"
             f"Balance: ${balance:,.0f}"
         )
-        await self.send(msg)
+        await self.send_queued("kill_switch", msg)
 
     async def alert_connection_lost(self, downtime_seconds):
         """Send connection lost alert."""
