@@ -140,7 +140,9 @@ class ActiveFVGManager:
 
     def on_5min_bar(self, bar):
         """
-        Called when a new 5min bar completes.
+        Called when a new 5min bar completes (from keepUpToDate).
+
+        Appends bar to _recent_bars and runs FVG detection on the last 3 bars.
 
         Args:
             bar: dict with {open, high, low, close, date}
@@ -153,41 +155,90 @@ class ActiveFVGManager:
         if len(self._recent_bars) < 3:
             return None
 
-        # Check last 3 bars
         bar1 = self._recent_bars[-3]
         bar2 = self._recent_bars[-2]
         bar3 = self._recent_bars[-1]
 
         fvg = check_fvg_3bars(bar1, bar2, bar3, self._min_size)
+        return self._finalize_fvg(fvg, bar3)
+
+    def detect_from_tick_bar(self, bar3):
+        """
+        Detect FVG using cached bar1/bar2 from _recent_bars and a tick-constructed bar3.
+
+        Does NOT append bar3 to _recent_bars — the authoritative keepUpToDate
+        version will be appended later via append_bar().
+
+        Args:
+            bar3: dict with {open, high, low, close, date} (hybrid-merged OHLC)
+
+        Returns:
+            FVGRecord if detected, None otherwise.
+        """
+        if len(self._recent_bars) < 2:
+            return None
+
+        bar1 = self._recent_bars[-2]
+        bar2 = self._recent_bars[-1]
+
+        fvg = check_fvg_3bars(bar1, bar2, bar3, self._min_size)
+        return self._finalize_fvg(fvg, bar3)
+
+    def append_bar(self, bar):
+        """
+        Append a bar to _recent_bars without running FVG detection.
+
+        Called by the engine when keepUpToDate delivers a bar that was
+        already detected via the tick path — keeps _recent_bars in sync
+        so future bar1/bar2 references are correct.
+        """
+        self._recent_bars.append(bar)
+
+    def _finalize_fvg(self, fvg, bar3):
+        """
+        Shared post-detection logic: time period, strategy check, logging, activation.
+
+        Returns:
+            FVGRecord if valid and added to active set, None otherwise.
+        """
         if fvg is None:
             return None
 
-        # Assign time period
         fvg.time_period = _assign_time_period(bar3["date"], SESSION_INTERVALS)
         if not fvg.time_period:
-            return None  # Outside session intervals
+            return None
 
-        # Set formation date
         if isinstance(bar3["date"], str):
             fvg.formation_date = bar3["date"][:10]
         elif hasattr(bar3["date"], "strftime"):
             fvg.formation_date = bar3["date"].strftime("%Y-%m-%d")
 
-        # Early-skip: check if ANY risk range in this time period has a strategy cell
-        # We can't know the exact risk yet (depends on setup), but we can check if the
-        # time period has any cells at all
-        has_any_cell = False
-        bins = [5, 10, 15, 20, 25, 30, 40, 80]
-        for i in range(len(bins) - 1):
-            risk_range = f"{bins[i]}-{bins[i+1]}"
-            if self._strategy._lookup.get((fvg.time_period, risk_range)):
-                has_any_cell = True
-                break
+        strategy_id = getattr(self._strategy, "strategy_id", None)
+        cells_for_period = sum(
+            1 for tp, _ in self._strategy._lookup.keys()
+            if tp == fvg.time_period
+        )
+        in_strategy_time_period = cells_for_period > 0
 
-        if not has_any_cell:
-            return None  # No strategy cells for this time period
+        if not in_strategy_time_period:
+            if self._logger:
+                self._logger.log(
+                    "fvg_skipped_strategy",
+                    fvg_id=fvg.fvg_id,
+                    type=fvg.fvg_type,
+                    zone=[fvg.zone_low, fvg.zone_high],
+                    size=round(fvg.zone_high - fvg.zone_low, 2),
+                    time_period=fvg.time_period,
+                    middle_low=fvg.middle_low,
+                    middle_high=fvg.middle_high,
+                    strategy_id=strategy_id,
+                    in_strategy=False,
+                    in_strategy_time_period=False,
+                    strategy_cells_for_period=0,
+                    reason="no_enabled_cells_for_time_period",
+                )
+            return None
 
-        # Add to active FVGs
         self._active[fvg.fvg_id] = fvg
 
         if self._logger:
@@ -200,6 +251,10 @@ class ActiveFVGManager:
                 time_period=fvg.time_period,
                 middle_low=fvg.middle_low,
                 middle_high=fvg.middle_high,
+                strategy_id=strategy_id,
+                in_strategy=True,
+                in_strategy_time_period=True,
+                strategy_cells_for_period=cells_for_period,
             )
 
         return fvg

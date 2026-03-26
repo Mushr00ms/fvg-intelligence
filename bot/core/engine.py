@@ -10,7 +10,7 @@ import signal
 import sys
 import os
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 
@@ -21,12 +21,13 @@ if _PROJECT_ROOT not in sys.path:
 
 from bot.bot_config import BotConfig
 from bot.clock import Clock
-from bot.logging.bot_logger import BotLogger
+from bot.bot_logging.bot_logger import BotLogger
 from bot.state.state_manager import StateManager
 from bot.state.trade_state import DailyState
 from bot.strategy.strategy_loader import StrategyLoader
 from bot.strategy.fvg_detector import ActiveFVGManager
 from bot.strategy.mitigation_scanner import scan_active_fvgs
+from bot.strategy.tick_bar_builder import TickBarBuilder
 from bot.strategy.trade_calculator import calculate_setup
 from bot.risk.risk_gates import RiskGates
 from bot.risk.time_gates import TimeGates
@@ -49,6 +50,19 @@ def _bar_date_to_et(bar_date):
         return bar_date.astimezone(NY_TZ)
     # Naive datetime from IB — assume CME (Central) timezone
     return CME_TZ.localize(bar_date).astimezone(NY_TZ)
+
+
+def _tick_time_to_et(tick_time):
+    """Convert IB tick-by-tick timestamp to ET datetime.
+
+    IB tick-by-tick AllLast times are UTC (naive datetime from ib_async).
+    """
+    if tick_time is None:
+        return None
+    if hasattr(tick_time, 'tzinfo') and tick_time.tzinfo is not None:
+        return tick_time.astimezone(NY_TZ)
+    # Naive datetime from IB ticks — assume UTC
+    return pytz.utc.localize(tick_time).astimezone(NY_TZ)
 
 
 class BotEngine:
@@ -81,18 +95,23 @@ class BotEngine:
             config.ib_host, config.ib_port, config.ib_client_id, self.logger,
             clock=self.clock,
         )
-        self.telegram = TelegramAlerter(
-            config.telegram_bot_token, config.telegram_chat_id, self.logger
-        )
         self.db = TradeDB(os.path.join(config.state_dir, "bot_trades.db"))
+        self.telegram = TelegramAlerter(
+            config.telegram_bot_token, config.telegram_chat_id, self.logger,
+            db=self.db,
+        )
         self.fvg_mgr = None         # Initialized after strategy loads
         self.order_mgr = None        # Initialized after IB connects
         self.daily_state = None
         self._contract = None
         self._bars_5min = None
         self._bars_1min = None
+        self._tick_bar_builder = TickBarBuilder()
+        self._tick_subscription = None
+        self._tick_detected_bars = set()  # window_start datetimes already tick-detected
         self._shutdown = False
-        self._mitigation_lock = asyncio.Lock()
+        self._reconciliation_complete = False  # Block trading until startup finishes
+        self._detection_lock = asyncio.Lock()
         self._eod_tasks = []
         self._periodic_tasks = []
 
@@ -129,6 +148,7 @@ class BotEngine:
             self.order_mgr = OrderManager(
                 self.ib_conn, self._contract, self.state_mgr, self.logger, self.config,
                 clock=self.clock, db=self.db,
+                on_kill_switch=self._trigger_kill_switch,
             )
 
         # 5. Load or create daily state
@@ -152,6 +172,10 @@ class BotEngine:
             # Restore active FVGs
             self.fvg_mgr.restore(self.daily_state.active_fvgs)
 
+        # Restore partial fill timers from persisted state
+        if self.order_mgr and self.daily_state:
+            await self.order_mgr.restore_partial_fill_timers(self.daily_state)
+
         # Check kill switch from previous run
         if self.daily_state.kill_switch_active:
             self.logger.log(
@@ -169,6 +193,8 @@ class BotEngine:
         # 6. Subscribe to bar data
         if not self.config.dry_run and self.ib_conn.is_connected:
             await self._subscribe_bars()
+            self._seed_recent_bars()
+            self._subscribe_ticks()
 
             # 6b. Backfill FVGs from today's existing 5-min bars
             # On crash/restart mid-session, the bot needs to know about
@@ -187,6 +213,13 @@ class BotEngine:
         # 9. Telegram notification
         if self.telegram.enabled:
             await self.telegram.alert_bot_start(self.config, self.strategy.strategy_id)
+
+        # Mark reconciliation complete — trading is now allowed
+        self._reconciliation_complete = True
+
+        # Process detection for backfilled FVGs that don't yet have orders
+        # (must run AFTER _reconciliation_complete = True so time/risk gates allow it)
+        await self._process_backfilled_fvgs()
 
         self.logger.log(
             "startup_complete",
@@ -207,6 +240,15 @@ class BotEngine:
                 break
 
             if not self.time_gates.is_session_active():
+                # Before session start: wait for market open instead of exiting
+                now_t = self.time_gates._now().time()
+                if now_t < self.time_gates.session_start:
+                    secs = self.time_gates.seconds_until(self.time_gates.session_start)
+                    if secs > 0:
+                        self.logger.log("waiting_for_session", seconds=round(secs))
+                        await asyncio.sleep(min(secs, 30))  # Re-check every 30s max
+                        continue
+                # After session end: actually stop
                 self.logger.log("bot_stop", reason="session_ended")
                 break
 
@@ -289,6 +331,155 @@ class BotEngine:
 
         self.logger.log("bars_subscribed", timeframes=["5min", "1min"])
 
+    def _seed_recent_bars(self):
+        """Seed ActiveFVGManager._recent_bars from historical bars.
+
+        At startup, _recent_bars is empty. keepUpToDate only fires for NEW bars.
+        The tick path needs bar1/bar2 in _recent_bars immediately to detect FVGs
+        on the very first bar completion. Without seeding, FVGs formed from the
+        first few bars after startup would be missed.
+        """
+        if not self._bars_5min or not self.fvg_mgr:
+            return
+
+        # All bars except the last one (which is incomplete with keepUpToDate)
+        completed = self._bars_5min[:-1] if len(self._bars_5min) > 1 else []
+
+        # Seed the last N completed bars (deque maxlen=10 handles overflow)
+        for bar in completed[-10:]:
+            bar_dict = {
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "date": _bar_date_to_et(bar.date),
+            }
+            self.fvg_mgr.append_bar(bar_dict)
+
+        self.logger.log("recent_bars_seeded", count=len(self.fvg_mgr._recent_bars))
+
+    def _subscribe_ticks(self):
+        """Subscribe to tick-by-tick trade data for sub-ms FVG detection.
+
+        Optional enhancement — if subscription fails, keepUpToDate bars
+        still handle detection with ~5 sec delay.
+        """
+        try:
+            ib = self.ib_conn.ib
+            self._tick_subscription = ib.reqTickByTickData(
+                self._contract, tickType='AllLast',
+                numberOfTicks=0, ignoreSize=True,
+            )
+            self._tick_subscription.updateEvent += self._on_tick_update
+            self._tick_bar_builder.reset()
+            self.logger.log("ticks_subscribed")
+        except Exception as e:
+            self.logger.log("ticks_subscribe_failed", error=str(e))
+            self._tick_subscription = None
+
+    def _on_tick_update(self, ticker):
+        """Callback for tick-by-tick trade data. Hot path — must be fast."""
+        ticks = ticker.tickByTicks
+        if not ticks:
+            return
+
+        for tick in ticks:
+            tick_time_et = _tick_time_to_et(tick.time)
+            if tick_time_et is None:
+                continue
+
+            # Tick-based mitigation: check every trade against active FVGs
+            self._check_tick_mitigation(tick.price, tick_time_et)
+
+            completed = self._tick_bar_builder.on_tick(tick.price, tick_time_et)
+            if completed is not None:
+                self._on_tick_bar_complete(completed)
+
+        # Clear processed ticks to prevent unbounded memory growth
+        ticks.clear()
+
+    def _check_tick_mitigation(self, price, tick_time_et):
+        """Check a single trade tick against active FVGs for mitigation."""
+        if self.fvg_mgr is None or self.fvg_mgr.active_count == 0:
+            return
+
+        mit_time = str(tick_time_et)
+        mitigated = []
+
+        for fvg in self.fvg_mgr.active_fvgs:
+            if fvg.is_mitigated:
+                continue
+            if fvg.zone_low <= price <= fvg.zone_high:
+                fvg.is_mitigated = True
+                fvg.mitigation_time = mit_time
+                mitigated.append(fvg)
+
+        for fvg in mitigated:
+            self.logger.log(
+                "mitigation",
+                fvg_id=fvg.fvg_id,
+                type=fvg.fvg_type,
+                zone=[fvg.zone_low, fvg.zone_high],
+                tick_price=price,
+                source="tick",
+            )
+            self.db.update_fvg(fvg.fvg_id, mitigated=1, mitigation_time=mit_time)
+            self.fvg_mgr.remove(fvg.fvg_id)
+
+        if mitigated:
+            self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
+            self.state_mgr.save(self.daily_state)
+
+    def _on_tick_bar_complete(self, tick_ohlc):
+        """Merge tick OHLC with IB's keepUpToDate bar for conservative FVG detection.
+
+        ALWAYS appends bar3 to _recent_bars so subsequent tick detections
+        have correct bar1/bar2 — cannot rely on keepUpToDate if it's broken.
+        """
+        if self.fvg_mgr is None:
+            return
+
+        # Read IB's keepUpToDate incomplete bar (continuously updated ~every 5 sec)
+        ib_bar = self._bars_5min[-1] if self._bars_5min and len(self._bars_5min) > 0 else None
+
+        if ib_bar is not None:
+            # Hybrid merge: most conservative extremes from both sources
+            bar3 = {
+                "open":  ib_bar.open,
+                "high":  max(ib_bar.high, tick_ohlc["high"]),
+                "low":   min(ib_bar.low, tick_ohlc["low"]),
+                "close": tick_ohlc["close"],
+                "date":  _bar_date_to_et(ib_bar.date),
+            }
+        else:
+            bar3 = tick_ohlc
+
+        # Always append bar3 to _recent_bars so next tick detection has correct bar1/bar2.
+        # detect_from_tick_bar uses [-2] and [-1] BEFORE this append.
+        if len(self.fvg_mgr._recent_bars) >= 2:
+            fvg = self.fvg_mgr.detect_from_tick_bar(bar3)
+        else:
+            fvg = None
+
+        # Append AFTER detection (so [-2] and [-1] were the correct bar1/bar2)
+        self.fvg_mgr.append_bar(bar3)
+        self._tick_detected_bars.add(tick_ohlc["date"])
+
+        if fvg:
+            self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
+            self.state_mgr.save(self.daily_state)
+            self.db.insert_fvg(
+                fvg_id=fvg.fvg_id, trade_date=fvg.formation_date,
+                fvg_type=fvg.fvg_type, zone_low=fvg.zone_low,
+                zone_high=fvg.zone_high, fvg_size=round(fvg.zone_high - fvg.zone_low, 2),
+                time_period=fvg.time_period, formation_time=fvg.time_candle3,
+            )
+            self.logger.log(
+                "fvg_detected_tick", fvg_id=fvg.fvg_id, type=fvg.fvg_type,
+                zone=[fvg.zone_low, fvg.zone_high], source="tick",
+            )
+            asyncio.ensure_future(self._guarded_process_detection(fvg))
+
     async def _backfill_fvgs(self):
         """
         Scan today's existing 5-min bars for un-mitigated FVGs.
@@ -340,7 +531,9 @@ class BotEngine:
                 continue
 
             # Check if already mitigated by scanning 1-min bars after formation
-            formation_time = b3["date"]
+            # FVG is only confirmed when bar3 CLOSES (5 min after bar3 open).
+            # Mitigation scan must start after bar3 close, not bar3 open.
+            formation_time = b3["date"] + timedelta(minutes=5)
             already_mitigated = False
             if self._bars_1min:
                 for bar_1m in self._bars_1min:
@@ -374,12 +567,33 @@ class BotEngine:
             total_active=self.fvg_mgr.active_count,
         )
 
+    async def _process_backfilled_fvgs(self):
+        """Place orders for backfilled FVGs that don't already have pending/open orders."""
+        if self.fvg_mgr.active_count == 0:
+            return
+
+        # Build set of fvg_ids that already have orders
+        ordered_fvg_ids = set()
+        for og in (self.daily_state.pending_orders
+                   + self.daily_state.open_positions
+                   + self.daily_state.closed_trades):
+            ordered_fvg_ids.add(og.fvg_id)
+
+        # Process detection for FVGs without orders (copy list — detection may modify active)
+        for fvg in list(self.fvg_mgr.active_fvgs):
+            if fvg.fvg_id not in ordered_fvg_ids:
+                await self._guarded_process_detection(fvg)
+
     async def _on_reconnect(self):
-        """Re-subscribe bars and backfill FVGs after IB reconnect."""
+        """Re-subscribe bars/ticks and backfill FVGs after IB reconnect."""
         self.logger.log("reconnect_resubscribe")
         try:
             await self._subscribe_bars()
+            self._seed_recent_bars()
+            self._subscribe_ticks()
+            self._tick_detected_bars.clear()
             await self._backfill_fvgs()
+            await self._process_backfilled_fvgs()
             self.logger.log("reconnect_resubscribe_done",
                             active_fvgs=self.fvg_mgr.active_count)
         except Exception as e:
@@ -391,6 +605,9 @@ class BotEngine:
         With keepUpToDate=True, hasNewBar=True means a new bar STARTED.
         bars[-1] is the new incomplete bar, bars[-2] is the just-completed bar.
         We detect FVGs on the COMPLETED bar (bars[-2]), never on the incomplete one.
+
+        If the tick path already detected an FVG for this bar window,
+        we still append the authoritative bar to _recent_bars but skip re-detection.
         """
         if not hasNewBar or len(bars) < 2:
             return
@@ -405,18 +622,32 @@ class BotEngine:
             "date": _bar_date_to_et(bar.date),
         }
 
-        # Detect FVG on the completed bar
+        # Check if tick path already handled this bar window
+        bar_window = _bar_date_to_et(bar.date)
+        if bar_window in self._tick_detected_bars:
+            # Tick path already appended bar3 and ran detection.
+            # Replace the tick-built bar with IB's authoritative version
+            # so future bar1/bar2 references are exact.
+            if len(self.fvg_mgr._recent_bars) > 0:
+                self.fvg_mgr._recent_bars[-1] = bar_dict
+            self._tick_detected_bars.discard(bar_window)
+            return
+
+        # Normal path: detect FVG from keepUpToDate (fallback for non-tick path)
         fvg = self.fvg_mgr.on_5min_bar(bar_dict)
         if fvg:
             self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
             self.state_mgr.save(self.daily_state)
-            # Log to DB
             self.db.insert_fvg(
                 fvg_id=fvg.fvg_id, trade_date=fvg.formation_date,
                 fvg_type=fvg.fvg_type, zone_low=fvg.zone_low,
                 zone_high=fvg.zone_high, fvg_size=round(fvg.zone_high - fvg.zone_low, 2),
                 time_period=fvg.time_period, formation_time=fvg.time_candle3,
             )
+
+            # Evaluate strategy and place limit order immediately at detection time
+            # (IB fills the limit order when price reaches the zone — that IS the mitigation)
+            asyncio.ensure_future(self._guarded_process_detection(fvg))
 
     def _on_1min_update(self, bars, hasNewBar):
         """Callback when 1min bar data updates.
@@ -450,31 +681,45 @@ class BotEngine:
             )
             self.db.update_fvg(fvg.fvg_id, mitigated=1, mitigation_time=mit_time)
 
-            # Process trade setup — serialized via lock to prevent concurrent
-            # mitigations from bypassing the position limit
-            asyncio.ensure_future(self._guarded_process_mitigation(fvg, bar_dict))
-
-            # Remove from active list
+            # Remove from active list (order was already placed at detection time)
             self.fvg_mgr.remove(fvg.fvg_id)
 
         if mitigated:
             self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
             self.state_mgr.save(self.daily_state)
 
-    async def _guarded_process_mitigation(self, fvg, bar):
-        """Serialize mitigation processing to prevent concurrent position limit bypass."""
-        async with self._mitigation_lock:
-            await self._process_mitigation(fvg, bar)
+    async def _guarded_process_detection(self, fvg):
+        """Serialize detection-time order processing to prevent concurrent position limit bypass.
 
-    async def _process_mitigation(self, fvg, bar):
+        Time gate is checked BEFORE acquiring the lock (pure clock check, no shared state).
+        Risk gates + order placement happen INSIDE the lock to ensure check-then-act atomicity.
         """
-        Evaluate and potentially place a trade for a mitigated FVG.
-        """
-        # Check time gate
+        if not self._reconciliation_complete:
+            self.logger.log("setup_rejected", fvg_id=fvg.fvg_id,
+                            gate="startup", reason="reconciliation not complete")
+            return
+
+        # Time gate check outside lock — pure clock check, no DailyState reads
         allowed, reason = self.time_gates.can_enter()
         if not allowed:
             self.logger.log("setup_rejected", fvg_id=fvg.fvg_id, gate="time", reason=reason)
+            # Remove from active FVGs — past entry window, won't trade
+            self.fvg_mgr.remove(fvg.fvg_id)
+            self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
             return
+
+        async with self._detection_lock:
+            await self._process_detection(fvg)
+
+    async def _process_detection(self, fvg):
+        """
+        Evaluate and potentially place a limit bracket order for a newly detected FVG.
+        Called with _detection_lock held — risk gate reads and order placement are atomic.
+
+        The entry limit order sits with IB; it fills when price reaches the zone level
+        (which is equivalent to mitigation).
+        """
+        from bot.strategy.trade_calculator import risk_to_range
 
         # Try each setup type: the strategy determines which setup applies
         # First compute risk for both setups and check which has a strategy cell
@@ -489,17 +734,58 @@ class BotEngine:
             risk_pts = round(abs(entry - stop) * 4) / 4  # round to tick
 
             if risk_pts <= 0:
+                self.logger.log(
+                    "setup_skipped_strategy",
+                    fvg_id=fvg.fvg_id,
+                    strategy_id=self.strategy.strategy_id,
+                    time_period=fvg.time_period,
+                    setup=setup_type,
+                    risk_pts=risk_pts,
+                    reason="non_positive_risk",
+                )
                 continue
 
             # Look up strategy cell
-            from bot.strategy.trade_calculator import risk_to_range
-            risk_range = risk_to_range(risk_pts) or ""
+            risk_range = risk_to_range(risk_pts)
+            if not risk_range:
+                self.logger.log(
+                    "setup_skipped_strategy",
+                    fvg_id=fvg.fvg_id,
+                    strategy_id=self.strategy.strategy_id,
+                    time_period=fvg.time_period,
+                    setup=setup_type,
+                    risk_pts=risk_pts,
+                    reason="risk_out_of_strategy_bins",
+                )
+                continue
+
             cell = self.strategy.find_cell(fvg.time_period, risk_pts)
             if cell is None:
+                self.logger.log(
+                    "setup_skipped_strategy",
+                    fvg_id=fvg.fvg_id,
+                    strategy_id=self.strategy.strategy_id,
+                    time_period=fvg.time_period,
+                    setup=setup_type,
+                    risk_pts=risk_pts,
+                    risk_range=risk_range,
+                    reason="no_strategy_cell",
+                )
                 continue
 
             # Only proceed if cell matches this setup type
             if cell["setup"] != setup_type:
+                self.logger.log(
+                    "setup_skipped_strategy",
+                    fvg_id=fvg.fvg_id,
+                    strategy_id=self.strategy.strategy_id,
+                    time_period=fvg.time_period,
+                    setup=setup_type,
+                    matched_setup=cell["setup"],
+                    risk_pts=risk_pts,
+                    risk_range=risk_range,
+                    reason="cell_setup_mismatch",
+                )
                 continue
 
             # Calculate full setup
@@ -548,8 +834,14 @@ class BotEngine:
                 cell_wr=cell["win_rate"],
             )
 
-            if self.order_mgr:
+            if self.order_mgr and (self.config.dry_run or self.ib_conn.is_connected):
                 await self.order_mgr.place_bracket(order, self.daily_state)
+            elif self.order_mgr and not self.ib_conn.is_connected:
+                self.logger.log(
+                    "setup_rejected", fvg_id=fvg.fvg_id,
+                    gate="connection", reason="IB not connected",
+                )
+                continue
             else:
                 # Dry run without IB connection
                 order.state = "SUBMITTED"
@@ -589,8 +881,14 @@ class BotEngine:
             )
             self.db.update_fvg(fvg.fvg_id, trade_placed=1)
 
+            # Link order to FVG for expiration cancellation
+            fvg.orders_placed.append(order.group_id)
             self.state_mgr.save(self.daily_state)
-            break  # Only one setup per FVG
+            return  # Only one setup per FVG
+
+        # No strategy cell matched — remove FVG from active tracking
+        self.fvg_mgr.remove(fvg.fvg_id)
+        self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
 
     async def _trigger_kill_switch(self):
         """Execute kill switch: cancel all, flatten all, halt."""
@@ -654,28 +952,60 @@ class BotEngine:
                 await asyncio.sleep(300)  # Re-sync NTP every 5 minutes
                 self.clock.check_resync()
 
+        async def periodic_alert_retry():
+            while not self._shutdown:
+                await asyncio.sleep(60)  # Retry unsent alerts every 60 seconds
+                try:
+                    sent = await self.telegram.retry_unsent()
+                    if sent > 0:
+                        self.logger.log("alerts_retried", count=sent)
+                except Exception as e:
+                    self.logger.log("alert_retry_error", error=str(e))
+
         self._periodic_tasks.append(asyncio.ensure_future(periodic_save()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_strategy_check()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_clock_sync()))
+        self._periodic_tasks.append(asyncio.ensure_future(periodic_alert_retry()))
 
     async def _eod_cancel(self):
-        """15:50 — Cancel all unfilled entry orders."""
-        self.logger.log("eod_cancel", time="15:50")
+        """Cancel all unfilled entry orders at configured EOD cancel time."""
+        self.logger.log("eod_cancel", time=self.config.cancel_unfilled_time)
         if self.order_mgr:
             await self.order_mgr.cancel_all_pending(self.daily_state, "EOD")
         self.state_mgr.save(self.daily_state, force=True)
 
     async def _eod_flatten(self):
-        """15:55 — Flatten all open positions at market."""
-        self.logger.log("eod_flatten", time="15:55")
+        """Flatten all open positions at configured EOD flatten time."""
+        self.logger.log("eod_flatten", time=self.config.flatten_time)
         if self.order_mgr:
             await self.order_mgr.flatten_all(self.daily_state, "EOD")
         self.state_mgr.save(self.daily_state, force=True)
+
+    def _calculate_max_drawdown(self, start_balance, closed_trades):
+        """Calculate max intraday drawdown from the trade sequence.
+
+        Walks trades in chronological order tracking peak equity.
+        Drawdown = peak - trough (always positive, represents max loss from peak).
+        """
+        running = start_balance
+        peak = start_balance
+        max_dd = 0.0
+
+        for trade in sorted(closed_trades, key=lambda t: t.closed_at or ""):
+            running += trade.realized_pnl
+            if running > peak:
+                peak = running
+            dd = peak - running
+            if dd > max_dd:
+                max_dd = dd
+
+        return round(max_dd, 2)
 
     async def _eod_cleanup(self):
         """16:00 — Expire FVGs, daily summary, final state save."""
         expired = self.fvg_mgr.expire_all()
         self.daily_state.active_fvgs = []
+        self._tick_detected_bars.clear()
 
         # Compute comprehensive daily stats
         closed = self.daily_state.closed_trades
@@ -722,6 +1052,9 @@ class BotEngine:
 
         self.state_mgr.save(self.daily_state, force=True)
 
+        # Calculate intraday max drawdown
+        max_dd = self._calculate_max_drawdown(self.daily_state.start_balance, closed)
+
         # Save daily stats to DB
         pf = round(profit_factor, 2) if profit_factor != float('inf') else None
         self.db.insert_daily_stats(
@@ -741,6 +1074,7 @@ class BotEngine:
             avg_win=round(gross_profit / len(wins), 2) if wins else 0,
             avg_loss=round(gross_loss / len(losses), 2) if losses else 0,
             total_contracts=total_contracts,
+            max_drawdown=max_dd,
             kill_switch_hit=1 if self.daily_state.kill_switch_active else 0,
             strategy_id=self.strategy.strategy_id,
         )
@@ -763,6 +1097,13 @@ class BotEngine:
         # Cancel EOD tasks
         for handle in self._eod_tasks:
             handle.cancel()
+
+        # Cancel tick subscription
+        if self._tick_subscription is not None and self.ib_conn.is_connected:
+            try:
+                self.ib_conn.ib.cancelTickByTickData(self._tick_subscription)
+            except Exception:
+                pass
 
         # Save final state
         if self.daily_state:

@@ -118,12 +118,19 @@ class TestAssignTimePeriod:
 class TestActiveFVGManager:
     """Tests for the FVG lifecycle manager."""
 
-    def _make_manager(self, sample_strategy):
+    class _CaptureLogger:
+        def __init__(self):
+            self.records = []
+
+        def log(self, event, **kwargs):
+            self.records.append({"event": event, **kwargs})
+
+    def _make_manager(self, sample_strategy, logger=None):
         strategy_dir, _ = sample_strategy
         from bot.strategy.strategy_loader import StrategyLoader
         loader = StrategyLoader(strategy_dir)
         loader.load()
-        return ActiveFVGManager(loader)
+        return ActiveFVGManager(loader, logger=logger)
 
     def test_detects_fvg_on_bar(self, sample_strategy):
         mgr = self._make_manager(sample_strategy)
@@ -152,6 +159,44 @@ class TestActiveFVGManager:
 
         assert result is None
         assert mgr.active_count == 0
+
+    def test_detected_log_marks_strategy_membership(self, sample_strategy):
+        logger = self._CaptureLogger()
+        mgr = self._make_manager(sample_strategy, logger=logger)
+        bars = [
+            {"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T10:30:00"},
+            {"open": 19505, "high": 19530, "low": 19490, "close": 19520, "date": "2026-03-22T10:35:00"},
+            {"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T10:40:00"},
+        ]
+        for bar in bars:
+            result = mgr.on_5min_bar(bar)
+
+        assert result is not None
+        detected = [r for r in logger.records if r["event"] == "fvg_detected"]
+        assert len(detected) == 1
+        assert detected[0]["strategy_id"] == "test-strategy"
+        assert detected[0]["in_strategy"] is True
+        assert detected[0]["in_strategy_time_period"] is True
+        assert detected[0]["strategy_cells_for_period"] > 0
+
+    def test_skipped_log_marks_not_in_strategy_period(self, sample_strategy):
+        logger = self._CaptureLogger()
+        mgr = self._make_manager(sample_strategy, logger=logger)
+        bars = [
+            {"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T09:30:00"},
+            {"open": 19505, "high": 19530, "low": 19490, "close": 19520, "date": "2026-03-22T09:35:00"},
+            {"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T09:40:00"},
+        ]
+        for bar in bars:
+            result = mgr.on_5min_bar(bar)
+
+        assert result is None
+        skipped = [r for r in logger.records if r["event"] == "fvg_skipped_strategy"]
+        assert len(skipped) == 1
+        assert skipped[0]["strategy_id"] == "test-strategy"
+        assert skipped[0]["in_strategy"] is False
+        assert skipped[0]["in_strategy_time_period"] is False
+        assert skipped[0]["strategy_cells_for_period"] == 0
 
     def test_expire_all(self, sample_strategy):
         mgr = self._make_manager(sample_strategy)
@@ -185,3 +230,67 @@ class TestActiveFVGManager:
         bar = {"open": 100, "high": 110, "low": 90, "close": 105, "date": "2026-03-22T10:30:00"}
         assert mgr.on_5min_bar(bar) is None
         assert mgr.on_5min_bar(bar) is None
+
+    def test_detect_from_tick_bar(self, sample_strategy):
+        """detect_from_tick_bar should detect FVG using cached bar1/bar2 + provided bar3."""
+        mgr = self._make_manager(sample_strategy)
+        # Feed bar1 and bar2 via normal path
+        mgr.on_5min_bar({"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T10:30:00"})
+        mgr.on_5min_bar({"open": 19505, "high": 19530, "low": 19490, "close": 19520, "date": "2026-03-22T10:35:00"})
+
+        # bar3 from tick path
+        bar3 = {"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T10:40:00"}
+        fvg = mgr.detect_from_tick_bar(bar3)
+
+        assert fvg is not None
+        assert fvg.fvg_type == "bullish"
+        assert mgr.active_count == 1
+
+    def test_detect_from_tick_bar_does_not_append(self, sample_strategy):
+        """detect_from_tick_bar should NOT append bar3 to _recent_bars."""
+        mgr = self._make_manager(sample_strategy)
+        mgr.on_5min_bar({"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T10:30:00"})
+        mgr.on_5min_bar({"open": 19505, "high": 19530, "low": 19490, "close": 19520, "date": "2026-03-22T10:35:00"})
+
+        bar3 = {"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T10:40:00"}
+        mgr.detect_from_tick_bar(bar3)
+
+        # _recent_bars should still have only 2 bars (bar1 + bar2)
+        assert len(mgr._recent_bars) == 2
+
+    def test_detect_from_tick_bar_needs_2_bars(self, sample_strategy):
+        """detect_from_tick_bar returns None if fewer than 2 bars cached."""
+        mgr = self._make_manager(sample_strategy)
+        mgr.on_5min_bar({"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T10:30:00"})
+
+        bar3 = {"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T10:40:00"}
+        assert mgr.detect_from_tick_bar(bar3) is None
+
+    def test_append_bar_no_detection(self, sample_strategy):
+        """append_bar should add to _recent_bars but not trigger FVG detection."""
+        mgr = self._make_manager(sample_strategy)
+        mgr.on_5min_bar({"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T10:30:00"})
+        mgr.on_5min_bar({"open": 19505, "high": 19530, "low": 19490, "close": 19520, "date": "2026-03-22T10:35:00"})
+
+        # This bar would form a bullish FVG, but append_bar shouldn't detect it
+        bar3 = {"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T10:40:00"}
+        mgr.append_bar(bar3)
+
+        assert len(mgr._recent_bars) == 3
+        assert mgr.active_count == 0  # No detection happened
+
+    def test_append_bar_keeps_deque_in_sync(self, sample_strategy):
+        """After append_bar, subsequent on_5min_bar should use the correct bar1/bar2."""
+        mgr = self._make_manager(sample_strategy)
+        # Feed bars via on_5min_bar
+        mgr.on_5min_bar({"open": 19480, "high": 19500, "low": 19470, "close": 19495, "date": "2026-03-22T10:30:00"})
+        mgr.on_5min_bar({"open": 19505, "high": 19530, "low": 19490, "close": 19520, "date": "2026-03-22T10:35:00"})
+
+        # Append bar3 without detection (simulating tick-detected + keepUpToDate sync)
+        mgr.append_bar({"open": 19525, "high": 19550, "low": 19515, "close": 19545, "date": "2026-03-22T10:40:00"})
+
+        # Now bar4 via on_5min_bar — bar2 and bar3 become the new bar1 and bar2
+        # No FVG here (overlapping bars)
+        result = mgr.on_5min_bar({"open": 19540, "high": 19555, "low": 19530, "close": 19548, "date": "2026-03-22T10:45:00"})
+        assert result is None
+        assert len(mgr._recent_bars) == 4

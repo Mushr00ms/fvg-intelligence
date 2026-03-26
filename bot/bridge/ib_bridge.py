@@ -54,6 +54,8 @@ class IBBridge:
         self._running = True
         self._bars_5min = None
         self._bars_1min = None
+        self._tick_subscription = None
+        self._tick_bar_builder = None
         self._contract = None
 
     async def run(self):
@@ -150,6 +152,9 @@ class IBBridge:
 
             elif action == "subscribe_bars":
                 await self._cmd_subscribe_bars(cmd)
+
+            elif action == "subscribe_ticks":
+                await self._cmd_subscribe_ticks(cmd)
 
             elif action == "place_bracket":
                 await self._cmd_place_bracket(cmd)
@@ -249,6 +254,34 @@ class IBBridge:
 
         self._send({"event": "bars_subscribed"})
 
+    async def _cmd_subscribe_ticks(self, cmd):
+        """Subscribe to tick-by-tick trade data for sub-ms bar boundary detection.
+
+        Runs TickBarBuilder bridge-side to minimize TCP traffic: sends one
+        hybrid-merged bar per 5-min window instead of hundreds of ticks/sec.
+        """
+        if not self._contract:
+            self._send({"event": "error", "error": "No contract resolved"})
+            return
+
+        try:
+            # Import here — bridge may not have bot package on sys.path
+            import sys, os
+            _root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            if _root not in sys.path:
+                sys.path.insert(0, _root)
+            from bot.strategy.tick_bar_builder import TickBarBuilder
+
+            self._tick_bar_builder = TickBarBuilder()
+            self._tick_subscription = self.ib.reqTickByTickData(
+                self._contract, tickType='AllLast',
+                numberOfTicks=0, ignoreSize=True,
+            )
+            self._tick_subscription.updateEvent += self._on_tick_update
+            self._send({"event": "ticks_subscribed"})
+        except Exception as e:
+            self._send({"event": "ticks_subscribe_failed", "error": str(e)})
+
     async def _cmd_place_bracket(self, cmd):
         if not self._contract:
             self._send({"event": "error", "error": "No contract resolved"})
@@ -266,7 +299,7 @@ class IBBridge:
         parent = LimitOrder(action=side, totalQuantity=qty, lmtPrice=entry_price, transmit=False)
         tp = LimitOrder(action=reverse_side, totalQuantity=qty, lmtPrice=tp_price,
                         parentId=parent.orderId, transmit=False)
-        sl = StopOrder(action=reverse_side, totalQuantity=qty, auxPrice=sl_price,
+        sl = StopOrder(action=reverse_side, totalQuantity=qty, stopPrice=sl_price,
                        parentId=parent.orderId, transmit=True)
 
         # Place orders
@@ -371,6 +404,36 @@ class IBBridge:
                 "date": str(bar.date), "volume": bar.volume,
             })
 
+    def _on_tick_update(self, ticker):
+        """Process ticks through bridge-side TickBarBuilder.
+
+        Sends hybrid-merged bar over TCP when a 5-min window completes,
+        rather than relaying every individual tick (hundreds/sec for NQ).
+        """
+        ticks = ticker.tickByTicks
+        if not ticks or self._tick_bar_builder is None:
+            return
+
+        for tick in ticks:
+            completed = self._tick_bar_builder.on_tick(tick.price, tick.time)
+            if completed is not None:
+                # Merge with IB's keepUpToDate incomplete bar for conservative OHLC
+                ib_bar = self._bars_5min[-1] if self._bars_5min and len(self._bars_5min) > 0 else None
+                if ib_bar is not None:
+                    merged = {
+                        "open": ib_bar.open,
+                        "high": max(ib_bar.high, completed["high"]),
+                        "low": min(ib_bar.low, completed["low"]),
+                        "close": completed["close"],
+                        "date": str(ib_bar.date),
+                    }
+                else:
+                    merged = {**completed, "date": str(completed["date"])}
+
+                self._send({"event": "tick_bar_5min", **merged})
+
+        ticks.clear()
+
     def _on_fill(self, trade, group_id, order_type):
         status = trade.orderStatus
         self._send({
@@ -413,6 +476,11 @@ class IBBridge:
 
     async def _cleanup(self):
         """Clean up IB subscriptions and connection."""
+        if self._tick_subscription:
+            try:
+                self.ib.cancelTickByTickData(self._tick_subscription)
+            except Exception:
+                pass
         if self._bars_5min:
             self.ib.cancelHistoricalData(self._bars_5min)
         if self._bars_1min:
