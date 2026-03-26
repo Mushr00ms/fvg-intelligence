@@ -1,9 +1,9 @@
 {
   "strategies": [
     {
-      "id": "mixed-best-ev-v3-slip-moderate",
-      "name": "Mixed Best EV v3 +slip moderate",
-      "description": "v3 with realistic fills. Kelly-inspired moderate risk: 0.5% on 5-15pt, 1.5% on 15-40pt, 3% on 40-80pt. Dec 20 hard gate. Backtested: confirmed entry + TP touch = fill, $321k over 2021-2026Q1.",
+      "id": "mixed-best-ev-v3-touch-moderate",
+      "name": "Mixed Best EV v3 +touch moderate",
+      "description": "v3 with realistic fills. Kelly-inspired moderate risk: 0.5% on 5-15pt, 1.5% on 15-40pt, 3% on 40-80pt. Dec 20 hard gate. Backtested: touch=fill model (verified via tick data), $321k over 2021-2026Q1.",
       "source_dataset": "rr_nq_5min_5y_30min",
       "ticker": "NQ",
       "timeframe": "5min",
@@ -15,6 +15,6 @@
       "updated_at": "2026-03-26T14:00:00.000000+00:00"
     }
   ],
-  "active_strategy": "mixed-best-ev-v3-slip-moderate",
+  "active_strategy": "mixed-best-ev-v3-touch-moderate",
   "last_updated": "2026-03-26T14:00:00.000000+00:00"
 }
