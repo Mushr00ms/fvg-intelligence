@@ -16,11 +16,16 @@ NY_TZ = pytz.timezone("America/New_York")
 
 
 class BotLogger:
-    def __init__(self, log_dir, clock=None):
+    def __init__(self, log_dir, clock=None, max_bytes=10 * 1024 * 1024, backup_count=5,
+                 cleanup_days=30):
         self._log_dir = log_dir
         self._clock = clock
+        self._max_bytes = max_bytes          # 10 MB default per file
+        self._backup_count = backup_count    # Keep 5 rotated backups
+        self._cleanup_days = cleanup_days    # Delete logs older than 30 days
         os.makedirs(log_dir, exist_ok=True)
         self._current_date = None
+        self._current_filepath = None
         self._file = None
         self._console = sys.stdout
 
@@ -36,9 +41,10 @@ class BotLogger:
         if today != self._current_date:
             if self._file:
                 self._file.close()
-            filepath = os.path.join(self._log_dir, f"{today}.jsonl")
-            self._file = open(filepath, "a", buffering=1)  # line-buffered
+            self._current_filepath = os.path.join(self._log_dir, f"{today}.jsonl")
+            self._file = open(self._current_filepath, "a", buffering=1)  # line-buffered
             self._current_date = today
+            self._cleanup_old_logs()
 
     def log(self, event, **kwargs):
         """
@@ -60,9 +66,56 @@ class BotLogger:
 
         # Write to file
         self._file.write(line + "\n")
+        self._rotate_if_needed()
 
         # Write to console (formatted)
         self._write_console(record)
+
+    def _rotate_if_needed(self):
+        """Rotate log file if it exceeds max size."""
+        if not self._current_filepath or not self._file:
+            return
+        try:
+            size = os.path.getsize(self._current_filepath)
+        except OSError:
+            return
+        if size <= self._max_bytes:
+            return
+
+        self._file.close()
+
+        # Rotate: current → .1, .1 → .2, etc.
+        for i in range(self._backup_count - 1, 0, -1):
+            src = f"{self._current_filepath}.{i}"
+            dst = f"{self._current_filepath}.{i + 1}"
+            if os.path.exists(src):
+                os.replace(src, dst)
+
+        # Move current to .1
+        if os.path.exists(self._current_filepath):
+            os.replace(self._current_filepath, f"{self._current_filepath}.1")
+
+        # Delete oldest if over backup_count
+        oldest = f"{self._current_filepath}.{self._backup_count + 1}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+
+        # Open fresh file
+        self._file = open(self._current_filepath, "a", buffering=1)
+
+    def _cleanup_old_logs(self):
+        """Delete log files older than cleanup_days."""
+        import time as _time
+        cutoff = _time.time() - (self._cleanup_days * 86400)
+        try:
+            for fname in os.listdir(self._log_dir):
+                if not fname.endswith(".jsonl"):
+                    continue
+                fpath = os.path.join(self._log_dir, fname)
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+        except OSError:
+            pass
 
     def _write_console(self, record):
         """Pretty-print a log record to console."""
@@ -110,11 +163,13 @@ _EVENT_COLORS = {
     "strategy_reloaded": "\033[92m",
     # Yellow — informational
     "fvg_detected": "\033[93m",
+    "fvg_skipped_strategy": "\033[90m",
     "mitigation": "\033[93m",
     "order_placed": "\033[93m",
     "partial_fill": "\033[93m",
     "setup_accepted": "\033[92m",
     "setup_evaluated": "\033[93m",
+    "setup_skipped_strategy": "\033[90m",
     "state_saved": "\033[90m",          # dim
     # Red — warnings / losses
     "sl_filled": "\033[91m",
