@@ -292,11 +292,13 @@
     <div class="logo">RR EXPLORER <span>| expectancy</span> <span id="total-fvgs" style="margin-left:12px;color:var(--text-dim);font-weight:300;font-size:11px"></span></div>
     <div class="topbar-spacer"></div>
     <div class="topbar-tag active" data-view="heatmap" onclick="switchView('heatmap')">HEATMAP</div>
-    <div class="topbar-tag" data-view="trades" onclick="switchView('trades')">TRADES</div>
+    <!-- TRADES tab removed — trade viewing is now inline in BACKTEST tab -->
     <div class="topbar-tag" data-view="mc" onclick="switchView('mc')">MONTE CARLO</div>
     <div class="topbar-tag" data-view="strategy" onclick="switchView('strategy')">STRATEGY</div>
     <div class="topbar-tag" data-view="backtest" onclick="switchView('backtest')">BACKTEST</div>
     <div class="topbar-tag" data-view="notebook" onclick="switchView('notebook')">NOTEBOOK</div>
+    <div class="topbar-tag" id="overlay-btn" onclick="toggleOverlay()" style="margin-left:8px;border-color:#5b9cf6;color:#5b9cf6">OVERLAY</div>
+    <span id="overlay-label" style="font-size:9px;color:#5b9cf6;display:none;margin-left:4px"></span>
     <a href="/heatmap" class="topbar-tag" style="text-decoration:none;margin-left:8px">HEATMAP WS</a>
   </div>
 
@@ -354,40 +356,7 @@
       <div id="period-checks" style="width:28px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden"></div>
       <div id="heatmap" style="flex:1;min-width:0"></div>
     </div>
-    <!-- Trades view -->
-    <div class="view" id="view-trades">
-      <div style="display:flex;width:100%;height:100%">
-        <div class="mc-sidebar" style="width:200px">
-          <div class="sec-label">FVG INFO</div>
-          <div class="mc-param"><span class="k">Date</span><span class="v" id="tv-date">-</span></div>
-          <div class="mc-param"><span class="k">Time</span><span class="v" id="tv-time">-</span></div>
-          <div class="mc-param"><span class="k">Type</span><span class="v" id="tv-type">-</span></div>
-          <div class="mc-param"><span class="k">Zone</span><span class="v" id="tv-zone">-</span></div>
-          <div class="sec-label" style="margin-top:6px">TRADE</div>
-          <div class="mc-param"><span class="k">Cell</span><span class="v" id="tv-cell">-</span></div>
-          <div class="mc-param"><span class="k">Entry</span><span class="v" id="tv-entry">-</span></div>
-          <div class="mc-param"><span class="k">Stop</span><span class="v" id="tv-stop">-</span></div>
-          <div class="mc-param"><span class="k">Target</span><span class="v" id="tv-target">-</span></div>
-          <div class="mc-param"><span class="k">Risk</span><span class="v" id="tv-risk">-</span></div>
-          <div class="mc-param"><span class="k">Max Exp</span><span class="v" id="tv-maxexp">-</span></div>
-          <div class="mc-param"><span class="k">Outcome</span><span class="v" id="tv-outcome">-</span></div>
-          <div class="sec-label" style="margin-top:8px">TIMEFRAME</div>
-          <div class="metric-tabs" id="tv-tf-tabs" style="margin-bottom:8px">
-            <div class="metric-tab" data-tf="1min" onclick="setTvTf('1min')">1MIN</div>
-            <div class="metric-tab active" data-tf="5min" onclick="setTvTf('5min')">5MIN</div>
-          </div>
-          <div style="display:flex;gap:6px">
-            <button class="btn-run" id="tv-prev" style="flex:1" disabled>&lt; PREV</button>
-            <button class="btn-run" id="tv-next" style="flex:1" disabled>NEXT &gt;</button>
-          </div>
-          <div style="text-align:center;font-size:10px;color:var(--text-dim);margin-top:4px" id="tv-counter">-</div>
-        </div>
-        <div class="mc-chart-area">
-          <div id="tv-chart" style="flex:1;min-height:0"></div>
-          <div class="mc-no-cell" id="tv-placeholder">Click a cell on the HEATMAP tab to view sample trades</div>
-        </div>
-      </div>
-    </div>
+    <!-- Trades view removed — trade viewing is now inline in BACKTEST tab -->
     <!-- Monte Carlo view -->
     <div class="view" id="view-mc">
       <div class="mc-view" style="display:flex;width:100%;height:100%">
@@ -523,7 +492,45 @@
             <div id="bt-table-trades" style="display:none"></div>
             <div id="bt-table-hourly" style="display:none"></div>
           </div>
+          <!-- Trade detail removed from inline — now in separate view -->
         </div>
+      </div>
+    </div>
+    <!-- Trade Viewer (full-screen dedicated view) -->
+    <div class="view" id="view-tradeviewer" style="flex-direction:column">
+      <div id="bt-td-topbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0">
+        <button class="metric-tab" onclick="btTdClose()" style="color:var(--amber);border-color:var(--amber)">BACK TO BACKTEST</button>
+        <span style="width:1px;height:14px;background:var(--border)"></span>
+        <span id="bt-td-title" style="font-size:12px;font-weight:600;color:var(--text);flex:1"></span>
+        <div style="display:flex;gap:3px;align-items:center">
+          <button class="metric-tab bt-td-tf active" data-tf="5min" onclick="btTdTf('5min')">5M</button>
+          <button class="metric-tab bt-td-tf" data-tf="1min" onclick="btTdTf('1min')">1M</button>
+          <button class="metric-tab bt-td-tf" data-tf="1s" onclick="btTdTf('1s')">1S</button>
+          <span style="width:1px;height:14px;background:var(--border);margin:0 4px"></span>
+          <button class="metric-tab bt-td-win active" id="bt-td-window" onclick="btTdToggleWin(false)">WINDOW</button>
+          <button class="metric-tab bt-td-win" id="bt-td-fullday" onclick="btTdToggleWin(true)">FULL DAY</button>
+          <span style="width:1px;height:14px;background:var(--border);margin:0 4px"></span>
+          <button class="metric-tab" id="bt-td-prev" onclick="btTdNav(-1)">&lt; PREV</button>
+          <span id="bt-td-pos" style="font-size:10px;color:var(--text-dim);font-family:var(--mono)"></span>
+          <button class="metric-tab" id="bt-td-next" onclick="btTdNav(1)">NEXT &gt;</button>
+        </div>
+      </div>
+      <div style="display:flex;flex:1;min-height:0">
+        <div id="bt-td-chart" style="flex:1;min-width:0"></div>
+        <div id="bt-td-info" style="width:220px;padding:12px;overflow-y:auto;background:var(--bg2);border-left:1px solid var(--border);font-size:11px"></div>
+      </div>
+    </div>
+    <!-- Optimizer view -->
+    <div class="view" id="view-optimizer">
+      <div style="padding:16px 20px;width:100%;height:100%;overflow-y:auto">
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+          <span style="font-size:13px;font-weight:600;color:var(--amber)">R:R OPTIMIZER</span>
+          <span id="opt-meta" style="font-size:10px;color:var(--text-dim)"></span>
+          <button onclick="optLoad()" style="margin-left:auto;background:var(--bg2);color:var(--amber);border:1px solid var(--amber-dim);padding:4px 12px;cursor:pointer;font-family:var(--mono);font-size:10px;border-radius:2px">LOAD RESULTS</button>
+        </div>
+        <div id="opt-table" style="margin-bottom:24px;width:100%;overflow-x:auto"></div>
+        <div id="opt-chart" style="width:100%;height:340px;margin-bottom:16px"></div>
+        <div id="opt-detail" style="font-size:11px;color:var(--text-dim)"></div>
       </div>
     </div>
     <!-- Notebook view -->
@@ -581,6 +588,8 @@ let _stratCells = [];
 let _selectMode = false;
 const MAX_STRAT_CELLS = 50;  // Increased from 3 for strategy builder
 let _minSamples = 0;
+let _overlayStrategy = null;  // Loaded strategy for read-only overlay {id, name, cellSet}
+let _overlayActive = false;
 
 // ── View switching ────────────────────────────────────────────────────────
 function switchView(view) {
@@ -599,7 +608,7 @@ function switchView(view) {
     // Show strategy = heatmap view + sidebar
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById('view-heatmap').classList.add('active');
-    if (!_selectMode) toggleSelectMode();
+    if (!_selectMode && !_overlayActive) toggleSelectMode();
     // Prepare all sidebar content BEFORE making it visible
     sbSyncFromStratCells();
     sbRenderCellList();
@@ -630,8 +639,98 @@ function switchView(view) {
   });
 }
 
+// ── Strategy Overlay (read-only) ─────────────────────────────────────────
+function setOverlayUi(active, strategyName = '') {
+  const overlayBtn = document.getElementById('overlay-btn');
+  const overlayLabel = document.getElementById('overlay-label');
+  const selectBtn = document.getElementById('select-btn');
+
+  overlayBtn.classList.toggle('active', active);
+  overlayBtn.style.background = active ? 'rgba(91,156,246,0.096)' : '';
+  overlayLabel.textContent = active ? strategyName : '';
+  overlayLabel.style.display = active ? 'inline' : 'none';
+
+  // Overlay mode is read-only: disable SELECT interactions while active.
+  selectBtn.style.pointerEvents = active ? 'none' : '';
+  selectBtn.style.opacity = active ? '0.45' : '';
+  selectBtn.title = active ? 'Read-only overlay is active' : '';
+}
+
+function buildOverlayFromStrategy(strat) {
+  if (!strat || !Array.isArray(strat.cells)) return null;
+  const enabledCells = strat.cells.filter(c => c.enabled !== false);
+  if (enabledCells.length === 0) return null;
+
+  const cellSet = new Set();
+  const cellMap = {};
+  enabledCells.forEach(c => {
+    const key = `${c.time_period}||${c.risk_range}||${c.setup}`;
+    cellSet.add(key);
+    cellMap[key] = c;
+  });
+
+  return {
+    id: strat.meta?.id || 'unknown',
+    name: strat.meta?.name || strat.meta?.id || 'Strategy',
+    cellSet,
+    cellMap,
+    cells: enabledCells,
+  };
+}
+
+function activateOverlayFromStrategy(strat) {
+  const overlay = buildOverlayFromStrategy(strat);
+  if (!overlay) return false;
+
+  _overlayStrategy = overlay;
+  _overlayActive = true;
+
+  // Force read-only behavior immediately.
+  _selectMode = false;
+  document.getElementById('select-btn').classList.remove('active');
+  setOverlayUi(true, _overlayStrategy.name);
+  return true;
+}
+
+function clearOverlay() {
+  _overlayActive = false;
+  _overlayStrategy = null;
+  setOverlayUi(false);
+}
+
+async function fetchActiveStrategy() {
+  const res = await fetch(`${API}/api/strategies/active`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function toggleOverlay() {
+  if (_overlayActive) {
+    // Turn off overlay
+    clearOverlay();
+    renderHeatmap();
+    return;
+  }
+  // Load the active strategy
+  try {
+    const strat = await fetchActiveStrategy();
+    if (!strat || strat.error || strat.active === null || !Array.isArray(strat.cells)) {
+      alert('No active strategy set. Set one in the Strategy tab first.');
+      return;
+    }
+    if (!activateOverlayFromStrategy(strat)) {
+      alert('Active strategy has no enabled cells.');
+      return;
+    }
+    renderHeatmap();
+  } catch (e) {
+    console.error('Failed to load overlay strategy:', e);
+  }
+}
+
 // ── Strategy Builder ─────────────────────────────────────────────────────
 function toggleSelectMode() {
+  if (_overlayActive) return;
   _selectMode = !_selectMode;
   document.getElementById('select-btn').classList.toggle('active', _selectMode);
   renderHeatmap();
@@ -875,6 +974,16 @@ function renderHeatmap() {
       }
       const useNi = _bestMode ? bestNi : nI;
       const val = _bestMode ? s.evs[useNi] : (_metric === 'ev' ? s.evs[useNi] : s.win_rates[useNi]);
+
+      // Overlay mode: mask cells not in the active strategy
+      if (_overlayActive && _overlayStrategy) {
+        const key = `${y}||${x}||${_setup}`;
+        if (!_overlayStrategy.cellSet.has(key)) {
+          zRow.push(null);
+          hRow.push('Not in strategy');
+          return;  // skip annotation for this cell
+        }
+      }
       zRow.push(val);
 
       const lines = [
@@ -932,17 +1041,47 @@ function renderHeatmap() {
   const title = `${SETUP_LABELS[_setup]} | n = ${n.toFixed(2)} | ${_metric === 'ev' ? 'Expectancy' : 'Win Rate'}  [click cell for MC]`;
 
   // Selection overlay shapes for strategy builder (full cell outlines)
-  const selShapes = _stratCells.filter(sc => sc.setup === _setup).map(sc => {
-    const xi = xLabels.indexOf(sc.rr);
-    const yi = yLabels.indexOf(sc.tp);
-    if (xi < 0 || yi < 0) return null;
-    return {
-      type: 'rect', xref: 'x', yref: 'y',
-      x0: xi - 0.5, x1: xi + 0.5, y0: yi - 0.5, y1: yi + 0.5,
-      line: { color: '#f5a623', width: 3 },
-      fillcolor: 'rgba(245,166,35,0.08)',
-    };
-  }).filter(Boolean);
+  let selShapes = [];
+  if (_overlayActive && _overlayStrategy) {
+    // Read-only overlay: blue outlines on strategy cells
+    selShapes = _overlayStrategy.cells.filter(c => c.setup === _setup).map(c => {
+      const xi = xLabels.indexOf(c.risk_range);
+      const yi = yLabels.indexOf(c.time_period);
+      if (xi < 0 || yi < 0) return null;
+      return {
+        type: 'rect', xref: 'x', yref: 'y',
+        x0: xi - 0.5, x1: xi + 0.5, y0: yi - 0.5, y1: yi + 0.5,
+        line: { color: '#5b9cf6', width: 2 },
+        fillcolor: 'rgba(91,156,246,0.048)',
+      };
+    }).filter(Boolean);
+
+    // Add R:R and EV annotations inside each strategy cell
+    _overlayStrategy.cells.filter(c => c.setup === _setup).forEach(c => {
+      const xi = xLabels.indexOf(c.risk_range);
+      const yi = yLabels.indexOf(c.time_period);
+      if (xi < 0 || yi < 0) return;
+      annotations.push({
+        x: xLabels[xi], y: yDisplay[yi],
+        text: `${c.rr_target}R`,
+        showarrow: false, xref: 'x', yref: 'y',
+        font: { family: 'IBM Plex Mono', size: 8, color: '#5b9cf6' },
+        yshift: -8,
+      });
+    });
+  } else {
+    selShapes = _stratCells.filter(sc => sc.setup === _setup).map(sc => {
+      const xi = xLabels.indexOf(sc.rr);
+      const yi = yLabels.indexOf(sc.tp);
+      if (xi < 0 || yi < 0) return null;
+      return {
+        type: 'rect', xref: 'x', yref: 'y',
+        x0: xi - 0.5, x1: xi + 0.5, y0: yi - 0.5, y1: yi + 0.5,
+        line: { color: '#f5a623', width: 3 },
+        fillcolor: 'rgba(245,166,35,0.08)',
+      };
+    }).filter(Boolean);
+  }
 
   Plotly.react('heatmap', [trace], {
     paper_bgcolor: '#111111', plot_bgcolor: '#0a0a0a',
@@ -986,6 +1125,7 @@ function renderHeatmap() {
     const s = c.setups[_setup];
     if (!s || !s.valid) return;
     if (_selectMode) {
+      if (_overlayActive) return;
       const wr = s.win_rates[_nIdx];
       const ev = s.evs[_nIdx];
       if (wr == null || ev == null) return;
@@ -1221,235 +1361,13 @@ function runMonteCarlo() {
   }, { responsive: true, displaylogo: false });
 }
 
-// ── Trade Viewer ──────────────────────────────────────────────────────────
+// ── Old Trade Viewer (removed — now inline in BACKTEST tab) ──────────────
 let _tvTimePeriod = null, _tvRiskRange = null, _tvSampleIdx = 0, _tvTotal = 0, _tvTf = '5min';
+function setTvTf() {} function loadTradeSample() {} function renderTradeChart() {}
 
-document.getElementById('tv-prev').addEventListener('click', () => {
-  if (_tvSampleIdx > 0) { _tvSampleIdx--; loadTradeSample(); }
-});
-document.getElementById('tv-next').addEventListener('click', () => {
-  if (_tvSampleIdx < _tvTotal - 1) { _tvSampleIdx++; loadTradeSample(); }
-});
+// (loadTradeSample body removed — inline trade viewer in BACKTEST tab)
 
-function setTvTf(tf) {
-  _tvTf = tf;
-  document.querySelectorAll('#tv-tf-tabs .metric-tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.tf === tf);
-  });
-  loadTradeSample();
-}
-
-async function loadTradeSample() {
-  if (!_tvTimePeriod || !_tvRiskRange) return;
-  const n = N_VALUES[_nIdx];
-  const params = new URLSearchParams({
-    time_period: _tvTimePeriod,
-    risk_range: _tvRiskRange,
-    setup: _setup,
-    n: n,
-    sample_idx: _tvSampleIdx,
-    tf: _tvTf,
-  });
-  try {
-    const res = await fetch(`${API}/api/rr/trade-sample?${params}`);
-    if (!res.ok) { document.getElementById('tv-placeholder').textContent = 'No trades found for this cell'; return; }
-    const data = await res.json();
-    _tvTotal = data.total_samples;
-    _tvSampleIdx = data.sample_idx;
-    renderTradeChart(data);
-  } catch (e) {
-    document.getElementById('tv-placeholder').textContent = 'Error loading trade data';
-  }
-}
-
-function renderTradeChart(data) {
-  const t = data.trade;
-  const candles = data.candles;
-  if (!candles || candles.length === 0) {
-    document.getElementById('tv-placeholder').textContent = 'No candle data available';
-    return;
-  }
-
-  document.getElementById('tv-placeholder').style.display = 'none';
-  document.getElementById('tv-chart').style.display = 'block';
-
-  // Update sidebar — FVG info for TradingView cross-check (display in NY time)
-  const fvgTs = t.time_candle3;
-  const fvgDateStr = fvgTs.substring(0, 10);  // "2023-07-11"
-  const fvgTimeStr = fvgTs.substring(11, 16); // "13:05"
-  document.getElementById('tv-date').textContent = fvgDateStr;
-  document.getElementById('tv-time').textContent = fvgTimeStr + ' ET';
-  document.getElementById('tv-type').textContent = t.fvg_type.toUpperCase();
-  document.getElementById('tv-zone').textContent = `${t.zone_low.toFixed(2)} - ${t.zone_high.toFixed(2)}`;
-  document.getElementById('tv-cell').textContent = `${_tvTimePeriod} | ${_tvRiskRange}`;
-  document.getElementById('tv-entry').textContent = t.entry.toFixed(2);
-  document.getElementById('tv-stop').textContent = t.stop.toFixed(2);
-  document.getElementById('tv-target').textContent = t.target.toFixed(2);
-  document.getElementById('tv-risk').textContent = t.risk.toFixed(2) + ' pts';
-  document.getElementById('tv-maxexp').textContent = t.max_exp.toFixed(2) + ' pts';
-  const outcomeEl = document.getElementById('tv-outcome');
-  outcomeEl.textContent = t.won ? 'WIN' : 'LOSS';
-  outcomeEl.className = 'v ' + (t.won ? 'pos' : 'neg');
-
-  document.getElementById('tv-prev').disabled = _tvSampleIdx <= 0;
-  document.getElementById('tv-next').disabled = _tvSampleIdx >= _tvTotal - 1;
-  document.getElementById('tv-counter').textContent = `${_tvSampleIdx + 1} / ${_tvTotal}`;
-
-  // Build candlestick chart
-  const dates = candles.map(c => c.date);
-  const opens = candles.map(c => c.open);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const closes = candles.map(c => c.close);
-
-  const candlestick = {
-    type: 'candlestick', x: dates, open: opens, high: highs, low: lows, close: closes,
-    increasing: { line: { color: '#4caf7d' }, fillcolor: '#4caf7d' },
-    decreasing: { line: { color: '#e05252' }, fillcolor: '#e05252' },
-    showlegend: false,
-  };
-
-  // FVG zone rectangle — starts at candle 1, extends to end of chart
-  const fvgStartIdx = dates.findIndex(d => d >= t.time_candle1);
-  const fvgX0 = fvgStartIdx >= 0 ? fvgStartIdx : 0;
-  const shapes = [{
-    type: 'rect', xref: 'x', x0: fvgX0 - 0.5, x1: dates.length - 0.5,
-    yref: 'y', y0: t.zone_low, y1: t.zone_high,
-    fillcolor: t.fvg_type === 'bullish' ? 'rgba(76,175,125,0.12)' : 'rgba(224,82,82,0.12)',
-    line: { width: 0 },
-  }];
-
-  // Find where entry, SL, TP are hit in the candle data
-  const mitIdx = dates.findIndex(d => d >= t.mitigation_time);
-  const entryX0 = mitIdx >= 0 ? mitIdx : fvgX0;
-
-  // Walk candles from entry to find where SL or TP is hit
-  let slHitIdx = dates.length - 1;
-  let tpHitIdx = dates.length - 1;
-  for (let i = entryX0; i < candles.length; i++) {
-    const c = candles[i];
-    if (t.fvg_type === 'bullish') {
-      if (tpHitIdx === dates.length - 1 && c.high >= t.target) tpHitIdx = i;
-      if (slHitIdx === dates.length - 1 && c.low <= t.stop) slHitIdx = i;
-    } else {
-      if (tpHitIdx === dates.length - 1 && c.low <= t.target) tpHitIdx = i;
-      if (slHitIdx === dates.length - 1 && c.high >= t.stop) slHitIdx = i;
-    }
-    // Stop at whichever was hit first
-    if (slHitIdx < dates.length - 1 || tpHitIdx < dates.length - 1) break;
-  }
-
-  // FVG midpoint line (for mid entry setups)
-  if (_setup.startsWith('mid')) {
-    const mid = (t.zone_high + t.zone_low) / 2;
-    shapes.push({
-      type: 'line', xref: 'x', x0: fvgX0 - 0.5, x1: dates.length - 0.5,
-      yref: 'y', y0: mid, y1: mid,
-      line: { color: '#ffffff', width: 1, dash: 'dot' },
-    });
-  }
-
-  // Trade ends at whichever is hit first
-  const tradeEndIdx = Math.min(slHitIdx, tpHitIdx);
-
-  // SL level line: from FVG start to trade end
-  shapes.push({
-    type: 'line', xref: 'x', x0: fvgX0 - 0.5, x1: tradeEndIdx + 0.5,
-    yref: 'y', y0: t.stop, y1: t.stop,
-    line: { color: '#e05252', width: 1, dash: 'dot' },
-  });
-  // TP level line: from FVG start to trade end
-  shapes.push({
-    type: 'line', xref: 'x', x0: fvgX0 - 0.5, x1: tradeEndIdx + 0.5,
-    yref: 'y', y0: t.target, y1: t.target,
-    line: { color: '#9b59b6', width: 1, dash: 'dot' },
-  });
-
-  // Annotations for levels
-  const levelLabels = [
-    { y: t.entry, color: '#f5a623', label: 'ENTRY' },
-    { y: t.stop, color: '#e05252', label: 'STOP' },
-    { y: t.target, color: '#9b59b6', label: 'TARGET' },
-  ];
-  const annotations = levelLabels.map(ls => ({
-    x: 1.01, xref: 'paper', xanchor: 'left',
-    y: ls.y, yref: 'y', yanchor: 'middle',
-    text: `${ls.label} ${ls.y.toFixed(2)}`,
-    showarrow: false,
-    font: { family: 'IBM Plex Mono', size: 9, color: ls.color },
-  }));
-
-  // Title
-  const outcome = t.won ? '<span style="color:#4caf7d">WIN</span>' : '<span style="color:#e05252">LOSS</span>';
-  const title = `${t.fvg_type.toUpperCase()} FVG | ${SETUP_LABELS[_setup]} | n=${N_VALUES[_nIdx].toFixed(2)} | ${outcome}`;
-
-  annotations.push({
-    text: `<b>${title}</b>`, xref: 'paper', yref: 'paper',
-    x: 0.5, y: 1.02, xanchor: 'center', yanchor: 'bottom', showarrow: false,
-    font: { family: 'IBM Plex Mono', size: 11, color: '#f5a623' },
-  });
-
-  // Marker padding — offset from candle body so triangles don't overlap wicks
-  const priceRange = Math.max(...highs) - Math.min(...lows);
-  const pad = priceRange * 0.02;
-
-  // Entry marker — triangle below candle low (long) or above candle high (short)
-  const entryIdx = entryX0 >= 0 ? entryX0 : fvgX0;
-  const entryCandle = candles[entryIdx];
-  const entryMarkerY = t.fvg_type === 'bullish' ? entryCandle.low - pad : entryCandle.high + pad;
-  const entryMarker = {
-    type: 'scatter', mode: 'markers',
-    x: [dates[entryIdx]],
-    y: [entryMarkerY],
-    marker: {
-      symbol: t.fvg_type === 'bullish' ? 'triangle-up' : 'triangle-down',
-      size: 14, color: '#f5a623',
-      line: { color: '#000', width: 1 },
-    },
-    name: 'ENTRY', showlegend: false,
-    hovertemplate: `ENTRY ${t.entry.toFixed(2)}<extra></extra>`,
-  };
-
-  // TP marker — purple triangle at the candle that hits target
-  const tpTraces = [];
-  if (t.won && tpHitIdx < dates.length - 1) {
-    const tpCandle = candles[tpHitIdx];
-    const tpMarkerY = t.fvg_type === 'bullish' ? tpCandle.high + pad : tpCandle.low - pad;
-    tpTraces.push({
-      type: 'scatter', mode: 'markers',
-      x: [dates[tpHitIdx]],
-      y: [tpMarkerY],
-      marker: {
-        symbol: t.fvg_type === 'bullish' ? 'triangle-down' : 'triangle-up',
-        size: 14, color: '#9b59b6',
-        line: { color: '#000', width: 1 },
-      },
-      name: 'TP', showlegend: false,
-      hovertemplate: `TARGET ${t.target.toFixed(2)}<extra></extra>`,
-    });
-  }
-
-  Plotly.react('tv-chart', [candlestick, entryMarker, ...tpTraces], {
-    paper_bgcolor: '#111111', plot_bgcolor: '#0a0a0a',
-    font: { family: 'IBM Plex Mono', color: '#e8e8e8' },
-    margin: { t: 40, b: 40, l: 60, r: 100 },
-    shapes, annotations,
-    dragmode: 'pan',
-    xaxis: {
-      type: 'category', tickfont: { size: 8, color: '#888' },
-      showgrid: false, linecolor: '#2a2a2a', showline: true,
-      rangeslider: { visible: false },
-      nticks: 10,
-      fixedrange: false,
-    },
-    yaxis: {
-      tickfont: { size: 9, color: '#888' },
-      showgrid: true, gridcolor: '#1a1a1a', linecolor: '#2a2a2a', showline: true,
-      tickprefix: '',
-      fixedrange: false,
-    },
-  }, { responsive: true, displaylogo: false, scrollZoom: true });
-}
+// (renderTradeChart body removed — inline trade viewer in BACKTEST tab)
 
 // ── Notebook ─────────────────────────────────────────────────────────────
 function switchNbPage(page) {
@@ -1855,10 +1773,20 @@ async function sbLoadStrategy(id) {
       tp: c.tp, rr: c.rr, setup: c.setup, rr_n: c.rr_target,
       ev: c.ev, wr: c.wr, samples: c.samples, nIdx: N_VALUES.indexOf(c.rr_target),
     }));
+
+    // If the loaded strategy is currently active, auto-apply read-only overlay.
+    try {
+      const active = await fetchActiveStrategy();
+      _sbActiveId = active?.meta?.id || null;
+      if (_sbId && _sbId === _sbActiveId) activateOverlayFromStrategy(active);
+    } catch (_) {
+      // Keep strategy load usable even if active-strategy check fails.
+    }
+
     updateStratPanel();
     sbRenderCellList();
-    renderHeatmap();
     sbUpdateActiveBtn();
+    renderHeatmap();
     sbStatus(`Loaded "${_sbName}"`);
     document.getElementById('sb-load-list').classList.remove('open');
   } catch (e) { sbStatus('Load error: ' + e.message, true); }
@@ -1927,6 +1855,21 @@ async function sbSetActive() {
     if (data.active) {
       _sbActiveId = _sbId;
       sbUpdateActiveBtn();
+      // Apply overlay immediately using current loaded strategy cells.
+      activateOverlayFromStrategy({
+        meta: { id: _sbId, name: document.getElementById('sb-name').value.trim() || _sbId },
+        cells: _sbCells.map(c => ({
+          time_period: c.tp,
+          risk_range: c.rr,
+          setup: c.setup,
+          enabled: c.enabled,
+          rr_target: c.rr_target,
+          ev: c.ev,
+          win_rate: c.wr,
+          samples: c.samples,
+        })),
+      });
+      renderHeatmap();
       sbStatus(`"${_sbId}" is now the ACTIVE strategy for the bot`);
     }
   } catch (e) { sbStatus('Error: ' + e.message, true); }
@@ -2090,6 +2033,7 @@ async function btRun() {
 
 async function btLoadHistory(runId) {
   if (!runId) return;
+  _btCurrentRunId = runId;
   document.getElementById('bt-progress').style.display = 'block';
   document.getElementById('bt-progress-log').textContent = 'Loading...';
   try {
@@ -2102,6 +2046,7 @@ async function btLoadHistory(runId) {
 }
 
 async function btLoadResults(jobId) {
+  _btCurrentRunId = jobId;
   try {
     const res = await fetch(`${API}/api/backtest/${jobId}/results`);
     _btResults = await res.json();
@@ -2113,8 +2058,12 @@ async function btLoadResults(jobId) {
   document.getElementById('bt-run-btn').disabled = false;
 }
 
+let _btRendered = {};  // track which sections have been rendered
+
 function btRenderAll() {
   if (!_btResults) return;
+  _btRendered = {};
+  _btTradePage = 0;
   document.getElementById('bt-progress').style.display = 'none';
   document.getElementById('bt-content').style.display = 'block';
   btRenderStats();
@@ -2122,9 +2071,29 @@ function btRenderAll() {
   btRenderDrawdown();
   btRenderDailyPnl();
   btRenderDistribution();
+  _btRendered.equity = true;
+  _btRendered.dd = true;
+  _btRendered.daily = true;
+  _btRendered.dist = true;
+
+  // Render all tables immediately
   btRenderCellTable();
   btRenderTradeLog();
   btRenderHourly();
+  _btRendered.cells = true;
+  _btRendered.trades = true;
+  _btRendered.hourly = true;
+}
+
+function btRenderLazy(section) {
+  // Lazy-render chart/table sections on first access
+  if (_btRendered[section]) return;
+  _btRendered[section] = true;
+  if (section === 'dd') btRenderDrawdown();
+  else if (section === 'daily') btRenderDailyPnl();
+  else if (section === 'dist') btRenderDistribution();
+  else if (section === 'trades') btRenderTradeLog();
+  else if (section === 'hourly') btRenderHourly();
 }
 
 function btRenderStats() {
@@ -2209,6 +2178,10 @@ function btSwitchTab(tab) {
   ['cells', 'trades', 'hourly'].forEach(t => {
     document.getElementById(`bt-table-${t}`).style.display = t === tab ? 'block' : 'none';
   });
+  // Lazy-render on first tab switch
+  btRenderLazy(tab);
+  // Also lazy-render charts that might not be visible yet
+  btRenderLazy('dd'); btRenderLazy('daily'); btRenderLazy('dist');
 }
 
 function btRenderCellTable() {
@@ -2227,23 +2200,41 @@ function btRenderCellTable() {
   document.getElementById('bt-table-cells').innerHTML = html;
 }
 
+const BT_PAGE_SIZE = 50;
+let _btTradePage = 0;
+let _btBalMap = {};
+
 function btRenderTradeLog() {
   const trades = _btResults.trades || [];
   const ec = _btResults.equity_curve || [];
-  // Build balance lookup from equity curve (balance AFTER each trade)
-  const balMap = {};
-  ec.forEach(e => { balMap[e.trade_id] = e.balance; });
-  const startBal = (_btResults.meta && _btResults.meta.balance) || 76000;
+  _btBalMap = {};
+  ec.forEach(e => { _btBalMap[e.trade_id] = e.balance; });
+  _btTradePage = 0;
+  btRenderTradePage();
+}
 
-  let html = `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
+function btRenderTradePage() {
+  const trades = _btResults.trades || [];
+  const startBal = (_btResults.meta && _btResults.meta.balance) || 100000;
+  const totalPages = Math.ceil(trades.length / BT_PAGE_SIZE);
+  const start = _btTradePage * BT_PAGE_SIZE;
+  const page = trades.slice(start, start + BT_PAGE_SIZE);
+
+  let html = `<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:10px;color:var(--text-dim);font-family:var(--mono)">
+    <button onclick="_btTradePage=Math.max(0,_btTradePage-1);btRenderTradePage()" ${_btTradePage===0?'disabled':''} style="padding:2px 8px;cursor:pointer">&lt;</button>
+    <span>Page ${_btTradePage+1}/${totalPages} (${trades.length} trades)</span>
+    <button onclick="_btTradePage=Math.min(${totalPages-1},_btTradePage+1);btRenderTradePage()" ${_btTradePage>=totalPages-1?'disabled':''} style="padding:2px 8px;cursor:pointer">&gt;</button>
+  </div>`;
+  html += `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
     <th>#</th><th>Date</th><th>Time Period</th><th>Type</th><th>Setup</th><th>Side</th>
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
     <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
   </tr></thead><tbody>`;
-  trades.forEach((t, i) => {
+  page.forEach((t, pi) => {
+    const i = start + pi;
     const cls = t.exit_reason === 'TP' ? 'win' : (t.exit_reason === 'SL' ? 'loss' : 'eod');
     const setup = t.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
-    const bal = balMap[t.id] != null ? balMap[t.id] : (i === 0 ? startBal + t.pnl_dollars : '');
+    const bal = _btBalMap[t.id] != null ? _btBalMap[t.id] : (i === 0 ? startBal + t.pnl_dollars : '');
     const balStr = typeof bal === 'number' ? '$' + Math.round(bal).toLocaleString() : '';
     let durStr = '';
     if (t.entry_time && t.exit_time) {
@@ -2256,7 +2247,7 @@ function btRenderTradeLog() {
         else durStr = Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
       }
     }
-    html += `<tr class="${cls}"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
+    html += `<tr class="${cls}" data-trade-id="${t.id}" onclick="btSelectTrade(${t.id})" style="cursor:pointer"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
       <td>${t.fvg_type}</td><td>${setup}</td><td>${t.side}</td>
       <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
       <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts}</td>
@@ -2280,6 +2271,203 @@ function btRenderHourly() {
   html += '</tbody></table>';
   document.getElementById('bt-table-hourly').innerHTML = html;
 }
+
+// ── Inline Trade Viewer ────────────────────────────────────────────────────
+
+let _btTdTradeId = null, _btTdTf = '5min', _btTdFull = false, _btTdRunId = null;
+let _btCurrentRunId = null;  // tracks the actually-loaded run ID
+
+function _btGetRunId() {
+  return _btCurrentRunId || '';
+}
+
+function btSelectTrade(tradeId) {
+  _btTdRunId = _btGetRunId();
+  if (!_btTdRunId || !_btResults) return;
+  _btTdTradeId = tradeId;
+  // Highlight selected row
+  document.querySelectorAll('#bt-table-trades tr[data-trade-id]').forEach(r => {
+    r.style.background = r.dataset.tradeId == tradeId ? 'rgba(245,166,35,0.12)' : '';
+  });
+  // Switch to dedicated trade viewer view
+  switchView('tradeviewer');
+  // Small delay to let the view render before loading chart (Plotly needs visible container)
+  setTimeout(() => btTdLoadChart(), 50);
+}
+
+function btTdClose() {
+  _btTdTradeId = null;
+  document.querySelectorAll('#bt-table-trades tr[data-trade-id]').forEach(r => r.style.background = '');
+  switchView('backtest');
+}
+
+function btTdTf(tf) {
+  _btTdTf = tf;
+  document.querySelectorAll('.bt-td-tf').forEach(b => b.classList.toggle('active', b.dataset.tf === tf));
+  btTdLoadChart();
+}
+
+function btTdToggleWin(full) {
+  _btTdFull = full;
+  document.getElementById('bt-td-window').classList.toggle('active', !full);
+  document.getElementById('bt-td-fullday').classList.toggle('active', full);
+  btTdLoadChart();
+}
+
+function btTdNav(dir) {
+  if (!_btResults) return;
+  const trades = _btResults.trades || [];
+  const idx = trades.findIndex(t => t.id === _btTdTradeId);
+  const newIdx = idx + dir;
+  if (newIdx >= 0 && newIdx < trades.length) btSelectTrade(trades[newIdx].id);
+}
+
+async function btTdLoadChart() {
+  if (!_btTdTradeId || !_btTdRunId) return;
+  const ep = _btTdFull ? 'fullday' : 'bars';
+  try {
+    const res = await fetch(`${API}/api/backtest/${_btTdRunId}/trade/${_btTdTradeId}/${ep}?tf=${_btTdTf}`);
+    if (!res.ok) {
+      const trade = (_btResults?.trades || []).find(t => t.id === _btTdTradeId);
+      const dateStr = trade ? trade.date : '';
+      document.getElementById('bt-td-chart').innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-family:var(--mono);font-size:12px">No 1-second bar data for ${dateStr}. IB data available from 2023-05-31 onwards.</div>`;
+      // Still show info panel
+      if (trade) {
+        document.getElementById('bt-td-title').textContent = `Trade #${_btTdTradeId} — ${dateStr} ${trade.side} ${trade.exit_reason}`;
+      }
+      return;
+    }
+    const data = await res.json();
+    btTdRenderChart(data.bars, data.trade);
+  } catch(e) {
+    document.getElementById('bt-td-chart').innerHTML = `<div style="padding:20px;color:var(--red-text)">Error: ${e.message}</div>`;
+  }
+}
+
+function btTdRenderChart(bars, trade) {
+  if (!bars || !bars.length) return;
+  const ts = bars.map(b => b.t), o = bars.map(b => b.o), h = bars.map(b => b.h),
+        l = bars.map(b => b.l), c = bars.map(b => b.c);
+  const isBuy = trade.side === 'BUY';
+  const fp = v => v != null ? v.toFixed(2) : '—';
+
+  const zHigh = trade.zone_high || Math.max(trade.entry_price, trade.stop_price);
+  const zLow = trade.zone_low || Math.min(trade.entry_price, trade.stop_price);
+  const fT = trade.formation_time_et || trade.formation_time || ts[0];
+  const eT = trade.entry_time_et || trade.entry_time;
+  const xT = trade.exit_time_et || trade.exit_time;
+
+  const shapes = [], annots = [];
+
+  // FVG zone
+  shapes.push({type:'rect',xref:'x',yref:'y',x0:fT,x1:eT,y0:zLow,y1:zHigh,
+    fillcolor:isBuy?'rgba(0,214,143,0.08)':'rgba(255,77,106,0.08)',
+    line:{color:isBuy?'rgba(0,214,143,0.25)':'rgba(255,77,106,0.25)',width:1}});
+
+  // Entry line
+  shapes.push({type:'line',xref:'x',yref:'y',x0:eT,x1:xT,
+    y0:trade.entry_price,y1:trade.entry_price,
+    line:{color:'#00d68f',width:1.5,dash:'dot'}});
+  annots.push({x:xT,y:trade.entry_price,xref:'x',yref:'y',xanchor:'left',
+    text:` Entry ${fp(trade.entry_price)}`,font:{size:10,color:'#00d68f',family:'IBM Plex Mono'},
+    showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+
+  // TP line
+  shapes.push({type:'line',xref:'x',yref:'y',x0:eT,x1:xT,
+    y0:trade.target_price,y1:trade.target_price,
+    line:{color:'#4da6ff',width:1.5,dash:'dash'}});
+  annots.push({x:xT,y:trade.target_price,xref:'x',yref:'y',xanchor:'left',
+    text:` TP ${fp(trade.target_price)}`,font:{size:10,color:'#4da6ff',family:'IBM Plex Mono'},
+    showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+
+  // SL line
+  shapes.push({type:'line',xref:'x',yref:'y',x0:eT,x1:xT,
+    y0:trade.stop_price,y1:trade.stop_price,
+    line:{color:'#ff4d6a',width:1.5,dash:'dash'}});
+  annots.push({x:xT,y:trade.stop_price,xref:'x',yref:'y',xanchor:'left',
+    text:` SL ${fp(trade.stop_price)}`,font:{size:10,color:'#ff4d6a',family:'IBM Plex Mono'},
+    showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+
+  // Entry arrow
+  annots.push({x:eT,y:trade.entry_price,xref:'x',yref:'y',text:'ENTRY',
+    font:{size:9,color:'#00d68f',family:'IBM Plex Mono'},
+    showarrow:true,arrowhead:2,arrowsize:1.2,arrowwidth:2,arrowcolor:'#00d68f',
+    ax:0,ay:isBuy?30:-30,bgcolor:'rgba(10,14,20,0.85)',borderpad:2,bordercolor:'rgba(0,214,143,0.3)',borderwidth:1});
+
+  // Exit arrow
+  const isTP = trade.exit_reason === 'TP', isSL = trade.exit_reason === 'SL';
+  const xCol = isTP ? '#4da6ff' : isSL ? '#ff4d6a' : '#ffb84d';
+  const exitAy = isTP ? (isBuy ? -30 : 30) : (isBuy ? 30 : -30);
+  annots.push({x:xT,y:trade.exit_price,xref:'x',yref:'y',text:trade.exit_reason,
+    font:{size:9,color:xCol,family:'IBM Plex Mono'},
+    showarrow:true,arrowhead:2,arrowsize:1.2,arrowwidth:2,arrowcolor:xCol,
+    ax:0,ay:exitAy,bgcolor:'rgba(10,14,20,0.85)',borderpad:2,bordercolor:xCol+'4d',borderwidth:1});
+
+  // Excursion past TP
+  if (trade.tp_touched && trade.excursion_pts > 0) {
+    const excLevel = isBuy ? trade.target_price + trade.excursion_pts : trade.target_price - trade.excursion_pts;
+    shapes.push({type:'line',xref:'x',yref:'y',x0:xT,x1:ts[ts.length-1],
+      y0:excLevel,y1:excLevel,line:{color:'rgba(255,184,77,0.5)',width:1,dash:'dashdot'}});
+    annots.push({x:ts[ts.length-1],y:excLevel,xref:'x',yref:'y',xanchor:'left',
+      text:` Max +${trade.excursion_pts.toFixed(1)}pt (${trade.excursion_r}R)`,
+      font:{size:9,color:'#ffb84d',family:'IBM Plex Mono'},showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+  }
+
+  const trace = {type:'candlestick',x:ts,open:o,high:h,low:l,close:c,name:'NQ',
+    increasing:{line:{color:'#00d68f',width:1},fillcolor:'#00d68f'},
+    decreasing:{line:{color:'#ff4d6a',width:1},fillcolor:'#ff4d6a'},
+    whiskerwidth:0.3,showlegend:false};
+
+  const layout = {
+    paper_bgcolor:'#0a0e14',plot_bgcolor:'#0a0e14',
+    font:{family:'IBM Plex Mono',color:'#6b7d94',size:10},
+    margin:{t:30,r:60,b:40,l:60},
+    xaxis:{type:'date',gridcolor:'#1a2030',linecolor:'#1e2a3a',tickangle:-45,nticks:20,rangeslider:{visible:false}},
+    yaxis:{gridcolor:'#1a2030',linecolor:'#1e2a3a',side:'right'},
+    shapes,annotations:annots,dragmode:'zoom',
+    title:{text:`#${trade.id} · ${trade.date} · ${trade.side} ${trade.setup} · ${trade.time_period} · ${trade.risk_range}`,
+      font:{size:11,color:'#6b7d94'},x:0,xanchor:'left',y:1,yanchor:'top',pad:{t:4,l:4}},
+  };
+
+  Plotly.react('bt-td-chart', [trace], layout, {
+    displayModeBar:true,modeBarButtonsToRemove:['autoScale2d','lasso2d','select2d','toImage'],
+    displaylogo:false,responsive:true,scrollZoom:true});
+
+  // Title bar
+  document.getElementById('bt-td-title').textContent =
+    `Trade #${trade.id} — ${trade.date} ${trade.side} ${trade.exit_reason}`;
+
+  // Nav position
+  const trades = (_btResults && _btResults.trades) || [];
+  const idx = trades.findIndex(t => t.id === trade.id);
+  document.getElementById('bt-td-pos').textContent = idx >= 0 ? `${idx+1}/${trades.length}` : '';
+
+  // Info panel
+  const pnlCls = trade.pnl_dollars >= 0 ? 'color:#00d68f' : 'color:#ff4d6a';
+  document.getElementById('bt-td-info').innerHTML = `
+    <div style="font-weight:600;margin-bottom:6px;color:var(--amber)">TRADE #${trade.id}</div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Side</span><span style="${isBuy?'color:#00d68f':'color:#ff4d6a'}">${trade.side}</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Setup</span><span>${trade.setup}</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Period</span><span>${trade.time_period}</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Risk</span><span>${trade.risk_range} (${trade.risk_pts}pt)</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">N</span><span>${trade.n_value}R</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Qty</span><span>${trade.contracts}</span></div>
+    <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Entry</span><span style="color:#00d68f">${fp(trade.entry_price)}</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">TP</span><span style="color:#4da6ff">${fp(trade.target_price)}</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">SL</span><span style="color:#ff4d6a">${fp(trade.stop_price)}</span></div>
+    <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Exit</span><span>${fp(trade.exit_price)} (${trade.exit_reason})</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">P&L</span><span style="${pnlCls}">$${trade.pnl_dollars.toLocaleString()}</span></div>
+    ${trade.tp_touched && trade.excursion_pts > 0 ? `
+    <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Past TP</span><span style="color:#ffb84d">+${trade.excursion_pts.toFixed(1)}pt (${trade.excursion_r}R)</span></div>` : ''}`;
+}
+
+// ── Optimizer (removed) ──────────────────────────────────────────────────
+
+// Optimizer removed — stubs to prevent JS errors
+function optLoad() {} function optRenderTable() {} function optShowCurve() {}
 
 init();
 btInit();
