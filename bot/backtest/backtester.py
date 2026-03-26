@@ -30,6 +30,7 @@ import pandas as pd
 _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, _ROOT)
 
+from bot.backtest.us_holidays import is_trading_day
 from bot.strategy.fvg_detector import check_fvg_3bars, SESSION_INTERVALS, _assign_time_period
 from bot.strategy.trade_calculator import round_to_tick, TICK_SIZE, POINT_VALUE
 
@@ -55,6 +56,8 @@ def load_1s_bars(data_dir, start_date=None, end_date=None):
         if start_date and date_str < start_date:
             continue
         if end_date and date_str > end_date:
+            continue
+        if not is_trading_day(date_str):
             continue
         dfs.append(pd.read_parquet(f))
 
@@ -147,6 +150,9 @@ class Trade:
     risk_pts: float
     n_value: float
     contracts: int
+    zone_high: float = 0.0
+    zone_low: float = 0.0
+    formation_time: str = ""
     entry_time: str = ""
     exit_time: str = ""
     exit_price: float = 0.0
@@ -154,104 +160,489 @@ class Trade:
     pnl_pts: float = 0.0
     pnl_dollars: float = 0.0
     is_win: bool = False
+    # Runner mode fields (populated when tp_mode != "fixed")
+    tp_touched: bool = False          # Did price reach TP level?
+    runner_exit_reason: str = ""      # How the runner phase ended: SL/BE/EOD
+    runner_exit_price: float = 0.0
+    tp_exit_contracts: int = 0
+    runner_contracts: int = 0
+    excursion_pts: float = 0.0        # Max favorable move past TP
+    excursion_r: float = 0.0          # Excursion in R-multiples
+
+
+import numpy as np
+try:
+    import numba as nb
+except ModuleNotFoundError:
+    class _NumbaFallback:
+        @staticmethod
+        def njit(*args, **kwargs):
+            def decorator(fn):
+                return fn
+            return decorator
+
+    nb = _NumbaFallback()
+
+
+# Exit reason codes for numba (can't return strings from njit)
+_EXIT_TP = 1
+_EXIT_SL = 2
+_EXIT_EOD = 3
+_EXIT_NONE = 0
+
+
+@nb.njit(cache=True)
+def _walk_trade_numba(timestamps, opens, highs, lows, closes, start_idx,
+                      entry_price, stop_price, tp_trigger, is_buy, eod_minutes):
+    """Numba-accelerated trade walk on numpy arrays.
+
+    Returns (exit_idx, exit_price, exit_reason_code).
+    exit_idx=-1 means no exit found.
+    """
+    n = len(timestamps)
+    for i in range(start_idx, n):
+        # Session end check: timestamps are minutes-since-midnight
+        if timestamps[i] >= eod_minutes:
+            return i, closes[i], _EXIT_EOD
+
+        if is_buy:
+            if lows[i] <= stop_price:
+                if highs[i] >= tp_trigger:
+                    if opens[i] <= stop_price:
+                        return i, stop_price, _EXIT_SL
+                    elif opens[i] >= tp_trigger:
+                        return i, entry_price, _EXIT_TP  # placeholder, caller uses target_price
+                    else:
+                        return i, stop_price, _EXIT_SL
+                return i, stop_price, _EXIT_SL
+            if highs[i] >= tp_trigger:
+                return i, entry_price, _EXIT_TP
+        else:
+            if highs[i] >= stop_price:
+                if lows[i] <= tp_trigger:
+                    if opens[i] >= stop_price:
+                        return i, stop_price, _EXIT_SL
+                    elif opens[i] <= tp_trigger:
+                        return i, entry_price, _EXIT_TP
+                    else:
+                        return i, stop_price, _EXIT_SL
+                return i, stop_price, _EXIT_SL
+            if lows[i] <= tp_trigger:
+                return i, entry_price, _EXIT_TP
+
+    # EOD: use last bar
+    return n - 1, closes[n - 1], _EXIT_EOD
+
+
+@nb.njit(cache=True)
+def _check_entry_numba(timestamps, highs, lows, start_idx, entry_price, is_buy):
+    """Numba-accelerated entry fill check. Returns bar index or -1."""
+    n = len(timestamps)
+    for i in range(start_idx, n):
+        if is_buy and lows[i] <= entry_price:
+            return i
+        elif not is_buy and highs[i] >= entry_price:
+            return i
+    return -1
+
+
+_TP_MODE_FIXED = 0
+_TP_MODE_RUNNER = 1      # SL stays at original
+_TP_MODE_RUNNER_BE = 2   # SL moves to BE+1 tick
+_TP_MODE_RUNNER_TRAIL = 3  # SL moves to BE, then trails by 1R
+
+
+@nb.njit(cache=True)
+def _walk_trade_runner_numba(timestamps, opens, highs, lows, closes, start_idx,
+                             entry_price, stop_price, tp_trigger, is_buy,
+                             eod_minutes, tp_mode, tick_size):
+    """Numba-accelerated trade walk with runner modes.
+
+    Phase 1: Walk until SL or TP touch (same as fixed mode for SL).
+    Phase 2 (if TP touched): Continue with modified stop.
+      - runner (mode 1): SL stays at original stop_price
+      - runner-be (mode 2): SL moves to entry +/- 1 tick (BE+1 tick profit)
+      - runner-trail (mode 3): SL moves to entry, then trails best price by 1R
+
+    Returns (exit_idx, exit_price, exit_reason, tp_touch_idx, max_excursion_pts).
+    tp_touch_idx=-1 if TP never touched.
+    """
+    n = len(timestamps)
+    tp_touch_idx = -1
+    max_favorable = 0.0
+    risk_pts = entry_price - stop_price if is_buy else stop_price - entry_price
+
+    # Phase 1: find TP touch or SL
+    for i in range(start_idx, n):
+        if timestamps[i] >= eod_minutes:
+            return i, closes[i], _EXIT_EOD, tp_touch_idx, max_favorable
+
+        if is_buy:
+            if lows[i] <= stop_price:
+                if highs[i] >= tp_trigger:
+                    if opens[i] <= stop_price:
+                        return i, stop_price, _EXIT_SL, -1, 0.0
+                    elif opens[i] >= tp_trigger:
+                        tp_touch_idx = i
+                        break  # → phase 2
+                    else:
+                        return i, stop_price, _EXIT_SL, -1, 0.0
+                return i, stop_price, _EXIT_SL, -1, 0.0
+            if highs[i] >= tp_trigger:
+                tp_touch_idx = i
+                break  # → phase 2
+        else:
+            if highs[i] >= stop_price:
+                if lows[i] <= tp_trigger:
+                    if opens[i] >= stop_price:
+                        return i, stop_price, _EXIT_SL, -1, 0.0
+                    elif opens[i] <= tp_trigger:
+                        tp_touch_idx = i
+                        break
+                    else:
+                        return i, stop_price, _EXIT_SL, -1, 0.0
+                return i, stop_price, _EXIT_SL, -1, 0.0
+            if lows[i] <= tp_trigger:
+                tp_touch_idx = i
+                break
+
+    # If we never touched TP, EOD
+    if tp_touch_idx < 0:
+        return n - 1, closes[n - 1], _EXIT_EOD, -1, 0.0
+
+    # Phase 2: runner — TP touched, continue with modified stop
+    if tp_mode == _TP_MODE_RUNNER:
+        runner_stop = stop_price  # SL stays at original
+        trailing = False
+    elif tp_mode == _TP_MODE_RUNNER_BE:
+        trailing = False
+        # BE + 1 tick profit
+        if is_buy:
+            runner_stop = entry_price + tick_size
+        else:
+            runner_stop = entry_price - tick_size
+    else:
+        trailing = True
+        if is_buy:
+            runner_stop = entry_price
+        else:
+            runner_stop = entry_price
+
+    for i in range(tp_touch_idx + 1, n):
+        if timestamps[i] >= eod_minutes:
+            # Track excursion on final bar before EOD
+            if is_buy:
+                exc = highs[i] - tp_trigger
+                if exc > max_favorable:
+                    max_favorable = exc
+                eod_exit = closes[i]
+                if eod_exit < runner_stop:
+                    eod_exit = runner_stop
+            else:
+                exc = tp_trigger - lows[i]
+                if exc > max_favorable:
+                    max_favorable = exc
+                eod_exit = closes[i]
+                if eod_exit > runner_stop:
+                    eod_exit = runner_stop
+            return i, eod_exit, _EXIT_EOD, tp_touch_idx, max_favorable
+
+        # Track max favorable excursion past TP
+        if is_buy:
+            exc = highs[i] - tp_trigger
+            if exc > max_favorable:
+                max_favorable = exc
+            if trailing:
+                candidate_stop = highs[i] - risk_pts
+                if candidate_stop < entry_price:
+                    candidate_stop = entry_price
+                if candidate_stop > runner_stop:
+                    runner_stop = candidate_stop
+            # Check runner stop
+            if lows[i] <= runner_stop:
+                return i, runner_stop, _EXIT_SL, tp_touch_idx, max_favorable
+        else:
+            exc = tp_trigger - lows[i]
+            if exc > max_favorable:
+                max_favorable = exc
+            if trailing:
+                candidate_stop = lows[i] + risk_pts
+                if candidate_stop > entry_price:
+                    candidate_stop = entry_price
+                if candidate_stop < runner_stop:
+                    runner_stop = candidate_stop
+            if highs[i] >= runner_stop:
+                return i, runner_stop, _EXIT_SL, tp_touch_idx, max_favorable
+
+    # End of data
+    final_exit = closes[n - 1]
+    if is_buy and final_exit < runner_stop:
+        final_exit = runner_stop
+    elif (not is_buy) and final_exit > runner_stop:
+        final_exit = runner_stop
+    return n - 1, final_exit, _EXIT_EOD, tp_touch_idx, max_favorable
+
+
+@nb.njit(cache=True)
+def _excursion_past_tp_numba(highs, lows, start_idx, tp_price, is_buy, eod_minutes, minutes):
+    """Max favorable excursion past TP from TP bar to EOD."""
+    n = len(highs)
+    max_exc = 0.0
+    for i in range(start_idx, n):
+        if minutes[i] >= eod_minutes:
+            break
+        if is_buy:
+            exc = highs[i] - tp_price
+        else:
+            exc = tp_price - lows[i]
+        if exc > max_exc:
+            max_exc = exc
+    return max_exc
+
+
+@nb.njit(cache=True)
+def _find_mitigation_numba(highs, lows, start_idx, zone_low, zone_high):
+    """Numba-accelerated mitigation scan. Returns bar index or -1."""
+    n = len(highs)
+    for i in range(start_idx, n):
+        if lows[i] <= zone_high and highs[i] >= zone_low:
+            return i
+    return -1
+
+
+def _prepare_day_arrays(day_df):
+    """Extract numpy arrays from day DataFrame for numba functions.
+
+    Converts timestamps to minutes-since-midnight for fast EOD comparison.
+    Returns dict of arrays + the original dates for result lookup.
+    """
+    dates = day_df['date'].values  # numpy datetime64 array
+    # Convert to minutes since midnight for EOD check
+    # pandas Timestamp .hour/.minute via numpy
+    dt_index = pd.DatetimeIndex(day_df['date'])
+    minutes = (dt_index.hour * 60 + dt_index.minute).values.astype(np.float64)
+
+    return {
+        'dates': dates,
+        'minutes': minutes,
+        'opens': day_df['open'].values.astype(np.float64),
+        'highs': day_df['high'].values.astype(np.float64),
+        'lows': day_df['low'].values.astype(np.float64),
+        'closes': day_df['close'].values.astype(np.float64),
+    }
 
 
 def walk_trade_1s(df_1s, entry_time, entry_price, stop_price, target_price,
-                  side, session_end_time=time(16, 0), tp_trigger=None):
+                  side, session_end_time=time(16, 0), tp_trigger=None,
+                  _arrays=None, _start_hint=0, tp_mode="fixed"):
     """
     Walk a trade forward on 1-second bars to determine outcome.
 
-    Uses 1-second precision to correctly determine whether stop or target
-    was hit first within each second.
+    Uses numba-accelerated inner loop for ~30x speedup over iterrows.
 
-    Args:
-        df_1s: 1-second DataFrame with columns [date, open, high, low, close]
-        entry_time: datetime of entry
-        entry_price: limit entry price
-        stop_price: stop loss price
-        target_price: take profit price (fill price for TP)
-        side: "BUY" or "SELL"
-        session_end_time: time to force exit (default 16:00)
-        tp_trigger: price that must be reached to fill TP (default = target_price).
-                    With slippage, price must trade 1 tick past the limit to fill,
-                    so tp_trigger = target + 1 tick. Fill price is still target_price.
+    tp_mode controls what happens when TP is reached:
+        "fixed":     Exit at TP (default, classic behavior)
+        "runner":    TP touched → SL stays, let trade run until SL or EOD
+        "runner-be": TP touched → SL moves to BE+1 tick, run until stop or EOD
+        "runner-trail": TP touched → SL moves to BE, then trails best price by 1R
 
     Returns:
-        (exit_time, exit_price, exit_reason) or None if not filled
+        Fixed mode:  (exit_time, exit_price, exit_reason) or None
+        Runner modes: (exit_time, exit_price, exit_reason, tp_touched, excursion_pts) or None
     """
     if tp_trigger is None:
         tp_trigger = target_price
 
-    # Filter to bars after entry time
-    mask = df_1s['date'] > entry_time
-    bars_after = df_1s[mask]
+    if _arrays is not None:
+        arr = _arrays
+    else:
+        arr = _prepare_day_arrays(df_1s)
 
-    if bars_after.empty:
+    # Find start index: first bar after entry_time
+    entry_ts = np.datetime64(entry_time)
+    if _start_hint > 0 and _start_hint < len(arr['dates']) and arr['dates'][_start_hint] > entry_ts:
+        start_idx = _start_hint
+    else:
+        start_idx = np.searchsorted(arr['dates'], entry_ts, side='right')
+
+    if start_idx >= len(arr['dates']):
         return None
 
-    for _, bar in bars_after.iterrows():
-        bar_time = bar['date']
+    eod_minutes = session_end_time.hour * 60 + session_end_time.minute
+    is_buy = side == "BUY"
 
-        # Check session end
-        if hasattr(bar_time, 'time') and bar_time.time() >= session_end_time:
-            return (str(bar_time), bar['close'], "EOD")
+    if tp_mode == "fixed":
+        idx, exit_price, reason = _walk_trade_numba(
+            arr['minutes'], arr['opens'], arr['highs'], arr['lows'], arr['closes'],
+            start_idx, entry_price, stop_price, tp_trigger, is_buy, eod_minutes
+        )
 
+        if reason == _EXIT_NONE:
+            return None
+
+        exit_time = str(pd.Timestamp(arr['dates'][idx]))
+
+        if reason == _EXIT_TP:
+            return (exit_time, target_price, "TP")
+        elif reason == _EXIT_SL:
+            return (exit_time, stop_price, "SL")
+        else:
+            return (exit_time, arr['closes'][idx], "EOD")
+
+    else:
+        # Runner modes
+        if tp_mode == "runner":
+            mode_code = _TP_MODE_RUNNER
+        elif tp_mode == "runner-be":
+            mode_code = _TP_MODE_RUNNER_BE
+        else:
+            mode_code = _TP_MODE_RUNNER_TRAIL
+
+        idx, exit_price, reason, tp_idx, exc_pts = _walk_trade_runner_numba(
+            arr['minutes'], arr['opens'], arr['highs'], arr['lows'], arr['closes'],
+            start_idx, entry_price, stop_price, tp_trigger, is_buy,
+            eod_minutes, mode_code, TICK_SIZE
+        )
+
+        if reason == _EXIT_NONE:
+            return None
+
+        exit_time = str(pd.Timestamp(arr['dates'][idx]))
+        tp_touched = tp_idx >= 0
+
+        if reason == _EXIT_SL:
+            actual_exit_price = exit_price  # runner_stop or original stop
+        elif reason == _EXIT_EOD:
+            actual_exit_price = arr['closes'][idx]
+        else:
+            actual_exit_price = exit_price
+
+        # Determine exit reason string
+        if tp_touched:
+            if reason == _EXIT_SL:
+                if tp_mode == "runner-be":
+                    reason_str = "BE"
+                elif tp_mode == "runner-trail":
+                    reason_str = "TRAIL"
+                else:
+                    reason_str = "SL"
+            else:
+                reason_str = "EOD"
+        else:
+            reason_str = "SL" if reason == _EXIT_SL else "EOD"
+
+        return (exit_time, actual_exit_price, reason_str, tp_touched,
+                round_to_tick(exc_pts))
+
+
+def _resolve_tp_mode(tp_mode, contracts):
+    """Map public TP modes to the engine behavior for this trade."""
+    if tp_mode == "split":
+        return "fixed" if contracts <= 1 else "runner-trail"
+    return tp_mode
+
+
+def _summarize_trade_exit(side, entry_price, target_price, contracts, tp_mode, walk_result):
+    """Convert raw walk output into trade-level exit and P&L fields."""
+    resolved_mode = _resolve_tp_mode(tp_mode, contracts)
+    summary = {
+        "exit_time": "",
+        "exit_price": 0.0,
+        "exit_reason": "",
+        "pnl_pts": 0.0,
+        "tp_touched": False,
+        "runner_exit_reason": "",
+        "runner_exit_price": 0.0,
+        "tp_exit_contracts": 0,
+        "runner_contracts": 0,
+        "excursion_pts": 0.0,
+    }
+
+    if resolved_mode == "fixed":
+        exit_time, exit_price, exit_reason = walk_result
+        tp_touched = exit_reason == "TP"
+        excursion_pts = 0.0
         if side == "BUY":
-            # Check stop first (conservative): did low touch stop?
-            if bar['low'] <= stop_price:
-                # Check if target was also hit — did high reach trigger?
-                if bar['high'] >= tp_trigger:
-                    # Both hit in same second — use open to determine order
-                    if bar['open'] <= stop_price:
-                        return (str(bar_time), stop_price, "SL")
-                    elif bar['open'] >= tp_trigger:
-                        return (str(bar_time), target_price, "TP")
-                    else:
-                        # Ambiguous — conservative: stop hit first
-                        return (str(bar_time), stop_price, "SL")
-                return (str(bar_time), stop_price, "SL")
-            # Check target — trigger level for fill, target_price for P&L
-            if bar['high'] >= tp_trigger:
-                return (str(bar_time), target_price, "TP")
+            pnl_pts = exit_price - entry_price
+        else:
+            pnl_pts = entry_price - exit_price
 
-        else:  # SELL
-            # Check stop first: did high touch stop?
-            if bar['high'] >= stop_price:
-                if bar['low'] <= tp_trigger:
-                    if bar['open'] >= stop_price:
-                        return (str(bar_time), stop_price, "SL")
-                    elif bar['open'] <= tp_trigger:
-                        return (str(bar_time), target_price, "TP")
-                    else:
-                        return (str(bar_time), stop_price, "SL")
-                return (str(bar_time), stop_price, "SL")
-            if bar['low'] <= tp_trigger:
-                return (str(bar_time), target_price, "TP")
+        summary.update({
+            "exit_time": exit_time,
+            "exit_price": exit_price,
+            "exit_reason": exit_reason,
+            "pnl_pts": pnl_pts,
+            "tp_touched": tp_touched,
+            "excursion_pts": excursion_pts,
+        })
+        return summary
 
-    # Never hit stop or target — EOD
-    last_bar = bars_after.iloc[-1]
-    return (str(last_bar['date']), last_bar['close'], "EOD")
+    exit_time, runner_exit_price, runner_exit_reason, tp_touched, excursion_pts = walk_result
+    if side == "BUY":
+        runner_pnl_pts = runner_exit_price - entry_price
+        target_pnl_pts = target_price - entry_price
+    else:
+        runner_pnl_pts = entry_price - runner_exit_price
+        target_pnl_pts = entry_price - target_price
+
+    if tp_mode == "split" and contracts > 1 and tp_touched:
+        tp_exit_contracts = contracts - 1
+        gross_pnl_pts = target_pnl_pts * tp_exit_contracts + runner_pnl_pts
+        summary.update({
+            "exit_time": exit_time,
+            "exit_price": runner_exit_price,
+            "exit_reason": "SPLIT",
+            "pnl_pts": gross_pnl_pts / contracts,
+            "tp_touched": True,
+            "runner_exit_reason": runner_exit_reason,
+            "runner_exit_price": runner_exit_price,
+            "tp_exit_contracts": tp_exit_contracts,
+            "runner_contracts": 1,
+            "excursion_pts": excursion_pts,
+        })
+        return summary
+
+    summary.update({
+        "exit_time": exit_time,
+        "exit_price": runner_exit_price,
+        "exit_reason": runner_exit_reason,
+        "pnl_pts": runner_pnl_pts,
+        "tp_touched": tp_touched,
+        "runner_exit_reason": runner_exit_reason,
+        "runner_exit_price": runner_exit_price if tp_touched else 0.0,
+        "excursion_pts": excursion_pts,
+    })
+    return summary
 
 
-def check_entry_fill(df_1s, entry_time, entry_price, side):
+def check_entry_fill(df_1s, entry_time, entry_price, side,
+                     _arrays=None, _start_hint=0):
     """
     Check if the limit entry order would have filled on 1-second bars.
 
-    For BUY limit: fills when price trades at or below entry_price.
-    For SELL limit: fills when price trades at or above entry_price.
-
-    Returns fill_time (datetime str) or None.
+    Numba-accelerated. Returns fill_time (datetime str) or None.
     """
-    mask = df_1s['date'] >= entry_time
-    bars = df_1s[mask]
+    if _arrays is not None:
+        arr = _arrays
+    else:
+        arr = _prepare_day_arrays(df_1s)
 
-    for _, bar in bars.iterrows():
-        if side == "BUY" and bar['low'] <= entry_price:
-            return str(bar['date'])
-        elif side == "SELL" and bar['high'] >= entry_price:
-            return str(bar['date'])
+    entry_ts = np.datetime64(pd.Timestamp(entry_time))
+    if _start_hint > 0 and _start_hint < len(arr['dates']) and arr['dates'][_start_hint] >= entry_ts:
+        start_idx = _start_hint
+    else:
+        start_idx = np.searchsorted(arr['dates'], entry_ts, side='left')
 
-    return None
+    if start_idx >= len(arr['dates']):
+        return None
+
+    is_buy = side == "BUY"
+    idx = _check_entry_numba(arr['dates'], arr['highs'], arr['lows'],
+                             start_idx, entry_price, is_buy)
+
+    if idx < 0:
+        return None
+    return str(pd.Timestamp(arr['dates'][idx]))
 
 
 # ── Backtest Engine ──────────────────────────────────────────────────────
@@ -277,6 +668,9 @@ def run_backtest(df_1s, strategy, config=None):
     max_daily_trades = config.get("max_daily_trades", 15)
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
+    mit_entry_ticks = config.get("mit_entry_ticks", 0)  # MIT entry slippage (0=limit, 1-4=MIT)
+    confirmed_limit = config.get("confirmed_limit", False)  # fill confirmation: require 1 tick past, fill at limit
+    tp_mode = config.get("tp_mode", "fixed")  # fixed, runner, runner-be, split
 
     # IB tiered commission: per-side IB rate (marginal) + $1.40 exchange/reg
     # Round-trip = 2 sides. Monthly volume determines IB rate tier.
@@ -329,9 +723,10 @@ def run_backtest(df_1s, strategy, config=None):
     strategy_lookup = build_strategy_lookup(strategy)
     print(f"Strategy: {strategy.get('meta', {}).get('name', '?')} ({len(strategy_lookup)} cells)")
 
-    # Group 1s bars by trading day
+    # Group 1s bars by trading day (pre-group once, avoids O(N) scan per day)
     df_1s['trade_date'] = df_1s['date'].dt.date
-    trading_days = sorted(df_1s['trade_date'].unique())
+    _day_groups = {day: grp for day, grp in df_1s.groupby('trade_date')}
+    trading_days = sorted(_day_groups.keys())
     print(f"Trading days: {len(trading_days)} ({trading_days[0]} → {trading_days[-1]})")
 
     all_trades = []
@@ -345,7 +740,7 @@ def run_backtest(df_1s, strategy, config=None):
         if no_trade_after_dec and day.month == 12 and day.day >= (no_trade_after_dec + 1):
             continue
 
-        day_df = df_1s[df_1s['trade_date'] == day].copy()
+        day_df = _day_groups[day]
         if day_df.empty:
             continue
 
@@ -353,6 +748,9 @@ def run_backtest(df_1s, strategy, config=None):
         bars_5min = resample_to_5min(day_df)
         if len(bars_5min) < 3:
             continue
+
+        # Pre-extract numpy arrays for numba (once per day, reused for all trades)
+        day_arrays = _prepare_day_arrays(day_df)
 
         # Track state for this day
         active_fvgs = []
@@ -383,7 +781,10 @@ def run_backtest(df_1s, strategy, config=None):
             if not has_cell:
                 continue
 
-            active_fvgs.append((fvg, bar3['date']))
+            # FVG is only confirmed when bar3 CLOSES (5 min after bar3 open).
+            # Mitigation scan must start after bar3 close, not bar3 open.
+            bar3_close_time = bar3['date'] + pd.Timedelta(minutes=5)
+            active_fvgs.append((fvg, bar3_close_time))
 
         # Process mitigations on 1s bars
         for fvg, formation_time in active_fvgs:
@@ -391,18 +792,20 @@ def run_backtest(df_1s, strategy, config=None):
                 break
 
             # Find first 1s bar that mitigates this FVG (after formation)
-            post_formation = day_df[day_df['date'] > formation_time]
-            mit_time = None
-            for _, bar in post_formation.iterrows():
-                if bar['low'] <= fvg.zone_high and bar['high'] >= fvg.zone_low:
-                    mit_time = bar['date']
-                    break
-
-            if mit_time is None:
+            form_ts = np.datetime64(formation_time)
+            mit_start = np.searchsorted(day_arrays['dates'], form_ts, side='right')
+            mit_idx = _find_mitigation_numba(
+                day_arrays['highs'], day_arrays['lows'], mit_start,
+                fvg.zone_low, fvg.zone_high,
+            )
+            if mit_idx < 0:
                 continue
+            mit_time = pd.Timestamp(day_arrays['dates'][mit_idx])
 
-            # Check time gate (no entries after 15:45)
-            if hasattr(mit_time, 'time') and mit_time.time() >= time(15, 45):
+            # Check time gate (no entries after 15:45 ET)
+            # Use pre-computed ET minutes array (not UTC timestamp)
+            mit_minutes_et = day_arrays['minutes'][mit_idx]
+            if mit_minutes_et >= 15 * 60 + 45:
                 continue
 
             # Calculate setup and match to strategy
@@ -412,33 +815,27 @@ def run_backtest(df_1s, strategy, config=None):
                 if open_positions >= max_concurrent:
                     break
 
-                # Entry price
+                # Entry price (exact — used for cell lookup, matching live engine)
                 if setup_type == "mit_extreme":
-                    entry = round_to_tick(
+                    entry_exact = round_to_tick(
                         fvg.zone_high if fvg.fvg_type == "bullish" else fvg.zone_low
                     )
                 else:
-                    entry = round_to_tick((fvg.zone_high + fvg.zone_low) / 2)
+                    entry_exact = round_to_tick((fvg.zone_high + fvg.zone_low) / 2)
 
                 side = "BUY" if fvg.fvg_type == "bullish" else "SELL"
-
-                # Slippage: entry 1 tick deeper into zone
-                if use_slip:
-                    if side == "BUY":
-                        entry = round_to_tick(entry - TICK_SIZE)
-                    else:
-                        entry = round_to_tick(entry + TICK_SIZE)
 
                 # Stop price
                 stop = round_to_tick(
                     fvg.middle_low if fvg.fvg_type == "bullish" else fvg.middle_high
                 )
 
-                risk_pts = round_to_tick(abs(entry - stop))
-                if risk_pts <= 0:
+                # Cell lookup uses exact entry (no slippage) — same as live engine
+                risk_pts_exact = round_to_tick(abs(entry_exact - stop))
+                if risk_pts_exact <= 0:
                     continue
 
-                risk_range = risk_to_range(risk_pts)
+                risk_range = risk_to_range(risk_pts_exact)
                 if not risk_range:
                     continue
 
@@ -446,17 +843,45 @@ def run_backtest(df_1s, strategy, config=None):
                 if cell is None or cell["setup"] != setup_type:
                     continue
 
-                # Target
+                # Apply entry slippage for fill simulation:
+                # --slip: legacy 1-tick model (entry + TP slippage)
+                # --confirmed-limit: require 1 tick past to confirm fill, but fill at limit price
+                # --mit-entry N: MIT order slippage (N ticks on entry only, TP = limit touch)
+                if confirmed_limit:
+                    # Fill at exact limit price; confirmation handled at entry check below
+                    entry_fill = entry_exact
+                elif use_slip:
+                    # Legacy: entry 1 tick deeper + TP 1 tick past
+                    if side == "BUY":
+                        entry_fill = round_to_tick(entry_exact - TICK_SIZE)
+                    else:
+                        entry_fill = round_to_tick(entry_exact + TICK_SIZE)
+                elif mit_entry_ticks > 0:
+                    # MIT: entry N ticks worse (market fill penalty)
+                    # BUY: fill higher (pay more), SELL: fill lower (receive less)
+                    slip_amount = TICK_SIZE * mit_entry_ticks
+                    if side == "BUY":
+                        entry_fill = round_to_tick(entry_exact + slip_amount)
+                    else:
+                        entry_fill = round_to_tick(entry_exact - slip_amount)
+                else:
+                    entry_fill = entry_exact
+
+                # Risk from actual fill price (for position sizing and target calc)
+                risk_pts = round_to_tick(abs(entry_fill - stop))
+                if risk_pts <= 0:
+                    continue
+
+                # Target based on fill price
                 n = cell["rr_target"]
                 target_dist = round_to_tick(n * risk_pts)
                 if side == "BUY":
-                    target = round_to_tick(entry + target_dist)
+                    target = round_to_tick(entry_fill + target_dist)
                 else:
-                    target = round_to_tick(entry - target_dist)
+                    target = round_to_tick(entry_fill - target_dist)
 
-                # Slippage: TP limit sits at target, but price must trade
-                # 1 tick past it to guarantee fill. We pass tp_trigger to
-                # walk_trade for the fill check; actual fill price = target.
+                # TP trigger: legacy slip requires 1 tick past; all other modes = touch
+                # (validated: 99.7% of TP-first winners go past target)
                 if use_slip:
                     if side == "BUY":
                         tp_trigger = round_to_tick(target + TICK_SIZE)
@@ -482,28 +907,70 @@ def run_backtest(df_1s, strategy, config=None):
                 if risk_pts * POINT_VALUE * contracts > running_balance * risk_pct * 1.01:
                     contracts = max(1, math.floor(running_balance * risk_pct / (risk_pts * POINT_VALUE)))
 
-                # Check entry fill on 1s bars
-                fill_time = check_entry_fill(day_df, mit_time, entry, side)
+                # Check entry fill:
+                # --slip: price must reach slipped level (1 tick into zone) to confirm fill
+                # --confirmed-limit: price must go 1 tick past to confirm limit fill
+                # --mit-entry: MIT triggers on touch at exact price, fills worse (market)
+                # default: limit at exact price, touch = fill
+                if confirmed_limit:
+                    # BUY: price must dip 1 tick below entry to confirm fill
+                    # SELL: price must rise 1 tick above entry to confirm fill
+                    if side == "BUY":
+                        entry_check_price = round_to_tick(entry_exact - TICK_SIZE)
+                    else:
+                        entry_check_price = round_to_tick(entry_exact + TICK_SIZE)
+                elif use_slip:
+                    entry_check_price = entry_fill
+                else:
+                    entry_check_price = entry_exact
+                fill_time = check_entry_fill(day_df, mit_time, entry_check_price, side,
+                                             _arrays=day_arrays, _start_hint=mit_idx)
                 if fill_time is None:
                     continue
 
-                # Walk trade on 1s bars
-                result = walk_trade_1s(day_df, pd.Timestamp(fill_time), entry, stop, target, side,
-                                       tp_trigger=tp_trigger)
+                # Walk trade with fill price (slipped if MIT), limit TP (touch)
+                resolved_tp_mode = _resolve_tp_mode(tp_mode, contracts)
+                result = walk_trade_1s(day_df, pd.Timestamp(fill_time), entry_fill, stop, target, side,
+                                       tp_trigger=tp_trigger, _arrays=day_arrays,
+                                       tp_mode=resolved_tp_mode)
                 if result is None:
                     continue
 
-                exit_time, exit_price, exit_reason = result
+                exit_summary = _summarize_trade_exit(
+                    side, entry_fill, target, contracts, tp_mode, result
+                )
+                exit_time = exit_summary["exit_time"]
+                exit_price = exit_summary["exit_price"]
+                exit_reason = exit_summary["exit_reason"]
+                pnl_pts = exit_summary["pnl_pts"]
+                tp_touched = exit_summary["tp_touched"]
+                runner_exit_reason = exit_summary["runner_exit_reason"]
+                runner_exit_price = exit_summary["runner_exit_price"]
+                tp_exit_contracts = exit_summary["tp_exit_contracts"]
+                runner_contracts = exit_summary["runner_contracts"]
+                excursion_pts = exit_summary["excursion_pts"]
 
-                # Calculate P&L (net of IB tiered commissions)
-                if side == "BUY":
-                    pnl_pts = exit_price - entry
-                else:
-                    pnl_pts = entry - exit_price
+                # For fixed TP wins, measure how far price went past target
+                if resolved_tp_mode == "fixed" and exit_reason == "TP":
+                    exit_ts = np.datetime64(pd.Timestamp(exit_time))
+                    tp_bar_idx = np.searchsorted(day_arrays['dates'], exit_ts, side='left')
+                    excursion_pts = round_to_tick(_excursion_past_tp_numba(
+                        day_arrays['highs'], day_arrays['lows'],
+                        tp_bar_idx, target, side == "BUY",
+                        16 * 60, day_arrays['minutes'],
+                    ))
+
                 commission = _calc_commission(contracts, day)
                 pnl_dollars = round(pnl_pts * contracts * POINT_VALUE - commission, 2)
 
+                # Determine is_win
+                if resolved_tp_mode == "fixed":
+                    is_win = exit_reason == "TP"
+                else:
+                    is_win = pnl_dollars > 0
+
                 trade_counter += 1
+                excursion_r = round(excursion_pts / risk_pts, 2) if risk_pts > 0 and excursion_pts > 0 else 0.0
                 trade = Trade(
                     trade_id=trade_counter,
                     date=str(day),
@@ -512,19 +979,29 @@ def run_backtest(df_1s, strategy, config=None):
                     risk_range=risk_range,
                     setup=setup_type,
                     side=side,
-                    entry_price=entry,
+                    entry_price=entry_fill,
                     stop_price=stop,
                     target_price=target,
                     risk_pts=risk_pts,
                     n_value=n,
                     contracts=contracts,
+                    zone_high=fvg.zone_high,
+                    zone_low=fvg.zone_low,
+                    formation_time=fvg.time_candle2,
                     entry_time=fill_time,
                     exit_time=exit_time,
                     exit_price=exit_price,
                     exit_reason=exit_reason,
                     pnl_pts=round(pnl_pts, 2),
                     pnl_dollars=pnl_dollars,
-                    is_win=exit_reason == "TP",
+                    is_win=is_win,
+                    tp_touched=tp_touched,
+                    runner_exit_reason=runner_exit_reason,
+                    runner_exit_price=runner_exit_price,
+                    tp_exit_contracts=tp_exit_contracts,
+                    runner_contracts=runner_contracts,
+                    excursion_pts=excursion_pts,
+                    excursion_r=excursion_r,
                 )
                 all_trades.append(trade)
 
@@ -632,10 +1109,17 @@ def export_trades_csv(trades, output_path):
             "setup": t.setup, "side": t.side, "contracts": t.contracts,
             "entry_price": t.entry_price, "stop_price": t.stop_price,
             "target_price": t.target_price, "risk_pts": t.risk_pts,
+            "zone_high": t.zone_high, "zone_low": t.zone_low,
+            "formation_time": t.formation_time,
             "n_value": t.n_value, "entry_time": t.entry_time,
             "exit_time": t.exit_time, "exit_price": t.exit_price,
             "exit_reason": t.exit_reason, "pnl_pts": t.pnl_pts,
             "pnl_dollars": t.pnl_dollars, "is_win": t.is_win,
+            "tp_touched": t.tp_touched, "excursion_pts": t.excursion_pts,
+            "excursion_r": t.excursion_r, "runner_exit_reason": t.runner_exit_reason,
+            "runner_exit_price": t.runner_exit_price,
+            "tp_exit_contracts": t.tp_exit_contracts,
+            "runner_contracts": t.runner_contracts,
         })
     df = pd.DataFrame(rows)
     df.to_csv(output_path, index=False)
@@ -765,10 +1249,17 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
             "setup": t.setup, "side": t.side, "contracts": t.contracts,
             "entry_price": t.entry_price, "stop_price": t.stop_price,
             "target_price": t.target_price, "risk_pts": t.risk_pts,
+            "zone_high": t.zone_high, "zone_low": t.zone_low,
+            "formation_time": t.formation_time,
             "n_value": t.n_value, "entry_time": t.entry_time,
             "exit_time": t.exit_time, "exit_price": t.exit_price,
             "exit_reason": t.exit_reason,
             "pnl_pts": t.pnl_pts, "pnl_dollars": round(t.pnl_dollars, 2),
+            "tp_touched": t.tp_touched, "excursion_pts": t.excursion_pts,
+            "excursion_r": t.excursion_r, "runner_exit_reason": t.runner_exit_reason,
+            "runner_exit_price": t.runner_exit_price,
+            "tp_exit_contracts": t.tp_exit_contracts,
+            "runner_contracts": t.runner_contracts,
         }
         for t in trades
     ]
@@ -855,6 +1346,12 @@ def main():
                         help="Apply realistic slippage: entry 1 tick deeper, TP 1 tick early")
     parser.add_argument("--risk-tiers", action="store_true",
                         help="Use 3-tier risk from strategy meta (0.5%%/1%%/1.5%%)")
+    parser.add_argument("--mit-entry", type=int, default=0, metavar="TICKS",
+                        help="MIT entry: N ticks slippage on entry fill (0=limit, 1-4=realistic)")
+    parser.add_argument("--confirmed-limit", action="store_true",
+                        help="Confirmed limit fills: require 1 tick past entry+TP, fill at limit price")
+    parser.add_argument("--tp-mode", default="fixed", choices=["fixed", "runner", "runner-be", "split"],
+                        help="TP exit mode: fixed, runner, runner-be, or split ((n-1) at TP + 1 trailing runner)")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
     args = parser.parse_args()
@@ -877,7 +1374,10 @@ def main():
         "max_daily_trades": 15,
         "min_fvg_size": 0.25,
         "slip": args.slip,
+        "confirmed_limit": args.confirmed_limit,
         "risk_tiers": args.risk_tiers,
+        "mit_entry_ticks": args.mit_entry,
+        "tp_mode": args.tp_mode,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 
@@ -891,6 +1391,10 @@ def main():
         results["meta"]["sizing"] = "compounding"
         if args.slip:
             results["meta"]["slippage"] = "entry 1tick deeper, TP 1tick early"
+        elif args.mit_entry > 0:
+            results["meta"]["slippage"] = f"MIT entry {args.mit_entry}tick, limit TP (touch)"
+        if args.tp_mode != "fixed":
+            results["meta"]["tp_mode"] = args.tp_mode
         if args.risk_tiers:
             results["meta"]["risk_tiers"] = strategy.get("meta", {}).get("risk_rules", {})
         os.makedirs(os.path.dirname(args.json_output) or '.', exist_ok=True)

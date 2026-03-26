@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FVG Trade Viewer</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0a0e14;
+    --bg2:      #10151c;
+    --bg3:      #1a2030;
+    --border:   #1e2a3a;
+    --text:     #d4dce8;
+    --text2:    #6b7d94;
+    --accent:   #3a8bfd;
+    --green:    #00d68f;
+    --red:      #ff4d6a;
+    --blue:     #4da6ff;
+    --yellow:   #ffb84d;
+    --mono:     'IBM Plex Mono', monospace;
+    --sans:     'IBM Plex Sans', sans-serif;
+  }
+
+  html, body { background: var(--bg); color: var(--text); font-family: var(--sans);
+    font-size: 13px; height: 100vh; overflow: hidden; }
+
+  /* ── LAYOUT: sidebar left, chart fills rest ── */
+  #app { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+
+  /* ── SIDEBAR ── */
+  #sidebar { display: flex; flex-direction: column; background: var(--bg2);
+    border-right: 1px solid var(--border); overflow: hidden; }
+
+  #sidebar-top { padding: 10px 8px 6px; border-bottom: 1px solid var(--border); }
+  #sidebar-top h1 { font-size: 12px; font-weight: 600; color: var(--text2);
+    text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 6px; }
+
+  #search { width: 100%; background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 11px;
+    font-family: var(--mono); margin-bottom: 6px; }
+  #search:focus { outline: none; border-color: var(--accent); }
+
+  #filter-row { display: flex; gap: 3px; }
+  .fbtn { padding: 2px 7px; border-radius: 3px; border: 1px solid var(--border);
+    background: transparent; color: var(--text2); font-size: 10px; cursor: pointer;
+    font-family: var(--mono); transition: all 0.1s; }
+  .fbtn:hover { border-color: var(--accent); color: var(--text); }
+  .fbtn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  #tcount { font-size: 10px; color: var(--text2); padding: 4px 8px;
+    border-bottom: 1px solid var(--border); font-family: var(--mono); }
+
+  #tlist { flex: 1; overflow-y: auto; scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent; }
+
+  .ti { display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    cursor: pointer; border-bottom: 1px solid rgba(30,42,58,0.5);
+    transition: background 0.08s; font-size: 11px; }
+  .ti:hover { background: var(--bg3); }
+  .ti.sel { background: rgba(58,139,253,0.12); border-left: 2px solid var(--accent); }
+
+  .td { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .td-w { background: var(--green); }
+  .td-l { background: var(--red); }
+  .td-e { background: var(--yellow); }
+
+  .tm { flex: 1; min-width: 0; }
+  .tm-top { display: flex; justify-content: space-between; align-items: center; }
+  .tm-id { font-family: var(--mono); font-size: 10px; color: var(--text2); }
+  .tm-pnl { font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .p\+ { color: var(--green); } .p- { color: var(--red); }
+  .tm-bot { font-size: 10px; color: var(--text2); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .stag { padding: 0 4px; border-radius: 2px; font-size: 9px; font-weight: 600;
+    font-family: var(--mono); }
+  .stag-b { background: rgba(0,214,143,0.15); color: var(--green); }
+  .stag-s { background: rgba(255,77,106,0.15); color: var(--red); }
+
+  /* ── CHART PANEL ── */
+  #chart-panel { display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Top bar: stats + controls */
+  #topbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+    background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    min-height: 36px; }
+
+  .stat { font-size: 11px; color: var(--text2); font-family: var(--mono); }
+  .stat b { color: var(--text); }
+  .stat.gn b { color: var(--green); }
+  .stat.rd b { color: var(--red); }
+  .sep { width: 1px; height: 16px; background: var(--border); flex-shrink: 0; }
+
+  /* Controls bar */
+  #ctrlbar { display: flex; align-items: center; gap: 6px; padding: 4px 12px;
+    background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+
+  .cg { display: flex; align-items: center; gap: 3px; }
+  .cl { font-size: 10px; color: var(--text2); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-right: 2px; }
+
+  .cb { padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border);
+    background: transparent; color: var(--text2); font-size: 11px; cursor: pointer;
+    font-family: var(--mono); transition: all 0.1s; }
+  .cb:hover { border-color: var(--accent); color: var(--text); }
+  .cb.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  #nav { display: flex; gap: 3px; margin-left: auto; align-items: center; }
+  #tpos { font-size: 10px; color: var(--text2); font-family: var(--mono); margin-right: 4px; }
+  .nb { padding: 2px 10px; border-radius: 3px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: 11px; cursor: pointer;
+    font-family: var(--mono); }
+  .nb:hover { border-color: var(--accent); }
+  .nb:disabled { opacity: 0.25; cursor: default; }
+
+  /* Chart container */
+  #chart-wrap { flex: 1; position: relative; overflow: hidden; }
+  #plotly-chart { width: 100%; height: 100%; }
+
+  /* Info overlay */
+  #info { position: absolute; top: 8px; right: 8px; background: rgba(10,14,20,0.92);
+    border: 1px solid var(--border); border-radius: 4px; padding: 10px 12px;
+    min-width: 200px; backdrop-filter: blur(6px); z-index: 10; pointer-events: none;
+    font-size: 11px; display: none; }
+
+  .info-hdr { display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+    font-size: 12px; font-weight: 600; }
+  .badge { padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600; }
+  .badge-w { background: rgba(0,214,143,0.2); color: var(--green); border: 1px solid rgba(0,214,143,0.3); }
+  .badge-l { background: rgba(255,77,106,0.2); color: var(--red); border: 1px solid rgba(255,77,106,0.3); }
+  .badge-e { background: rgba(255,184,77,0.2); color: var(--yellow); border: 1px solid rgba(255,184,77,0.3); }
+
+  .ir { display: flex; justify-content: space-between; padding: 2px 0;
+    border-bottom: 1px solid rgba(30,42,58,0.3); gap: 12px; }
+  .ir:last-child { border-bottom: none; }
+  .ik { color: var(--text2); }
+  .iv { font-family: var(--mono); text-align: right; font-size: 10.5px; }
+  .iv.gn { color: var(--green); } .iv.rd { color: var(--red); }
+  .iv.bl { color: var(--blue); }
+
+  .isec { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
+
+  /* Loading / empty */
+  #loading { position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; background: var(--bg); z-index: 20; flex-direction: column;
+    gap: 10px; color: var(--text2); }
+  .spin { width: 24px; height: 24px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: sp 0.6s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+
+  /* Keyboard hints */
+  #hints { font-size: 9px; color: var(--text2); padding: 3px 12px;
+    background: var(--bg2); border-bottom: 1px solid var(--border); font-family: var(--mono); }
+  kbd { padding: 0 3px; border: 1px solid var(--border); border-radius: 2px;
+    background: var(--bg3); font-size: 9px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div id="sidebar-top">
+      <h1>FVG Trades</h1>
+      <input id="search" type="text" placeholder="search..." autocomplete="off">
+      <div id="filter-row">
+        <button class="fbtn on" data-f="all">All</button>
+        <button class="fbtn" data-f="win">Win</button>
+        <button class="fbtn" data-f="loss">Loss</button>
+        <button class="fbtn" data-f="eod">EOD</button>
+      </div>
+    </div>
+    <div id="tcount">Loading...</div>
+    <div id="tlist"></div>
+  </div>
+
+  <!-- CHART PANEL -->
+  <div id="chart-panel">
+    <div id="topbar"></div>
+    <div id="ctrlbar">
+      <div class="cg">
+        <span class="cl">tf</span>
+        <button class="cb" data-tf="1s">1s</button>
+        <button class="cb" data-tf="1min">1m</button>
+        <button class="cb on" data-tf="5min">5m</button>
+      </div>
+      <div class="sep"></div>
+      <div class="cg">
+        <button class="cb on" id="bw-trade">Window</button>
+        <button class="cb" id="bw-full">Full Day</button>
+      </div>
+      <div id="nav">
+        <span id="tpos"></span>
+        <button class="nb" id="bp" disabled>&larr;</button>
+        <button class="nb" id="bn" disabled>&rarr;</button>
+      </div>
+    </div>
+    <div id="hints">
+      <kbd>&larr;</kbd><kbd>&rarr;</kbd> navigate
+      <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> timeframe
+      <kbd>W</kbd> toggle window
+    </div>
+    <div id="chart-wrap">
+      <div id="loading"><div class="spin"></div><span>Loading...</span></div>
+      <div id="plotly-chart"></div>
+      <div id="info"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const S = { trades:[], filtered:[], idx:-1, filter:'all', tf:'5min', full:false, q:'', loading:false };
+const $=id=>document.getElementById(id);
+
+// ── Utils ──
+const fp = v => v!=null ? v.toFixed(2) : '—';
+const fpnl = v => { if(v==null) return '—'; return (v>=0?'+':'')+v.toFixed(0); };
+
+// ── Init ──
+async function init(){
+  const [mr,tr] = await Promise.all([fetch('/api/meta'),fetch('/api/trades')]);
+  const meta = await mr.json(), data = await tr.json();
+  S.trades = data.trades;
+  buildTopbar(meta);
+  applyFilter();
+  $('loading').style.display='none';
+  if(S.filtered.length>0) sel(0);
+}
+
+function buildTopbar(meta){
+  const s=meta.summary; if(!s) return;
+  const pnlCls = s.net_pnl>=0?'gn':'rd';
+  $('topbar').innerHTML = [
+    `<span class="stat">Trades: <b>${s.total_trades}</b></span>`,
+    `<span class="stat">WR: <b>${s.win_rate}%</b></span>`,
+    `<span class="stat ${pnlCls}">P&L: <b>$${s.net_pnl?.toLocaleString()}</b></span>`,
+    `<span class="stat">PF: <b>${s.profit_factor}</b></span>`,
+    `<span class="stat rd">DD: <b>$${s.max_drawdown?.toLocaleString()}</b></span>`,
+    '<span class="sep"></span>',
+    `<span class="stat">${meta.meta?.start_date} → ${meta.meta?.end_date}</span>`,
+  ].join('');
+}
+
+// ── Filter ──
+function applyFilter(){
+  const q=S.q.toLowerCase(), f=S.filter;
+  S.filtered = S.trades.filter(t=>{
+    if(f==='win' && !(t.exit_reason==='TP'||t.pnl_dollars>0)) return false;
+    if(f==='loss' && t.exit_reason!=='SL') return false;
+    if(f==='eod' && t.exit_reason!=='EOD') return false;
+    if(q){ const s=[t.date,t.side,t.setup,t.risk_range,t.time_period,String(t.id)].join(' ').toLowerCase();
+      if(!s.includes(q)) return false; }
+    return true;
+  });
+  renderList();
+  $('tcount').textContent=`${S.filtered.length} / ${S.trades.length}`;
+}
+
+function renderList(){
+  const el=$('tlist'); el.innerHTML='';
+  const f=document.createDocumentFragment();
+  S.filtered.forEach((t,i)=>{
+    const d=document.createElement('div');
+    d.className='ti'+(i===S.idx?' sel':'');
+    d.dataset.i=i;
+    const pc=t.pnl_dollars>0?'p+':t.pnl_dollars<0?'p-':'';
+    const dc=t.exit_reason==='EOD'?'td-e':t.pnl_dollars>=0?'td-w':'td-l';
+    const st=t.side==='BUY'?'<span class="stag stag-b">BUY</span>':'<span class="stag stag-s">SELL</span>';
+    d.innerHTML=`<div class="td ${dc}"></div><div class="tm">
+      <div class="tm-top"><span class="tm-id">#${t.id} ${t.date}</span><span class="tm-pnl ${pc}">${fpnl(t.pnl_dollars)}</span></div>
+      <div class="tm-bot">${st} ${t.time_period} ${t.risk_range} ${t.setup}</div></div>`;
+    d.onclick=()=>sel(i);
+    f.appendChild(d);
+  });
+  el.appendChild(f);
+  updNav();
+}
+
+function sel(i){
+  if(i<0||i>=S.filtered.length) return;
+  S.idx=i;
+  $('tlist').querySelectorAll('.ti').forEach((e,j)=>e.classList.toggle('sel',j===i));
+  const active=$('tlist').querySelector('.ti.sel');
+  if(active) active.scrollIntoView({block:'nearest',behavior:'smooth'});
+  loadChart();
+  updNav();
+}
+
+function updNav(){
+  $('bp').disabled=S.idx<=0;
+  $('bn').disabled=S.idx>=S.filtered.length-1;
+  $('tpos').textContent=S.idx>=0?`${S.idx+1}/${S.filtered.length}`:'';
+}
+
+// ── Chart ──
+let _abort=null;
+async function loadChart(){
+  if(S.idx<0) return;
+  const t=S.filtered[S.idx];
+  S.loading=true;
+  if(_abort) _abort.abort();
+  _abort=new AbortController();
+  try{
+    const ep=S.full?'fullday':'bars';
+    const url=`/api/trade/${t.id}/${ep}?tf=${S.tf}`;
+    const r=await fetch(url,{signal:_abort.signal});
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d=await r.json();
+    if(!_abort.signal.aborted) render(d.bars,d.trade);
+  }catch(e){ if(e.name!=='AbortError') console.error(e); }
+  finally{ S.loading=false; }
+}
+
+function render(bars,trade){
+  if(!bars||!bars.length) return;
+  const ts=bars.map(b=>b.t), o=bars.map(b=>b.o), h=bars.map(b=>b.h),
+        l=bars.map(b=>b.l), c=bars.map(b=>b.c);
+  const isBuy=trade.side==='BUY';
+  const x0=ts[0], x1=ts[ts.length-1];
+
+  // FVG zone boundaries
+  const zHigh = trade.zone_high || Math.max(trade.entry_price, trade.stop_price);
+  const zLow = trade.zone_low || Math.min(trade.entry_price, trade.stop_price);
+  const fT = trade.formation_time || ts[0];
+
+  const shapes=[], annots=[];
+  const pr=Math.max(...h)-Math.min(...l);
+  const off=pr*0.003;
+
+  // Time boundaries for horizontal lines (ET-aligned from API)
+  const eT0=trade.entry_time_et || trade.entry_time.replace(' ','T');
+  const xT0=trade.exit_time_et || trade.exit_time.replace(' ','T');
+
+  // FVG zone fill — from candle 2 (formation) to entry
+  shapes.push({type:'rect',xref:'x',yref:'y',x0:fT,x1:eT0,y0:zLow,y1:zHigh,
+    fillcolor:isBuy?'rgba(0,214,143,0.08)':'rgba(255,77,106,0.08)',
+    line:{color:isBuy?'rgba(0,214,143,0.25)':'rgba(255,77,106,0.25)',width:1}});
+
+  // Entry — from entry time to exit time
+  shapes.push({type:'line',xref:'x',yref:'y',x0:eT0,x1:xT0,
+    y0:trade.entry_price,y1:trade.entry_price,
+    line:{color:'#00d68f',width:1.5,dash:'dot'}});
+  annots.push({x:xT0,y:trade.entry_price,xref:'x',yref:'y',xanchor:'left',
+    text:` Entry ${fp(trade.entry_price)}`,
+    font:{size:10,color:'#00d68f',family:'IBM Plex Mono'},
+    showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+
+  // TP — from entry time to exit time
+  shapes.push({type:'line',xref:'x',yref:'y',x0:eT0,x1:xT0,
+    y0:trade.target_price,y1:trade.target_price,
+    line:{color:'#4da6ff',width:1.5,dash:'dash'}});
+  annots.push({x:xT0,y:trade.target_price,xref:'x',yref:'y',xanchor:'left',
+    text:` TP ${fp(trade.target_price)}`,
+    font:{size:10,color:'#4da6ff',family:'IBM Plex Mono'},
+    showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+
+  // SL — from entry time to exit time
+  shapes.push({type:'line',xref:'x',yref:'y',x0:eT0,x1:xT0,
+    y0:trade.stop_price,y1:trade.stop_price,
+    line:{color:'#ff4d6a',width:1.5,dash:'dash'}});
+  annots.push({x:xT0,y:trade.stop_price,xref:'x',yref:'y',xanchor:'left',
+    text:` SL ${fp(trade.stop_price)}`,
+    font:{size:10,color:'#ff4d6a',family:'IBM Plex Mono'},
+    showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+
+  // Entry arrow marker — points at entry price from above (SELL) or below (BUY)
+  const eT=eT0;
+  annots.push({x:eT,y:trade.entry_price,xref:'x',yref:'y',
+    text:'▶ ENTRY',
+    font:{size:9,color:'#00d68f',family:'IBM Plex Mono'},
+    showarrow:true,
+    arrowhead:2,arrowsize:1.2,arrowwidth:2,arrowcolor:'#00d68f',
+    ax:0,ay:isBuy?30:-30,
+    bgcolor:'rgba(10,14,20,0.85)',borderpad:2,bordercolor:'rgba(0,214,143,0.3)',borderwidth:1});
+
+  // Exit arrow marker — points at exit price from opposite side
+  const xT=xT0;
+  const isTP=trade.exit_reason==='TP', isSL=trade.exit_reason==='SL';
+  const xCol=isTP?'#4da6ff':isSL?'#ff4d6a':'#ffb84d';
+  // TP arrow from favorable side, SL arrow from adverse side
+  const exitAy = isTP ? (isBuy?-30:30) : (isBuy?30:-30);
+  annots.push({x:xT,y:trade.exit_price,xref:'x',yref:'y',
+    text:`▶ ${trade.exit_reason}`,
+    font:{size:9,color:xCol,family:'IBM Plex Mono'},
+    showarrow:true,
+    arrowhead:2,arrowsize:1.2,arrowwidth:2,arrowcolor:xCol,
+    ax:0,ay:exitAy,
+    bgcolor:'rgba(10,14,20,0.85)',borderpad:2,bordercolor:xCol+'4d',borderwidth:1});
+
+  // Excursion past TP — show max favorable level after TP hit
+  if(trade.tp_touched && trade.excursion_pts > 0){
+    const excLevel = isBuy
+      ? trade.target_price + trade.excursion_pts
+      : trade.target_price - trade.excursion_pts;
+    shapes.push({type:'line',xref:'x',yref:'y',x0:xT0,x1:ts[ts.length-1],
+      y0:excLevel,y1:excLevel,
+      line:{color:'rgba(255,184,77,0.5)',width:1,dash:'dashdot'}});
+    annots.push({x:ts[ts.length-1],y:excLevel,xref:'x',yref:'y',xanchor:'left',
+      text:` Max +${trade.excursion_pts.toFixed(1)}pt (${trade.excursion_r}R)`,
+      font:{size:9,color:'#ffb84d',family:'IBM Plex Mono'},
+      showarrow:false,bgcolor:'rgba(10,14,20,0.8)',borderpad:2});
+  }
+
+  const trace={type:'candlestick',x:ts,open:o,high:h,low:l,close:c,name:'NQ',
+    increasing:{line:{color:'#00d68f',width:1},fillcolor:'#00d68f'},
+    decreasing:{line:{color:'#ff4d6a',width:1},fillcolor:'#ff4d6a'},
+    whiskerwidth:0.3,showlegend:false};
+
+  const layout={
+    paper_bgcolor:'#0a0e14',plot_bgcolor:'#0a0e14',
+    font:{family:'IBM Plex Mono',color:'#6b7d94',size:10},
+    margin:{t:30,r:60,b:40,l:60},
+    xaxis:{type:'date',gridcolor:'#1a2030',linecolor:'#1e2a3a',
+      tickangle:-45,nticks:20,rangeslider:{visible:false}},
+    yaxis:{gridcolor:'#1a2030',linecolor:'#1e2a3a',side:'right'},
+    shapes:shapes,annotations:annots,
+    dragmode:'zoom',
+    title:{text:`#${trade.id} · ${trade.date} · ${trade.side} ${trade.setup} · ${trade.time_period} · ${trade.risk_range}`,
+      font:{size:11,color:'#6b7d94'},x:0,xanchor:'left',y:1,yanchor:'top',pad:{t:4,l:4}},
+  };
+
+  Plotly.react('plotly-chart',[trace],layout,{
+    displayModeBar:true,
+    modeBarButtonsToRemove:['autoScale2d','lasso2d','select2d','toImage'],
+    displaylogo:false,
+    responsive:true,
+    scrollZoom:true,
+  });
+
+  // Info panel
+  const info=$('info');
+  const badge=trade.exit_reason==='EOD'?'<span class="badge badge-e">EOD</span>':
+    trade.pnl_dollars>=0?'<span class="badge badge-w">WIN</span>':
+    '<span class="badge badge-l">LOSS</span>';
+  const pnlCls=trade.pnl_dollars>=0?'gn':'rd';
+  info.style.display='block';
+  info.innerHTML=`
+    <div class="info-hdr">Trade #${trade.id} ${badge}</div>
+    <div class="ir"><span class="ik">Side</span><span class="iv ${isBuy?'gn':'rd'}">${trade.side}</span></div>
+    <div class="ir"><span class="ik">Setup</span><span class="iv">${trade.setup}</span></div>
+    <div class="ir"><span class="ik">Period</span><span class="iv">${trade.time_period}</span></div>
+    <div class="ir"><span class="ik">Risk</span><span class="iv">${trade.risk_range} (${trade.risk_pts} pts)</span></div>
+    <div class="ir"><span class="ik">N</span><span class="iv">${trade.n_value}R</span></div>
+    <div class="ir"><span class="ik">Qty</span><span class="iv">${trade.contracts}</span></div>
+    <div class="isec"></div>
+    <div class="ir"><span class="ik">Entry</span><span class="iv gn">${fp(trade.entry_price)}</span></div>
+    <div class="ir"><span class="ik">TP</span><span class="iv bl">${fp(trade.target_price)}</span></div>
+    <div class="ir"><span class="ik">SL</span><span class="iv rd">${fp(trade.stop_price)}</span></div>
+    <div class="isec"></div>
+    <div class="ir"><span class="ik">Exit</span><span class="iv">${fp(trade.exit_price)} (${trade.exit_reason})</span></div>
+    <div class="ir"><span class="ik">P&L</span><span class="iv ${pnlCls}">${fpnl(trade.pnl_dollars)}</span></div>
+    ${trade.tp_touched && trade.excursion_pts > 0 ? `
+    <div class="isec"></div>
+    <div class="ir"><span class="ik">Past TP</span><span class="iv" style="color:#ffb84d">+${trade.excursion_pts.toFixed(1)} pts (${trade.excursion_r}R)</span></div>
+    <div class="ir"><span class="ik">$ left</span><span class="iv" style="color:#ffb84d">${fpnl(trade.excursion_pts * trade.contracts * 20)}</span></div>` : ''}`;
+}
+
+// ── Event Wiring ──
+document.querySelectorAll('.fbtn').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); S.filter=b.dataset.f; S.idx=-1; applyFilter();
+  if(S.filtered.length>0) sel(0);
+});
+
+$('search').oninput=e=>{ S.q=e.target.value; S.idx=-1; applyFilter();
+  if(S.filtered.length>0) sel(0); };
+
+document.querySelectorAll('[data-tf]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[data-tf]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); S.tf=b.dataset.tf; loadChart();
+});
+
+$('bw-trade').onclick=()=>{ S.full=false;
+  $('bw-trade').classList.add('on'); $('bw-full').classList.remove('on'); loadChart(); };
+$('bw-full').onclick=()=>{ S.full=true;
+  $('bw-full').classList.add('on'); $('bw-trade').classList.remove('on'); loadChart(); };
+
+$('bp').onclick=()=>sel(S.idx-1);
+$('bn').onclick=()=>sel(S.idx+1);
+
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') return;
+  if(e.key==='ArrowLeft'||e.key==='ArrowUp'){ e.preventDefault(); sel(S.idx-1); }
+  else if(e.key==='ArrowRight'||e.key==='ArrowDown'||e.key==='Enter'){ e.preventDefault(); sel(S.idx+1); }
+  else if(e.key==='1'){ document.querySelector('[data-tf="1s"]').click(); }
+  else if(e.key==='2'){ document.querySelector('[data-tf="1min"]').click(); }
+  else if(e.key==='3'){ document.querySelector('[data-tf="5min"]').click(); }
+  else if(e.key==='w'||e.key==='W'){ (S.full?$('bw-trade'):$('bw-full')).click(); }
+});
+
+// Auto-resize chart on window resize
+window.addEventListener('resize',()=>{ Plotly.Plots.resize('plotly-chart'); });
+
+init();
+</script>
+</body>
+</html>
