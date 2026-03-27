@@ -111,7 +111,7 @@ class OrderManager:
             totalQuantity=og.target_qty,
             lmtPrice=og.entry_price,
             orderId=og.ib_entry_order_id,
-            tif='GTC',
+            tif='DAY',
             transmit=False,
         )
 
@@ -122,7 +122,7 @@ class OrderManager:
             lmtPrice=og.target_price,
             orderId=og.ib_tp_order_id,
             parentId=og.ib_entry_order_id,
-            tif='GTC',
+            tif='DAY',
             transmit=False,
         )
 
@@ -133,7 +133,7 @@ class OrderManager:
             stopPrice=og.stop_price,
             orderId=og.ib_sl_order_id,
             parentId=og.ib_entry_order_id,
-            tif='GTC',
+            tif='DAY',
             transmit=True,  # Transmit the whole bracket
         )
 
