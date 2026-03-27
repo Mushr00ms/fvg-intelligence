@@ -37,7 +37,9 @@
     "updated_at": "2026-03-24T14:22:54.666655+00:00",
     "hard_gates": {
       "no_trade_after_dec": 19,
-      "description": "No trades from December 20 through end of year (low liquidity / holiday risk)"
+      "no_trade_witching_day": true,
+      "no_trade_witching_day_minus_1": true,
+      "description": "No trades from December 20 through end of year (low liquidity / holiday risk). Also skip quarterly witching day and prior weekday."
     }
   },
   "cells": [

@@ -36,6 +36,7 @@ from bot.execution.order_manager import OrderManager
 from bot.execution.position_tracker import get_account_balance, get_ib_open_orders, get_ib_positions
 from bot.alerts.telegram import TelegramAlerter
 from bot.db import TradeDB
+from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
 
 NY_TZ = pytz.timezone("America/New_York")
 CME_TZ = pytz.timezone("America/Chicago")  # CME exchange timezone
@@ -116,6 +117,9 @@ class BotEngine:
         self._detection_lock = asyncio.Lock()
         self._eod_tasks = []
         self._periodic_tasks = []
+        self._eod_cancel_done = False
+        self._eod_flatten_done = False
+        self._eod_cleanup_done = False
 
     async def run(self):
         """Main entry point. Runs the bot until session end or kill switch."""
@@ -142,6 +146,7 @@ class BotEngine:
         # 2. Connect to IB
         if not self.config.dry_run:
             await self.ib_conn.connect()
+            self._register_ib_error_handler()
 
             # 3. Resolve NQ front-month contract
             self._contract = await self._resolve_contract()
@@ -250,8 +255,9 @@ class BotEngine:
     async def _event_loop(self):
         """Run until shutdown signal, session end, or kill switch.
 
-        Uses ib.sleep() instead of asyncio.sleep() to ensure ib_async
-        processes its internal events (bar updates, fill callbacks, etc.).
+        EOD actions (cancel/flatten/cleanup) are triggered by NTP-corrected
+        wall clock checks every iteration, NOT by call_later — which uses
+        the monotonic clock and drifts on WSL2 over a full trading day.
         """
         while not self._shutdown:
             if self.daily_state and self.daily_state.kill_switch_active:
@@ -271,16 +277,47 @@ class BotEngine:
                 self.logger.log("bot_stop", reason="session_ended")
                 break
 
-            # Let asyncio process events (IB callbacks, timers, etc.)
+            # EOD actions — checked against NTP wall clock every tick
+            await self._check_eod_actions()
+
             # Yield to event loop — ib_async processes bar updates and fill
             # callbacks during asyncio.sleep via nest_asyncio patching
             await asyncio.sleep(0.1)
+
+    async def _check_eod_actions(self):
+        """Fire EOD actions based on NTP-corrected wall clock time."""
+        now_t = self.time_gates._now().time()
+
+        if not self._eod_cancel_done and now_t >= self.time_gates.cancel_unfilled:
+            self._eod_cancel_done = True
+            await self._eod_cancel()
+
+        if not self._eod_flatten_done and now_t >= self.time_gates.flatten_time:
+            self._eod_flatten_done = True
+            await self._eod_flatten()
+
+        if not self._eod_cleanup_done and now_t >= self.time_gates.session_end:
+            self._eod_cleanup_done = True
+            await self._eod_cleanup()
 
     def _get_current_price(self) -> float:
         """Get the most recent trade price from bar data."""
         if self._bars_5min and len(self._bars_5min) > 0:
             return self._bars_5min[-1].close
         return 0.0
+
+    def _calendar_gate_allows_entry(self):
+        """Check strategy hard calendar gates (e.g., witching filters)."""
+        strategy_meta = self.strategy.strategy.get("meta", {}) if self.strategy and self.strategy.strategy else {}
+        hard_gates = strategy_meta.get("hard_gates", {})
+        cfg = WitchingGateConfig(
+            no_trade_witching_day=bool(hard_gates.get("no_trade_witching_day", False)),
+            no_trade_witching_day_minus_1=bool(hard_gates.get("no_trade_witching_day_minus_1", False)),
+        )
+        blocked, reason = is_blocked_by_witching_gate(self.clock.now().date(), cfg)
+        if blocked:
+            return False, reason
+        return True, ""
 
     async def _on_order_resolved(self):
         """Called when any order resolves (TP/SL/cancel). Re-evaluates suspended orders."""
@@ -294,6 +331,39 @@ class BotEngine:
             if count > 0:
                 self.logger.log("suspended_reactivated", count=count)
                 self.state_mgr.save(self.daily_state)
+
+    def _register_ib_error_handler(self):
+        """Register global IB error handler for graceful logging of known benign codes."""
+        import logging
+
+        ib = self.ib_conn.ib
+        logger = self.logger
+
+        # Codes handled by the bot logger instead of raw ib_async output
+        _HANDLED_CODES = {
+            202: "oca_cancel",   # OCA sibling cancelled (TP cancelled when SL fills, etc.)
+            399: "ib_reprice",   # Bracket order self-trade prevention — informational
+        }
+
+        def _on_ib_error(reqId, errorCode, errorString, contract):
+            event_name = _HANDLED_CODES.get(errorCode)
+            if event_name:
+                logger.log(event_name, reqId=reqId, code=errorCode, msg=errorString.strip())
+
+        ib.errorEvent += _on_ib_error
+        self._ib_error_handler = _on_ib_error  # prevent GC
+
+        # Suppress raw ib_async log lines for these codes
+        class _BenignCodeFilter(logging.Filter):
+            def filter(self, record):
+                msg = record.getMessage()
+                for code in _HANDLED_CODES:
+                    if f"Error {code}" in msg or f"Warning {code}" in msg:
+                        return False
+                return True
+
+        for name in ("ib_async.ib", "ib_async.wrapper", "ib_async.client", "ib_async"):
+            logging.getLogger(name).addFilter(_BenignCodeFilter())
 
     async def _resolve_contract(self):
         """Resolve the NQ front-month futures contract."""
@@ -757,6 +827,13 @@ class BotEngine:
                             gate="startup", reason="reconciliation not complete")
             return
 
+        allowed, reason = self._calendar_gate_allows_entry()
+        if not allowed:
+            self.logger.log("setup_rejected", fvg_id=fvg.fvg_id, gate="calendar", reason=reason)
+            self.fvg_mgr.remove(fvg.fvg_id)
+            self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
+            return
+
         # Time gate check outside lock — pure clock check, no DailyState reads
         allowed, reason = self.time_gates.can_enter()
         if not allowed:
@@ -1004,22 +1081,15 @@ class BotEngine:
         self._shutdown = True
 
     def _schedule_eod(self):
-        """Schedule end-of-day actions."""
-        loop = asyncio.get_event_loop()
-        schedule = self.time_gates.get_eod_schedule()
+        """Log EOD schedule. Actions are fired by wall-clock checks in _check_eod_actions."""
+        schedule = [
+            (self.time_gates.cancel_unfilled, "cancel_unfilled"),
+            (self.time_gates.flatten_time, "flatten_all"),
+            (self.time_gates.session_end, "session_end"),
+        ]
+        for action_time, action_name in schedule:
+            self.logger.log("eod_scheduled", action=action_name, time=action_time.strftime("%H:%M"))
 
-        for delay, action in schedule:
-            if action == "cancel_unfilled":
-                handle = loop.call_later(delay, lambda: asyncio.ensure_future(self._eod_cancel()))
-            elif action == "flatten_all":
-                handle = loop.call_later(delay, lambda: asyncio.ensure_future(self._eod_flatten()))
-            elif action == "session_end":
-                handle = loop.call_later(delay, lambda: asyncio.ensure_future(self._eod_cleanup()))
-            else:
-                continue
-            self._eod_tasks.append(handle)
-
-        self.logger.log("eod_scheduled", actions=len(schedule))
 
     def _schedule_periodic(self):
         """Schedule periodic tasks (state save, strategy reload)."""
@@ -1197,9 +1267,7 @@ class BotEngine:
             except asyncio.CancelledError:
                 pass
 
-        # Cancel EOD tasks
-        for handle in self._eod_tasks:
-            handle.cancel()
+        # EOD tasks are now wall-clock driven (no call_later handles to cancel)
 
         # Cancel tick subscription
         if self._tick_subscription is not None and self.ib_conn.is_connected:

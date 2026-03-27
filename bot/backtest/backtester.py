@@ -33,6 +33,7 @@ sys.path.insert(0, _ROOT)
 from bot.backtest.us_holidays import is_trading_day
 from bot.strategy.fvg_detector import check_fvg_3bars, SESSION_INTERVALS, _assign_time_period
 from bot.strategy.trade_calculator import round_to_tick, TICK_SIZE, POINT_VALUE
+from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
 
 
 # ── Data Loading ──────────────────────────────────────────────────────────
@@ -713,7 +714,7 @@ def run_backtest(df_1s, strategy, config=None):
         _monthly_contracts += num_contracts
         return round(total_comm, 2)
     use_risk_tiers = config.get("risk_tiers", False)
-    margin_per_contract = config.get("margin_per_contract", 22924.0)  # NQ intraday maintenance
+    margin_per_contract = config.get("margin_per_contract", 33000.0)  # NQ intraday initial
     margin_buffer_pct = config.get("margin_buffer_pct", 0.05)
 
     # Load risk tier config from strategy meta if enabled
@@ -737,11 +738,19 @@ def run_backtest(df_1s, strategy, config=None):
     trade_counter = 0
     running_balance = balance
 
-    # Hard gate: no trading Dec 20 onwards (holiday low-liquidity)
-    no_trade_after_dec = strategy.get("meta", {}).get("hard_gates", {}).get("no_trade_after_dec")
+    # Hard gates from strategy metadata
+    hard_gates = strategy.get("meta", {}).get("hard_gates", {})
+    no_trade_after_dec = hard_gates.get("no_trade_after_dec")
+    witching_gate_cfg = WitchingGateConfig(
+        no_trade_witching_day=bool(hard_gates.get("no_trade_witching_day", False)),
+        no_trade_witching_day_minus_1=bool(hard_gates.get("no_trade_witching_day_minus_1", False)),
+    )
 
     for day in trading_days:
         if no_trade_after_dec and day.month == 12 and day.day >= (no_trade_after_dec + 1):
+            continue
+        blocked, _reason = is_blocked_by_witching_gate(day, witching_gate_cfg)
+        if blocked:
             continue
 
         day_df = _day_groups[day]
@@ -1376,8 +1385,8 @@ def main():
                         help="MIT entry: N ticks slippage on entry fill (0=limit, 1-4=realistic)")
     parser.add_argument("--tp-mode", default="fixed", choices=["fixed", "runner", "runner-be", "split"],
                         help="TP exit mode: fixed, runner, runner-be, or split ((n-1) at TP + 1 trailing runner)")
-    parser.add_argument("--margin", type=float, default=22924.0,
-                        help="Margin per contract (default: NQ intraday maintenance $22,924)")
+    parser.add_argument("--margin", type=float, default=33000.0,
+                        help="Margin per contract (default: NQ intraday initial $33,000)")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
     args = parser.parse_args()
