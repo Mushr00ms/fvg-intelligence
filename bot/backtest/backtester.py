@@ -168,6 +168,7 @@ class Trade:
     runner_contracts: int = 0
     excursion_pts: float = 0.0        # Max favorable move past TP
     excursion_r: float = 0.0          # Excursion in R-multiples
+    dd_note: str = ""                 # DD scaling note (margin cap, DD reduction, emergency halt)
 
 
 import numpy as np
@@ -913,10 +914,13 @@ def run_backtest(df_1s, strategy, config=None):
                     contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * POINT_VALUE)))
 
                 # Margin cap — can't exceed what balance supports
+                _dd_notes = []
+                _pre_margin_contracts = contracts
                 buffered_margin = margin_per_contract * (1.0 + margin_buffer_pct)
                 max_by_margin = math.floor(running_balance / buffered_margin)
                 if contracts > max_by_margin:
                     contracts = max(1, max_by_margin)
+                    _dd_notes.append(f"margin cap {_pre_margin_contracts}→{contracts} (bal ${running_balance:,.0f})")
 
                 # Drawdown scaling — reduce size as daily losses accumulate
                 if day_start_balance > 0:
@@ -930,7 +934,9 @@ def run_backtest(df_1s, strategy, config=None):
                     else:
                         dd_mult = 1.0
                     if dd_mult < 1.0:
+                        _pre_dd = contracts
                         contracts = max(1, math.floor(contracts * dd_mult))
+                        _dd_notes.append(f"DD scale {_pre_dd}→{contracts} (daily {dd_pct:+.1%})")
 
                 # Check entry fill:
                 # --slip: price must reach slipped level (1 tick into zone)
@@ -1019,6 +1025,7 @@ def run_backtest(df_1s, strategy, config=None):
                     runner_contracts=runner_contracts,
                     excursion_pts=excursion_pts,
                     excursion_r=excursion_r,
+                    dd_note=" | ".join(_dd_notes) if _dd_notes else "",
                 )
                 all_trades.append(trade)
 
@@ -1278,6 +1285,7 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
             "runner_exit_price": t.runner_exit_price,
             "tp_exit_contracts": t.tp_exit_contracts,
             "runner_contracts": t.runner_contracts,
+            "dd_note": t.dd_note,
         }
         for t in trades
     ]

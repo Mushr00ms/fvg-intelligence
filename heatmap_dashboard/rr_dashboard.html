@@ -2117,8 +2117,26 @@ function btRenderStats() {
     <div class="bt-stat"><span class="label">Avg Win</span><span class="value pos">$${Math.round(s.avg_win).toLocaleString()}</span></div>
     <div class="bt-stat"><span class="label">Avg Loss</span><span class="value neg">$${Math.round(s.avg_loss).toLocaleString()}</span></div>
     <div class="bt-stat"><span class="label">Trades/Day</span><span class="value">${s.trades_per_day}</span></div>
+    ${_btStreakStats()}
     ${_btAdjustedPnlStat()}
   `;
+}
+
+function _btStreakStats() {
+  const trades = _btResults.trades || [];
+  if (!trades.length) return '';
+  let winStreak = 0, loseStreak = 0, curWin = 0, curLose = 0;
+  for (const t of trades) {
+    if (t.exit_reason === 'TP' || (t.pnl_dollars != null && t.pnl_dollars > 0)) {
+      curWin++; curLose = 0;
+      if (curWin > winStreak) winStreak = curWin;
+    } else {
+      curLose++; curWin = 0;
+      if (curLose > loseStreak) loseStreak = curLose;
+    }
+  }
+  return `<div class="bt-stat"><span class="label">Best Streak</span><span class="value pos">${winStreak}W</span></div>` +
+         `<div class="bt-stat"><span class="label">Worst Streak</span><span class="value neg">${loseStreak}L</span></div>`;
 }
 
 function _btAdjustedPnlStat() {
@@ -2215,7 +2233,7 @@ function btRenderCellTable() {
   document.getElementById('bt-table-cells').innerHTML = html;
 }
 
-const BT_PAGE_SIZE = 50;
+const BT_PAGE_SIZE = 500;
 let _btTradePage = 0;
 let _btBalMap = {};
 
@@ -2257,6 +2275,7 @@ function btRenderTradePage() {
 
   // Vol filter stats
   const hasVol = allTrades.some(t => t.volume_at_entry != null);
+  const hasDdNote = allTrades.some(t => t.dd_note);
   const hiCount = hasVol ? allTrades.filter(t => t.volume_at_entry != null && t.volume_at_entry >= 30).length : 0;
   const loCount = hasVol ? allTrades.filter(t => t.volume_at_entry == null || t.volume_at_entry < 30).length : 0;
   const volFilterHtml = hasVol ? `
@@ -2276,6 +2295,7 @@ function btRenderTradePage() {
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
     <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
     ${hasVol ? '<th title="Tick volume at exact entry price (formation→exit). ★=SL/EOD trade (already in market)">Vol@Entry</th>' : ''}
+    ${hasDdNote ? '<th>DD Note</th>' : ''}
   </tr></thead><tbody>`;
   page.forEach((t, pi) => {
     const i = start + pi;
@@ -2294,13 +2314,15 @@ function btRenderTradePage() {
         else durStr = Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
       }
     }
+    const ddTag = t.dd_note ? `<span style="color:#ff9f43;font-size:9px" title="${t.dd_note}">DD</span>` : '';
     html += `<tr class="${cls}" data-trade-id="${t.id}" onclick="btSelectTrade(${t.id})" style="cursor:pointer"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
       <td>${t.fvg_type}</td><td>${setup}</td><td>${t.side}</td>
       <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
-      <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts}</td>
+      <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts} ${ddTag}</td>
       <td>${t.exit_price}</td><td>${t.exit_reason}</td><td>${durStr}</td>
       <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td>
-      ${hasVol ? _btVolCell(t.volume_at_entry, t.exit_reason) : ''}</tr>`;
+      ${hasVol ? _btVolCell(t.volume_at_entry, t.exit_reason) : ''}
+      ${hasDdNote ? `<td style="font-size:9px;color:#ff9f43;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.dd_note || ''}">${t.dd_note || ''}</td>` : ''}</tr>`;
   });
   html += '</tbody></table></div>';
   document.getElementById('bt-table-trades').innerHTML = html;

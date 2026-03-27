@@ -121,11 +121,14 @@ def load_day_ticks(date_str: str, extract_dir: str):
 
     compact = date_str.replace("-", "")
     path = os.path.join(extract_dir, f"glbx-mdp3-{compact}.trades.dbn.zst")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
 
-    store = db.DBNStore.from_file(path)
-    df = store.to_df()
+    try:
+        store = db.DBNStore.from_file(path)
+        df = store.to_df()
+    except (ValueError, Exception):
+        return None
 
     if df.empty:
         return None
