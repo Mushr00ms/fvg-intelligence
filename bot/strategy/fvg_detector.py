@@ -19,6 +19,17 @@ NY_TZ = pytz.timezone("America/New_York")
 # Default minimum FVG size in points (NQ)
 DEFAULT_MIN_SIZE = 0.25
 
+RTH_START = time(9, 30)
+
+
+def _bar_in_rth(bar):
+    """Return True if bar's timestamp is at or after RTH start (09:30 ET)."""
+    d = bar["date"]
+    if isinstance(d, str):
+        d = datetime.fromisoformat(d)
+    t = d.time() if hasattr(d, "time") else d
+    return t >= RTH_START
+
 
 def check_fvg_3bars(bar1, bar2, bar3, min_size=DEFAULT_MIN_SIZE):
     """
@@ -159,6 +170,10 @@ class ActiveFVGManager:
         bar2 = self._recent_bars[-2]
         bar3 = self._recent_bars[-1]
 
+        # All 3 bars must be within RTH — prevents overnight gaps triggering as FVGs
+        if not _bar_in_rth(bar1):
+            return None
+
         fvg = check_fvg_3bars(bar1, bar2, bar3, self._min_size)
         return self._finalize_fvg(fvg, bar3)
 
@@ -180,6 +195,10 @@ class ActiveFVGManager:
 
         bar1 = self._recent_bars[-2]
         bar2 = self._recent_bars[-1]
+
+        # All 3 bars must be within RTH — prevents overnight gaps triggering as FVGs
+        if not _bar_in_rth(bar1):
+            return None
 
         fvg = check_fvg_3bars(bar1, bar2, bar3, self._min_size)
         return self._finalize_fvg(fvg, bar3)
