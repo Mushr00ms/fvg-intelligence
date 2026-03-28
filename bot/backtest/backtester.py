@@ -725,8 +725,24 @@ def run_backtest(df_1s, strategy, config=None):
     _large_buckets = set(_risk_rules.get("large_buckets", []))
     _large_risk = _risk_rules.get("large_risk_pct", risk_pct)
 
+    # Anti-martingale streak sizing — ramp risk on consecutive wins, reset on loss
+    use_streak = config.get("streak", False)
+    _streak_base = config.get("streak_base", 0.005)
+    _streak_mult = config.get("streak_mult", 1.5)
+    _streak_max = config.get("streak_max", 0.04)
+    _streak_risk = _streak_base  # Current risk level — persists across days
+
+    # Tier reset: after loss → all buckets drop to small_risk, first win → restore tiers
+    use_tier_reset = config.get("tier_reset", False) and use_risk_tiers
+    _tier_reduced = False  # Persists across days
+
     strategy_lookup = build_strategy_lookup(strategy)
+    sizing_label = "streak" if use_streak else ("tier_reset" if use_tier_reset else ("risk_tiers" if use_risk_tiers else "uniform"))
     print(f"Strategy: {strategy.get('meta', {}).get('name', '?')} ({len(strategy_lookup)} cells)")
+    if use_streak:
+        print(f"Streak sizing: base={_streak_base:.2%} mult={_streak_mult}x max={_streak_max:.1%}")
+    if use_tier_reset:
+        print(f"Tier reset: loss→{_small_risk:.2%} all buckets, first win→restore tiers")
 
     # Group 1s bars by trading day (pre-group once, avoids O(N) scan per day)
     df_1s['trade_date'] = df_1s['date'].dt.date
@@ -904,26 +920,35 @@ def run_backtest(df_1s, strategy, config=None):
                 else:
                     tp_trigger = target
 
-                # Position size — use risk tiers if enabled
-                if use_risk_tiers:
-                    if risk_range in _large_buckets:
+                # Position size — streak, risk tiers, or uniform
+                _dd_notes = []
+                if use_streak:
+                    _rpct = _streak_risk
+                    risk_budget = running_balance * _rpct
+                    _dd_notes.append(f"streak {_rpct:.2%}")
+                elif use_risk_tiers:
+                    if _tier_reduced:
+                        _rpct = _small_risk
+                    elif risk_range in _large_buckets:
                         _rpct = _large_risk
                     elif risk_range in _small_buckets:
                         _rpct = _small_risk
                     else:
                         _rpct = _medium_risk
                     risk_budget = running_balance * _rpct
+                    if _tier_reduced:
+                        _dd_notes.append(f"tier reduced→{_rpct:.2%}")
                 else:
-                    risk_budget = running_balance * risk_pct
+                    _rpct = risk_pct
+                    risk_budget = running_balance * _rpct
                 contracts = max(1, math.floor(risk_budget / (risk_pts * POINT_VALUE)))
 
                 # Per-trade risk gate — use same rate that sized the position
-                _gate_pct = _rpct if use_risk_tiers else risk_pct
+                _gate_pct = _rpct if (use_risk_tiers or use_streak) else risk_pct
                 if risk_pts * POINT_VALUE * contracts > running_balance * _gate_pct * 1.01:
                     contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * POINT_VALUE)))
 
                 # Margin cap — can't exceed what balance supports
-                _dd_notes = []
                 _pre_margin_contracts = contracts
                 buffered_margin = margin_per_contract * (1.0 + margin_buffer_pct)
                 max_by_margin = math.floor(running_balance / buffered_margin)
@@ -1041,6 +1066,25 @@ def run_backtest(df_1s, strategy, config=None):
                 running_balance += pnl_dollars
                 daily_trades += 1
                 daily_pnl += pnl_dollars
+
+                # Tier reset: loss → reduce all to small, win → restore tiers
+                if use_tier_reset:
+                    if is_win:
+                        _tier_reduced = False
+                    else:
+                        _tier_reduced = True
+
+                # Streak sizing: ramp on win, reset on loss (persists across days)
+                if use_streak:
+                    if is_win:
+                        _prev_streak = _streak_risk
+                        _streak_risk = min(_streak_risk * _streak_mult, _streak_max)
+                        if _streak_risk != _prev_streak:
+                            _dd_notes.append(f"streak {_prev_streak:.2%}→{_streak_risk:.2%}")
+                    else:
+                        if _streak_risk != _streak_base:
+                            _dd_notes.append(f"streak reset→{_streak_base:.2%}")
+                        _streak_risk = _streak_base
 
                 # Emergency halt: -10% of day-start balance → catastrophic protection
                 if not emergency_halt and day_start_balance > 0 and daily_pnl <= -(day_start_balance * 0.10):
@@ -1385,6 +1429,16 @@ def main():
                         help="MIT entry: N ticks slippage on entry fill (0=limit, 1-4=realistic)")
     parser.add_argument("--tp-mode", default="fixed", choices=["fixed", "runner", "runner-be", "split"],
                         help="TP exit mode: fixed, runner, runner-be, or split ((n-1) at TP + 1 trailing runner)")
+    parser.add_argument("--tier-reset", action="store_true",
+                        help="After loss, drop all tiers to small risk; first win restores (requires --risk-tiers)")
+    parser.add_argument("--streak", action="store_true",
+                        help="Anti-martingale streak sizing (ramp on wins, reset on loss)")
+    parser.add_argument("--streak-base", type=float, default=0.005,
+                        help="Streak base risk pct (default: 0.005 = 0.5%%)")
+    parser.add_argument("--streak-mult", type=float, default=1.5,
+                        help="Streak win multiplier (default: 1.5)")
+    parser.add_argument("--streak-max", type=float, default=0.04,
+                        help="Streak max risk pct cap (default: 0.04 = 4%%)")
     parser.add_argument("--margin", type=float, default=33000.0,
                         help="Margin per contract (default: NQ intraday initial $33,000)")
     parser.add_argument("--output", help="Export trades to CSV")
@@ -1413,6 +1467,11 @@ def main():
         "mit_entry_ticks": args.mit_entry,
         "tp_mode": args.tp_mode,
         "margin_per_contract": args.margin,
+        "tier_reset": args.tier_reset,
+        "streak": args.streak,
+        "streak_base": args.streak_base,
+        "streak_mult": args.streak_mult,
+        "streak_max": args.streak_max,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 
@@ -1433,6 +1492,13 @@ def main():
         if args.risk_tiers:
             results["meta"]["risk_tiers"] = strategy.get("meta", {}).get("risk_rules", {})
         results["meta"]["margin_per_contract"] = args.margin
+        if args.streak:
+            results["meta"]["sizing"] = "streak"
+            results["meta"]["streak"] = {
+                "base_pct": args.streak_base,
+                "multiplier": args.streak_mult,
+                "max_pct": args.streak_max,
+            }
         os.makedirs(os.path.dirname(args.json_output) or '.', exist_ok=True)
         with open(args.json_output, 'w') as f:
             json.dump(results, f, indent=2)
