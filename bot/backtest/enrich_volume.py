@@ -205,6 +205,75 @@ def compute_volume_first_touch(df: pd.DataFrame, symbol: str,
     return int(sizes[mask].sum())
 
 
+def compute_stop_slippage(df: pd.DataFrame, symbol: str,
+                          stop_price: float, side: str,
+                          exit_utc: datetime) -> dict | None:
+    """Find the actual trade price at/through the stop level near exit time.
+
+    Scans a 2-second window around the backtester's exit_time for the first
+    trade that would trigger the stop order. Returns the real fill price
+    and slippage vs the stop level.
+
+    Args:
+        df: day's tick DataFrame (all symbols)
+        symbol: NQ contract symbol
+        stop_price: the stop order price
+        side: "BUY" or "SELL" (the position side, not the stop side)
+        exit_utc: backtester's exit timestamp (UTC-aware)
+
+    Returns:
+        dict with actual_stop_price, slippage_pts, slippage_dollars_per_contract
+        None if no matching ticks found (data gap)
+    """
+    df_sym = df[df["symbol"] == symbol]
+    if df_sym.empty:
+        return None
+
+    prices = df_sym["price"].to_numpy(dtype=np.float64)
+    ts_ns = df_sym["ts_event"].astype("int64").to_numpy()
+
+    # Search in a 2-second window around exit time
+    t_center_ns = pd.Timestamp(exit_utc).value
+    t_start_ns = t_center_ns - 2_000_000_000   # -2 seconds
+    t_end_ns = t_center_ns + 2_000_000_000     # +2 seconds
+
+    time_mask = (ts_ns >= t_start_ns) & (ts_ns <= t_end_ns)
+    window_prices = prices[time_mask]
+    window_ts = ts_ns[time_mask]
+
+    if len(window_prices) == 0:
+        return None
+
+    # Find first trade that triggers the stop
+    # BUY position → SL is a SELL stop → triggers when price <= stop_price
+    # SELL position → SL is a BUY stop → triggers when price >= stop_price
+    if side == "BUY":
+        trigger_mask = window_prices <= stop_price
+    else:
+        trigger_mask = window_prices >= stop_price
+
+    if not trigger_mask.any():
+        # Stop level not reached in window — fill at exact stop (no slippage)
+        return {"actual_stop_price": stop_price, "slippage_pts": 0.0,
+                "slippage_per_contract": 0.0}
+
+    # First triggering trade
+    first_idx = np.argmax(trigger_mask)
+    actual_price = float(window_prices[first_idx])
+
+    if side == "BUY":
+        slippage = stop_price - actual_price  # positive = worse (filled below stop)
+    else:
+        slippage = actual_price - stop_price  # positive = worse (filled above stop)
+
+    slippage = round(slippage, 2)
+    return {
+        "actual_stop_price": actual_price,
+        "slippage_pts": slippage,
+        "slippage_per_contract": round(slippage * 20.0, 2),  # $20/point for NQ
+    }
+
+
 def print_summary(trades: list):
     """Print distribution of volume metrics across enriched trades."""
     enriched = [t for t in trades if t.get("volume_at_entry") is not None]
@@ -280,6 +349,55 @@ def print_summary(trades: list):
         print(f"  High-confidence ({len(hi_conf)}):     ${sum(t['pnl_dollars'] for t in hi_conf):>10,.0f}")
         print(f"  Low-vol raw ({len(lo_conf)}):          ${lo_raw:>10,.0f}")
         print(f"  Low-vol adjusted ({len(lo_conf)}):     ${lo_adj:>10,.0f}")
+        print(f"───────────────────────────────────────────────────────────────────")
+
+    # ── Stop Slippage ──
+    sl_enriched = [t for t in trades if t.get("stop_slippage_pts") is not None]
+    if sl_enriched:
+        slipped = [t for t in sl_enriched if t["stop_slippage_pts"] > 0]
+        zero_slip = [t for t in sl_enriched if t["stop_slippage_pts"] == 0]
+        total_sl = len(sl_enriched)
+        raw_sl_pnl = sum(t["pnl_dollars"] for t in sl_enriched)
+        adj_sl_pnl = sum(t.get("slippage_adjusted_pnl", t["pnl_dollars"]) for t in sl_enriched)
+        total_slip_cost = sum(
+            t["stop_slippage_pts"] * t["contracts"] * 20.0
+            for t in slipped
+        )
+
+        print(f"\n── Stop Slippage (Databento tick-accurate) ────────────────────────")
+        print(f"  SL trades analyzed:       {total_sl}")
+        print(f"  Zero slippage:            {len(zero_slip)} ({len(zero_slip)/total_sl*100:.0f}%)")
+        print(f"  Slipped:                  {len(slipped)} ({len(slipped)/total_sl*100:.0f}%)")
+        if slipped:
+            slips = np.array([t["stop_slippage_pts"] for t in slipped])
+            print(f"  Slip (pts):  min={slips.min():.2f}  med={np.median(slips):.2f}  "
+                  f"avg={slips.mean():.2f}  p90={np.percentile(slips,90):.2f}  max={slips.max():.2f}")
+
+            # By contract count
+            from collections import defaultdict as _dd
+            by_qty = _dd(list)
+            for t in slipped:
+                by_qty[t["contracts"]].append(t["stop_slippage_pts"])
+            print(f"\n  {'Qty':>4s}  {'Slipped':>7s}  {'Total':>5s}  {'Rate':>5s}  {'AvgSlip':>7s}  {'MaxSlip':>7s}  {'Cost$':>8s}")
+            all_by_qty = _dd(int)
+            for t in sl_enriched:
+                all_by_qty[t["contracts"]] += 1
+            for qty in sorted(by_qty.keys()):
+                s = np.array(by_qty[qty])
+                total_for_qty = all_by_qty[qty]
+                cost = sum(v * qty * 20 for v in s)
+                print(f"  {qty:>4d}  {len(s):>5d}    {total_for_qty:>5d}  {len(s)/total_for_qty*100:>4.0f}%  "
+                      f"{s.mean():>6.2f}  {s.max():>6.2f}  ${cost:>7,.0f}")
+
+        print(f"\n  Backtest SL P&L:          ${raw_sl_pnl:>10,.0f}")
+        print(f"  After slippage:           ${adj_sl_pnl:>10,.0f}")
+        print(f"  Total slippage cost:      ${total_slip_cost:>10,.0f}")
+
+        # Full P&L impact
+        all_pnl = sum(t["pnl_dollars"] for t in trades)
+        print(f"\n  Backtest total P&L:       ${all_pnl:>10,.0f}")
+        print(f"  Slippage-adjusted total:  ${all_pnl - total_slip_cost:>10,.0f}")
+        print(f"  Slippage impact:          ${-total_slip_cost:>10,.0f} ({total_slip_cost/abs(all_pnl)*100:.1f}% of P&L)")
         print(f"───────────────────────────────────────────────────────────────────")
 
 
@@ -436,6 +554,21 @@ def main():
 
             trade["fill_probability"] = fill_prob
             trade["adjusted_pnl_dollars"] = round(trade["pnl_dollars"] * fill_prob, 2)
+
+            # Stop slippage: for SL exits, find actual tick price at stop level
+            if trade.get("exit_reason") == "SL":
+                sl_result = compute_stop_slippage(
+                    df, used_sym,
+                    trade["stop_price"], trade["side"],
+                    exit_utc,
+                )
+                if sl_result:
+                    trade["actual_stop_price"] = sl_result["actual_stop_price"]
+                    trade["stop_slippage_pts"] = sl_result["slippage_pts"]
+                    trade["stop_slippage_per_ct"] = sl_result["slippage_per_contract"]
+                    # Adjusted P&L accounting for stop slippage
+                    slip_cost = sl_result["slippage_pts"] * trade["contracts"] * 20.0
+                    trade["slippage_adjusted_pnl"] = round(trade["pnl_dollars"] - slip_cost, 2)
 
             suffix = f"→{used_sym}" if used_sym != symbol else ""
             day_results.append(f"{vol_total}({vol_ft}ft){suffix}")
