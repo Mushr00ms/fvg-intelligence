@@ -178,6 +178,9 @@ _EVENT_COLORS = {
     "order_rejected": "\033[91m",
     "flatten": "\033[91m",
     "setup_rejected": "\033[33m",
+    # Dim — benign IB noise
+    "oca_cancel": "\033[90m",
+    "ib_reprice": "\033[90m",
     # Cyan — system
     "bot_stop": "\033[96m",
     "daily_summary": "\033[96m",
