@@ -583,6 +583,8 @@ class OrderManager:
 
     def _on_tp_fill(self, trade, og, daily_state):
         """Take profit filled — log P&L, commissions, trade metrics."""
+        if og.close_reason:
+            return  # Already processed — guard against duplicate ib_async callbacks
         # Cancel any unfilled entry remainder + kill partial fill timer
         self._cleanup_entry_remainder(og)
 
@@ -670,6 +672,8 @@ class OrderManager:
 
     def _on_sl_fill(self, trade, og, daily_state):
         """Stop loss filled — log P&L, slippage, commissions."""
+        if og.close_reason:
+            return  # Already processed — guard against duplicate ib_async callbacks
         # Cancel any unfilled entry remainder + kill partial fill timer
         self._cleanup_entry_remainder(og)
 
