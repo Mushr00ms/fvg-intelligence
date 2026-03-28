@@ -44,9 +44,14 @@ class MarginTracker:
         return self._intraday_start <= t < self._intraday_end
 
     def _time_aware_fallback(self) -> float:
-        """Return the correct fallback margin for current time of day."""
+        """Return the correct fallback margin for current time of day.
+
+        Uses INITIAL margin (not maintenance) because this is used to check
+        whether we can OPEN new positions. Maintenance is lower and would
+        allow orders that IB rejects.
+        """
         if self._is_intraday():
-            return self._config.margin_intraday_maintenance
+            return self._config.margin_intraday_initial
         return self._config.margin_overnight_initial
 
     async def initialize(self) -> float:
@@ -64,7 +69,10 @@ class MarginTracker:
             await self._fetch_margin_per_contract()
 
     async def _fetch_margin_per_contract(self) -> float:
-        """Use ib.whatIfOrderAsync to get initMarginChange for 1 contract."""
+        """Use ib.whatIfOrderAsync to get initMarginChange for 1 contract.
+
+        Retries once on invalid result (IB sometimes returns 0 transiently).
+        """
         fallback = self._time_aware_fallback()
 
         if self._config.dry_run or not self._conn.is_connected:
@@ -78,39 +86,58 @@ class MarginTracker:
             )
             return fallback
 
-        try:
-            from ib_async import MarketOrder
+        import asyncio
+        from ib_async import MarketOrder
 
-            ib = self._conn.ib
-            probe_order = MarketOrder(action="BUY", totalQuantity=1)
-            what_if = await ib.whatIfOrderAsync(self._contract, probe_order)
+        for attempt in range(2):
+            try:
+                ib = self._conn.ib
+                probe_order = MarketOrder(action="BUY", totalQuantity=1)
+                what_if = await ib.whatIfOrderAsync(self._contract, probe_order)
 
-            # whatIfOrder returns an OrderState with initMarginChange
-            init_margin_str = getattr(what_if, "initMarginChange", "0")
-            init_margin = float(init_margin_str) if init_margin_str else 0.0
+                # whatIfOrder returns an OrderState with initMarginChange
+                init_margin_str = getattr(what_if, "initMarginChange", "0")
+                init_margin = float(init_margin_str) if init_margin_str else 0.0
 
-            if init_margin <= 0:
+                if init_margin > 0:
+                    self._margin_per_contract = init_margin
+                    self._logger.log(
+                        "margin_fetched",
+                        mode="live",
+                        per_contract=round(init_margin, 2),
+                    )
+                    self._last_fetch_time = self._now()
+                    return self._margin_per_contract
+
+                # Invalid result — retry once after a brief pause
+                if attempt == 0:
+                    self._logger.log(
+                        "margin_fetch_invalid",
+                        raw_value=init_margin_str,
+                        attempt=1,
+                        retrying=True,
+                    )
+                    await asyncio.sleep(1.0)
+                    continue
+
+                # Second attempt also failed
                 self._logger.log(
                     "margin_fetch_invalid",
                     raw_value=init_margin_str,
+                    attempt=2,
+                    using_fallback=True,
+                    fallback=fallback,
+                )
+                self._margin_per_contract = fallback
+
+            except Exception as e:
+                self._logger.log(
+                    "margin_fetch_error",
+                    error=str(e),
+                    attempt=attempt + 1,
                     using_fallback=True,
                 )
                 self._margin_per_contract = fallback
-            else:
-                self._margin_per_contract = init_margin
-                self._logger.log(
-                    "margin_fetched",
-                    mode="live",
-                    per_contract=round(init_margin, 2),
-                )
-
-        except Exception as e:
-            self._logger.log(
-                "margin_fetch_error",
-                error=str(e),
-                using_fallback=True,
-            )
-            self._margin_per_contract = fallback
 
         self._last_fetch_time = self._now()
         return self._margin_per_contract

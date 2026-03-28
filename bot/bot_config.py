@@ -57,10 +57,10 @@ class BotConfig:
     session_end: str = "16:00"
     # Backtest parity defaults:
     # - no new entries at/after 15:45
-    # - pending entries remain valid until session end
+    # - unfilled entries cancelled at same time (no reason to rest past cutoff)
     # - open positions flatten at session end
     last_entry_time: str = "15:45"
-    cancel_unfilled_time: str = "16:00"
+    cancel_unfilled_time: str = "15:45"
     flatten_time: str = "16:00"
 
     # Operational Modes
@@ -86,16 +86,21 @@ class BotConfig:
     auto_launch_bridge: bool = True  # Auto-launch bridge via python.exe
 
     # Margin Management — time-aware (IB intraday vs overnight)
-    # Intraday maintenance applies during RTH: 09:30–16:00 ET (08:30–15:00 CT)
+    # Intraday initial applies during RTH for NEW positions (used as fallback when whatIfOrder fails)
+    # Intraday maintenance is what IB requires to HOLD existing positions (lower than initial)
     # Overnight initial applies outside RTH (we're always flat before this)
-    margin_intraday_maintenance: float = 22924.0   # NQ intraday maintenance margin
+    margin_intraday_initial: float = 33000.0      # NQ intraday initial margin (for new orders)
+    margin_intraday_maintenance: float = 22924.0   # NQ intraday maintenance margin (holding)
     margin_overnight_initial: float = 46373.0      # NQ overnight initial margin
-    margin_fallback_per_contract: float = 22924.0  # Ultimate fallback (= intraday maintenance)
+    margin_fallback_per_contract: float = 33000.0  # Ultimate fallback (= intraday initial)
     margin_intraday_start: str = "09:30"           # ET — intraday margin begins
     margin_intraday_end: str = "16:00"             # ET — intraday margin ends (15 min before RTH close)
     margin_buffer_pct: float = 0.05                # 5% safety buffer above required margin
     margin_refresh_interval: int = 1800            # Re-fetch margin every 30 minutes
     margin_management_enabled: bool = True         # Enable intelligent margin priority system
+
+    # TWS Market Data Replay
+    replay_mode: bool = False        # Data-only replay: local fill sim, no IB paper orders
 
     # Connection Recovery
     max_disconnect_minutes: int = 5  # Flatten if disconnected longer than this
@@ -180,6 +185,7 @@ _ENV_MAP = {
     "BOT_STRATEGY_DIR": ("strategy_dir", str),
     "BOT_STATE_DIR": ("state_dir", str),
     "BOT_LOG_DIR": ("log_dir", str),
+    "BOT_MARGIN_INTRADAY_INITIAL": ("margin_intraday_initial", float),
     "BOT_MARGIN_INTRADAY": ("margin_intraday_maintenance", float),
     "BOT_MARGIN_OVERNIGHT": ("margin_overnight_initial", float),
     "BOT_MARGIN_FALLBACK": ("margin_fallback_per_contract", float),

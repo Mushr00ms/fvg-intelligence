@@ -176,6 +176,7 @@ def _make_config(**overrides):
         point_value=20.0,
         tick_size=0.25,
         max_trade_loss_pct=0.015,
+        margin_intraday_initial=25000.0,
         margin_intraday_maintenance=25000.0,
         margin_overnight_initial=50000.0,
         margin_fallback_per_contract=25000.0,
@@ -376,7 +377,7 @@ class TestStateMigration:
 
 class TestMarginTracker:
     def test_dry_run_uses_intraday_fallback(self):
-        config = _make_config(dry_run=True, margin_intraday_maintenance=30000.0)
+        config = _make_config(dry_run=True, margin_intraday_initial=30000.0)
         logger = _CaptureLogger()
         # Clock at 10:30 ET = intraday window
         tracker = MarginTracker(
@@ -449,7 +450,7 @@ class TestMarginTracker:
         assert tracker.can_afford(3, 60000.0) is False
 
     def test_margin_required_for(self):
-        config = _make_config(dry_run=True, margin_intraday_maintenance=33000.0)
+        config = _make_config(dry_run=True, margin_intraday_initial=33000.0)
         tracker = MarginTracker(
             _FakeIBConn(), _FakeContract(), _CaptureLogger(), config,
             clock=_FakeClock(10, 30),
@@ -477,18 +478,19 @@ class TestMarginTracker:
     def test_intraday_fallback_during_rth(self):
         config = _make_config(
             dry_run=True,
+            margin_intraday_initial=33000.0,
             margin_intraday_maintenance=22924.0,
             margin_overnight_initial=46373.0,
         )
-        # Clock at 12:00 ET = inside intraday window
+        # Clock at 12:00 ET = inside intraday window → uses intraday initial
         tracker = MarginTracker(
             _FakeIBConn(), _FakeContract(), _CaptureLogger(), config,
             clock=_FakeClock(12, 0),
         )
         margin = asyncio.new_event_loop().run_until_complete(tracker.initialize())
 
-        assert margin == 22924.0
-        assert tracker.margin_per_contract == 22924.0
+        assert margin == 33000.0
+        assert tracker.margin_per_contract == 33000.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1031,9 +1033,10 @@ class TestConfigFields:
             log_dir=tempfile.mkdtemp(),
             strategy_dir=tempfile.mkdtemp(),
         )
+        assert config.margin_intraday_initial == 33000.0
         assert config.margin_intraday_maintenance == 22924.0
         assert config.margin_overnight_initial == 46373.0
-        assert config.margin_fallback_per_contract == 22924.0
+        assert config.margin_fallback_per_contract == 33000.0
         assert config.margin_intraday_start == "09:30"
         assert config.margin_intraday_end == "16:00"
         assert config.margin_buffer_pct == 0.05

@@ -13,5 +13,5 @@ def test_session_defaults_match_backtest(tmp_path):
     assert cfg.session_start == "09:30"
     assert cfg.session_end == "16:00"
     assert cfg.last_entry_time == "15:45"
-    assert cfg.cancel_unfilled_time == "16:00"
+    assert cfg.cancel_unfilled_time == "15:45"  # cancel at entry cutoff
     assert cfg.flatten_time == "16:00"
