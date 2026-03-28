@@ -13,6 +13,7 @@ bot/data/
 bot/bot_state/
 bot/logs/
 bot/backtest/results/
+bot/replay/results*/
 *.db
 
 # Heatmap data (generated)
