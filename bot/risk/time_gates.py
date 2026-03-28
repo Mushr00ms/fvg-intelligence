@@ -23,9 +23,9 @@ class TimeGates:
     def __init__(self, config, clock=None):
         self.session_start = _parse_time(config.session_start)      # 09:30
         self.session_end = _parse_time(config.session_end)           # 16:00
-        self.last_entry = _parse_time(config.last_entry_time)        # 15:30
-        self.cancel_unfilled = _parse_time(config.cancel_unfilled_time)  # 15:50
-        self.flatten_time = _parse_time(config.flatten_time)         # 15:55
+        self.last_entry = _parse_time(config.last_entry_time)        # 15:45
+        self.cancel_unfilled = _parse_time(config.cancel_unfilled_time)  # 15:45
+        self.flatten_time = _parse_time(config.flatten_time)         # 16:00
         self._clock = clock
 
     def _now(self):
