@@ -8,6 +8,9 @@ Usage:
     python3 bot/backtest/fetch_data.py --start 20260102 --end 20260322
     python3 bot/backtest/fetch_data.py --ytd          # Jan 2 to today
 
+    # Backfill all missing data (2020-01-02 → day before earliest cached file)
+    python3 bot/backtest/fetch_data.py --backfill
+
     # Fetch tick data for a specific time window
     python3 bot/backtest/fetch_data.py --start 20260326 --end 20260326 \\
         --ticks --time-range 14:00-14:10 --what-to-show TRADES
@@ -17,7 +20,7 @@ import argparse
 import os
 import subprocess
 import sys
-from datetime import datetime, date
+from datetime import datetime, timedelta
 
 
 # WSL path conversion (same pattern as risk-webapp)
@@ -37,12 +40,27 @@ else:
     FETCHER_WIN = _FETCHER_WSL
     DATA_DIR_WIN = _DATA_DIR
 
+BACKFILL_START = "20200102"
+
+
+def find_earliest_cached():
+    """Scan bot/data/ for the earliest nq_1secs parquet file. Returns YYYYMMDD or None."""
+    if not os.path.isdir(_DATA_DIR):
+        return None
+    dates = []
+    for f in os.listdir(_DATA_DIR):
+        if f.startswith('nq_1secs_') and f.endswith('.parquet'):
+            dates.append(f[9:17])  # extract YYYYMMDD
+    return min(dates) if dates else None
+
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch NQ historical data from IB")
     parser.add_argument("--start", help="Start date YYYYMMDD (default: 20260102)")
     parser.add_argument("--end", help="End date YYYYMMDD (default: today)")
     parser.add_argument("--ytd", action="store_true", help="Fetch YTD 2026 (Jan 2 to today)")
+    parser.add_argument("--backfill", action="store_true",
+                        help="Fetch all missing data from 2020-01-02 to earliest cached file")
     parser.add_argument("--bar-size", default="1 secs", help="Bar size (default: '1 secs')")
     parser.add_argument("--ticks", action="store_true", help="Fetch tick data instead of bars")
     parser.add_argument("--time-range", help="Time range in ET for ticks, e.g. '14:00-14:10'")
@@ -50,14 +68,32 @@ def main():
                         help="Tick data type (default: TRADES)")
     parser.add_argument("--ib-port", type=int, default=7497, help="IB TWS port")
     parser.add_argument("--client-id", type=int, default=20, help="IB client ID")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="Timeout in seconds (default: 7200 normal, 43200 backfill)")
     args = parser.parse_args()
 
-    if args.ytd:
+    if args.backfill:
+        start = BACKFILL_START
+        earliest = find_earliest_cached()
+        if earliest:
+            end_date = datetime.strptime(earliest, '%Y%m%d') - timedelta(days=1)
+            end = end_date.strftime('%Y%m%d')
+            print(f"Backfill mode: {start} → {end} (earliest cached: {earliest})")
+        else:
+            end = datetime.now().strftime('%Y%m%d')
+            print(f"Backfill mode: {start} → {end} (no cached files found)")
+        print(f"Resume-safe: already-fetched days are skipped automatically.")
+        print()
+    elif args.ytd:
         start = "20260102"
         end = datetime.now().strftime("%Y%m%d")
     else:
         start = args.start or "20260102"
         end = args.end or datetime.now().strftime("%Y%m%d")
+
+    timeout = args.timeout
+    if timeout is None:
+        timeout = 43200 if args.backfill else 7200  # 12h backfill, 2h normal
 
     os.makedirs(_DATA_DIR, exist_ok=True)
 
@@ -67,6 +103,7 @@ def main():
         print(f"Time range (ET): {args.time_range}")
     print(f"Output: {_DATA_DIR}")
     print(f"Using IB port: {args.ib_port}")
+    print(f"Timeout: {timeout // 3600}h {(timeout % 3600) // 60}m")
     print()
 
     cmd = [
@@ -91,11 +128,12 @@ def main():
     try:
         result = subprocess.run(
             cmd,
-            timeout=7200,  # 2 hour max
+            timeout=timeout,
         )
         sys.exit(result.returncode)
     except subprocess.TimeoutExpired:
-        print("\nFetch timed out after 2 hours. Re-run to resume (cached days are skipped).")
+        hours = timeout / 3600
+        print(f"\nFetch timed out after {hours:.0f} hours. Re-run to resume (cached days are skipped).")
         sys.exit(1)
     except FileNotFoundError:
         print("\nError: python.exe not found. Make sure Windows Python is installed and accessible from WSL.")

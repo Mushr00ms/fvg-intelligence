@@ -5,9 +5,15 @@ Runs on Windows Python (via python.exe from WSL) to bypass Hyper-V isolation.
 Fetches NQ futures data day-by-day, handles contract rolls, writes parquet.
 
 Usage from WSL:
-    # 1-second bars (existing)
+    # 1-second bars
     python.exe C:\\path\\to\\ib_data_fetcher.py \\
         --start 20260102 --end 20260322 \\
+        --out-dir C:\\path\\to\\bot\\data \\
+        --ib-port 7497
+
+    # Backfill (overnight run — auto-reconnects on disconnect)
+    python.exe C:\\path\\to\\ib_data_fetcher.py \\
+        --start 20200102 --end 20230530 \\
         --out-dir C:\\path\\to\\bot\\data \\
         --ib-port 7497
 
@@ -21,6 +27,8 @@ The fetcher handles:
     - NQ quarterly contract rolls (H/M/U/Z, 8-day roll before expiry)
     - IB pacing limits (max 60 requests / 10 min, auto-throttle)
     - Resume capability (skips days already fetched)
+    - Auto-reconnect on IB disconnection (for overnight runs)
+    - Progress tracking with ETA
     - Parquet output with consistent schema
     - Tick-by-tick historical data via reqHistoricalTicks
 """
@@ -391,6 +399,122 @@ def is_trading_day(d):
     return d.weekday() < 5
 
 
+# ---------------------------------------------------------------------------
+#  Helpers for overnight / long-running fetches
+# ---------------------------------------------------------------------------
+
+def reconnect(ib, host, port, client_id, max_attempts=5):
+    """Reconnect to IB with exponential backoff. Returns True on success."""
+    for attempt in range(max_attempts):
+        wait = min(10 * (2 ** attempt), 300)  # 10s → 20s → 40s → 80s → 160s, cap 5min
+        log(f"  Reconnect attempt {attempt+1}/{max_attempts}, waiting {wait}s...")
+        time.sleep(wait)
+        try:
+            if ib.isConnected():
+                ib.disconnect()
+            time.sleep(2)
+            ib.connect(host, port, clientId=client_id, timeout=15)
+            log(f"  Reconnected to IB")
+            time.sleep(15)  # pacing cooldown after reconnect
+            return True
+        except Exception as e:
+            log(f"  Reconnect failed: {e}")
+    return False
+
+
+def build_expired_lookup(ib):
+    """Query IB for ALL NQ futures contracts (including expired) via a broad
+    reqContractDetails call.  Returns dict mapping expiry string -> Contract.
+
+    A broad query (no lastTradeDateOrContractMonth) hits a different IB index
+    than qualifying a single contract, so it can discover old expired contracts
+    that qualifyContracts() refuses to resolve individually.
+    """
+    log("Querying IB for all available NQ contracts (including expired)...")
+    lookup = {}
+
+    for exchange in ['CME', 'GLOBEX', '']:
+        probe = Future(symbol='NQ', currency='USD')
+        if exchange:
+            probe.exchange = exchange
+        probe.includeExpired = True
+        try:
+            details_list = ib.reqContractDetails(probe)
+        except Exception as e:
+            log(f"  reqContractDetails({exchange or 'ANY'}): {e}")
+            continue
+
+        if not details_list:
+            continue
+
+        for cd in details_list:
+            c = cd.contract
+            exp = c.lastTradeDateOrContractMonth
+            if exp and exp not in lookup:
+                lookup[exp] = c
+        break  # got results, no need to try other exchanges
+
+    expiries = sorted(lookup.keys())
+    if expiries:
+        log(f"  Found {len(expiries)} NQ contracts: {expiries[0]} → {expiries[-1]}")
+    else:
+        log("  WARNING: No NQ contracts returned by IB")
+
+    return lookup
+
+
+def qualify_contract(ib, expiry, expired_lookup=None):
+    """Qualify a NQ futures contract.
+    1) Check pre-built expired_lookup table (from broad reqContractDetails).
+    2) Fall back to direct qualifyContracts with includeExpired=True.
+    Returns the qualified Contract or None."""
+
+    date_key = expiry.strftime('%Y%m%d')
+    month_key = expiry.strftime('%Y%m')
+
+    # Pre-fetched lookup — contracts already have conId populated
+    if expired_lookup:
+        for key in [date_key, month_key]:
+            if key in expired_lookup:
+                return expired_lookup[key]
+
+    # Direct qualification (works for active/recent contracts)
+    for date_fmt in [date_key, month_key]:
+        contract = Future(
+            symbol='NQ',
+            lastTradeDateOrContractMonth=date_fmt,
+            exchange='CME',
+            currency='USD',
+        )
+        contract.includeExpired = True
+        qualified = ib.qualifyContracts(contract)
+        if qualified and contract.conId > 0:
+            return contract
+    return None
+
+
+def count_trading_days(start, end):
+    """Count weekdays between start and end (inclusive)."""
+    count = 0
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            count += 1
+        d += timedelta(days=1)
+    return count
+
+
+def format_duration(seconds):
+    """Format seconds as human-readable duration string."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    return f"{m}m"
+
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -408,6 +532,8 @@ def main():
     parser.add_argument("--ib-host", default="127.0.0.1")
     parser.add_argument("--ib-port", type=int, default=7497)
     parser.add_argument("--client-id", type=int, default=20)
+    parser.add_argument("--max-reconnects", type=int, default=50,
+                        help="Max IB reconnection attempts before aborting (default: 50)")
     args = parser.parse_args()
 
     start = datetime.strptime(args.start, "%Y%m%d").date()
@@ -425,11 +551,13 @@ def main():
         tick_start_time = (int(sh), int(sm))
         tick_end_time = (int(eh), int(em))
 
+    total_days = count_trading_days(start, end)
     mode_label = f"ticks ({args.what_to_show})" if args.ticks else f"{args.bar_size} bars"
-    log(f"Fetching NQ {mode_label}: {start} → {end}")
+    log(f"Fetching NQ {mode_label}: {start} → {end} ({total_days} trading days)")
     if args.ticks:
         log(f"Time range (ET): {tick_start_time[0]:02d}:{tick_start_time[1]:02d} - {tick_end_time[0]:02d}:{tick_end_time[1]:02d}")
     log(f"Output: {out_dir}")
+    log(f"Auto-reconnect: up to {args.max_reconnects} attempts")
 
     # Connect to IB
     ib = IB()
@@ -440,16 +568,28 @@ def main():
     log("Waiting 15s for pacing cooldown...")
     time.sleep(15)
 
-    current_date = start
+    # Build lookup table for expired contracts (broad query)
+    expired_lookup = build_expired_lookup(ib)
+
+    # Progress tracking
+    t0 = time.time()
+    day_num = 0
     days_fetched = 0
     days_skipped = 0
+    days_no_data = []
+    days_failed = []
+    reconnect_count = 0
     current_contract = None
     current_expiry = None
+    current_date = start
+    skip_reported = False
 
     while current_date <= end:
         if not is_trading_day(current_date):
             current_date += timedelta(days=1)
             continue
+
+        day_num += 1
 
         # Build output filename
         if args.ticks:
@@ -464,80 +604,143 @@ def main():
             out_file = os.path.join(out_dir, f"nq_{bar_label}_{current_date.strftime('%Y%m%d')}.parquet")
 
             if os.path.exists(out_file):
-                log(f"  {current_date} — already cached, skipping")
                 days_skipped += 1
                 current_date += timedelta(days=1)
                 continue
 
-        # Resolve contract if needed
+        # Log batch-skip summary on first non-cached day
+        if days_skipped > 0 and not skip_reported:
+            log(f"  Skipped {days_skipped} already-cached days")
+            skip_reported = True
+
+        # ETA calculation (based on non-skipped days actually processed)
+        processed = days_fetched + len(days_no_data) + len(days_failed)
+        elapsed = time.time() - t0
+        remaining_days = total_days - day_num
+        if processed > 0:
+            secs_per_day = elapsed / processed
+            eta_str = format_duration(remaining_days * secs_per_day)
+        else:
+            eta_str = "..."
+
+        # Connection health check
+        if not ib.isConnected():
+            log(f"  Connection lost before {current_date}, reconnecting...")
+            if reconnect(ib, args.ib_host, args.ib_port, args.client_id):
+                reconnect_count += 1
+                current_expiry = None  # force contract re-qualification
+            else:
+                log("  Cannot reconnect. Stopping — re-run to resume from here.")
+                break
+
+        # Resolve contract if expiry changed
         expiry = get_nq_contract_for_date(current_date)
         if expiry != current_expiry:
-            # Try exact expiry date first, then month-only format
-            resolved = False
-            for date_fmt in [expiry.strftime('%Y%m%d'), expiry.strftime('%Y%m')]:
-                new_contract = Future(
-                    symbol='NQ',
-                    lastTradeDateOrContractMonth=date_fmt,
-                    exchange='CME',
-                    currency='USD',
-                )
-                qualified = ib.qualifyContracts(new_contract)
-                if qualified and new_contract.conId > 0:
-                    current_expiry = expiry
-                    current_contract = new_contract
-                    log(f"  Contract: NQ {expiry.strftime('%b %Y')} (conId={new_contract.conId}, fmt={date_fmt})")
-                    resolved = True
-                    break
-
-            if not resolved:
-                if current_contract is not None:
-                    log(f"  Failed to qualify NQ {expiry.strftime('%b %Y')}, staying on current contract")
+            contract = qualify_contract(ib, expiry, expired_lookup)
+            if contract:
+                current_expiry = expiry
+                current_contract = contract
+                log(f"  Contract: NQ {expiry.strftime('%b %Y')} (conId={contract.conId})")
+            elif current_contract is None:
+                # No current contract — try previous expiry as fallback
+                prev_expiry = get_nq_contract_for_date(current_date - timedelta(days=30))
+                fallback = qualify_contract(ib, prev_expiry, expired_lookup)
+                if fallback:
+                    current_expiry = prev_expiry
+                    current_contract = fallback
+                    log(f"  Fallback: NQ {prev_expiry.strftime('%b %Y')} (conId={fallback.conId})")
                 else:
-                    # No current contract — try the previous expiry as fallback
-                    prev_expiry = get_nq_contract_for_date(current_date - timedelta(days=30))
-                    for date_fmt in [prev_expiry.strftime('%Y%m%d'), prev_expiry.strftime('%Y%m')]:
-                        fallback = Future(
-                            symbol='NQ',
-                            lastTradeDateOrContractMonth=date_fmt,
-                            exchange='CME',
-                            currency='USD',
-                        )
-                        fb_qualified = ib.qualifyContracts(fallback)
-                        if fb_qualified and fallback.conId > 0:
-                            current_expiry = prev_expiry
-                            current_contract = fallback
-                            log(f"  Fallback to NQ {prev_expiry.strftime('%b %Y')} (conId={fallback.conId})")
-                            resolved = True
-                            break
-                    if not resolved:
-                        log(f"  Failed to qualify any NQ contract, skipping {current_date}")
-                        current_date += timedelta(days=1)
-                        continue
+                    log(f"  Cannot qualify any NQ contract for {current_date}, skipping")
+                    days_failed.append(current_date)
+                    current_date += timedelta(days=1)
+                    continue
+            else:
+                log(f"  Failed to qualify NQ {expiry.strftime('%b %Y')}, staying on current contract")
 
-        log(f"  Fetching {current_date}...")
+        log(f"  [{day_num}/{total_days}] {current_date}  ETA ~{eta_str}")
 
-        if args.ticks:
-            records = fetch_ticks(
-                ib, current_contract, current_date,
-                tick_start_time, tick_end_time, args.what_to_show,
-            )
+        # Fetch with auto-reconnect on failure
+        records = None
+        fetch_ok = False
+        for fetch_attempt in range(3):
+            try:
+                if args.ticks:
+                    records = fetch_ticks(
+                        ib, current_contract, current_date,
+                        tick_start_time, tick_end_time, args.what_to_show,
+                    )
+                else:
+                    records = fetch_day(ib, current_contract, current_date, args.bar_size)
+                fetch_ok = True
+                break
+            except Exception as e:
+                log(f"  Fetch error (attempt {fetch_attempt+1}/3): {e}")
+                if fetch_attempt == 2:
+                    break  # exhausted retries
+                if reconnect_count >= args.max_reconnects:
+                    log(f"  Max reconnects ({args.max_reconnects}) reached.")
+                    break
+                if not reconnect(ib, args.ib_host, args.ib_port, args.client_id):
+                    log("  Reconnect failed.")
+                    break
+                reconnect_count += 1
+                # Re-qualify contract after reconnect
+                current_expiry = None
+                new_expiry = get_nq_contract_for_date(current_date)
+                new_contract = qualify_contract(ib, new_expiry, expired_lookup)
+                if new_contract:
+                    current_expiry = new_expiry
+                    current_contract = new_contract
+
+        if fetch_ok:
+            if records:
+                df = pd.DataFrame(records)
+                df.to_parquet(out_file, index=False)
+                days_fetched += 1
+                label = "ticks" if args.ticks else "bars"
+                log(f"  {current_date} — {len(records)} {label} → {os.path.basename(out_file)}")
+            else:
+                days_no_data.append(current_date)
+                log(f"  {current_date} — no data (holiday/unavailable)")
         else:
-            records = fetch_day(ib, current_contract, current_date, args.bar_size)
-
-        if records:
-            df = pd.DataFrame(records)
-            df.to_parquet(out_file, index=False)
-            days_fetched += 1
-            label = "ticks" if args.ticks else "bars"
-            log(f"  {current_date} — {len(records)} {label} → {os.path.basename(out_file)}")
-        else:
-            log(f"  {current_date} — no data (holiday?)")
+            days_failed.append(current_date)
+            if not ib.isConnected():
+                log("  IB connection lost. Stopping — re-run to resume.")
+                break
 
         time.sleep(1)
         current_date += timedelta(days=1)
 
-    ib.disconnect()
-    log(f"\nDone. Fetched {days_fetched} days, skipped {days_skipped} cached.")
+    try:
+        ib.disconnect()
+    except Exception:
+        pass
+
+    # ---- Summary ----
+    elapsed_total = time.time() - t0
+    complete = current_date > end
+    log("")
+    log("=" * 60)
+    log("FETCH COMPLETE" if complete else "FETCH INTERRUPTED — re-run to resume")
+    log("=" * 60)
+    log(f"Elapsed:        {format_duration(elapsed_total)}")
+    log(f"Days fetched:   {days_fetched}")
+    log(f"Days skipped:   {days_skipped} (already cached)")
+    log(f"Days no data:   {len(days_no_data)} (holidays/unavailable)")
+    log(f"Days failed:    {len(days_failed)}")
+    log(f"Reconnects:     {reconnect_count}")
+    if days_fetched > 0:
+        log(f"Avg per day:    {format_duration(elapsed_total / days_fetched)}")
+    if days_failed:
+        log(f"Failed dates:   {', '.join(d.strftime('%Y-%m-%d') for d in days_failed)}")
+    if days_no_data:
+        dates_str = ', '.join(d.strftime('%Y-%m-%d') for d in days_no_data[:30])
+        if len(days_no_data) > 30:
+            dates_str += f" ... +{len(days_no_data) - 30} more"
+        log(f"No-data dates:  {dates_str}")
+    if not complete:
+        log(f"Stopped at:     {current_date}")
+    log("=" * 60)
 
 
 if __name__ == "__main__":
