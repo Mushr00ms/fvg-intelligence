@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2024-02-07",
+    "balance": 98137.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 2,
+    "wins": 0,
+    "losses": 2,
+    "eod_exits": 0,
+    "net_pnl": -713.5,
+    "start_balance": 98137.0,
+    "end_balance": 97423.5,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2024-02-07",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 17837.25,
+      "stop_price": 17849.75,
+      "target_price": 17806.0,
+      "risk_pts": 12.5,
+      "n_value": 2.5,
+      "contracts": 1,
+      "entry_time": "2024-02-07 11:07:33.766344227-05:00",
+      "exit_time": "2024-02-07 11:10:48.995665239-05:00",
+      "exit_price": 17849.75,
+      "exit_reason": "SL",
+      "pnl_pts": -12.5,
+      "pnl_dollars": -254.5,
+      "is_win": false,
+      "group_id": "131f5a163b44",
+      "fvg_id": "115895143ca0"
+    },
+    {
+      "trade_id": 2,
+      "date": "2024-02-07",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 17818.75,
+      "stop_price": 17829.5,
+      "target_price": 17797.25,
+      "risk_pts": 10.75,
+      "n_value": 2.0,
+      "contracts": 2,
+      "entry_time": "2024-02-07 12:58:18.580648859-05:00",
+      "exit_time": "2024-02-07 13:01:51.050851503-05:00",
+      "exit_price": 17830.0,
+      "exit_reason": "SL",
+      "pnl_pts": -11.25,
+      "pnl_dollars": -459.0,
+      "is_win": false,
+      "group_id": "da1445cb0b76",
+      "fvg_id": "0ee120074e2a"
+    }
+  ]
+}

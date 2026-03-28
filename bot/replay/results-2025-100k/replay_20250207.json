@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2025-02-07",
+    "balance": 96088.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 2,
+    "wins": 2,
+    "losses": 0,
+    "eod_exits": 0,
+    "net_pnl": 3316.5,
+    "start_balance": 96088.0,
+    "end_balance": 99404.5,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2025-02-07",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mid_extreme",
+      "side": "SELL",
+      "entry_price": 21730.5,
+      "stop_price": 21804.0,
+      "target_price": 21583.5,
+      "risk_pts": 73.5,
+      "n_value": 2.0,
+      "contracts": 1,
+      "entry_time": "2025-02-07 11:19:38.075939517-05:00",
+      "exit_time": "2025-02-07 14:21:43.011636971-05:00",
+      "exit_price": 21583.5,
+      "exit_reason": "TP",
+      "pnl_pts": 147.0,
+      "pnl_dollars": 2935.5,
+      "is_win": true,
+      "group_id": "e1a2466d3384",
+      "fvg_id": "a29978f1ad2d"
+    },
+    {
+      "trade_id": 2,
+      "date": "2025-02-07",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 21597.25,
+      "stop_price": 21607.0,
+      "target_price": 21587.5,
+      "risk_pts": 9.75,
+      "n_value": 1.0,
+      "contracts": 2,
+      "entry_time": "2025-02-07 15:34:55.898090957-05:00",
+      "exit_time": "2025-02-07 15:37:22.120193349-05:00",
+      "exit_price": 21587.5,
+      "exit_reason": "TP",
+      "pnl_pts": 9.75,
+      "pnl_dollars": 381.0,
+      "is_win": true,
+      "group_id": "e44304fceaf0",
+      "fvg_id": "448c338b52d1"
+    }
+  ]
+}

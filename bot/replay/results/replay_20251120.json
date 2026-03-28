@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2025-11-20",
+    "balance": 381240.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 1,
+    "wins": 1,
+    "losses": 0,
+    "eod_exits": 0,
+    "net_pnl": 11204.0,
+    "start_balance": 381240.0,
+    "end_balance": 392444.0,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2025-11-20",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mid_extreme",
+      "side": "SELL",
+      "entry_price": 24394.5,
+      "stop_price": 24464.75,
+      "target_price": 24324.25,
+      "risk_pts": 70.25,
+      "n_value": 1.0,
+      "contracts": 8,
+      "entry_time": "2025-11-20 14:59:13.536434459-05:00",
+      "exit_time": "2025-11-20 15:01:52.833470181-05:00",
+      "exit_price": 24324.25,
+      "exit_reason": "TP",
+      "pnl_pts": 70.25,
+      "pnl_dollars": 11204.0,
+      "is_win": true,
+      "group_id": "28d6a004fb8f",
+      "fvg_id": "a0acaab1f03d"
+    }
+  ]
+}

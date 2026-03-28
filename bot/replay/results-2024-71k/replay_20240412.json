@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2024-04-12",
+    "balance": 55492.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 1,
+    "wins": 1,
+    "losses": 0,
+    "eod_exits": 0,
+    "net_pnl": 285.5,
+    "start_balance": 55492.0,
+    "end_balance": 55777.5,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2024-04-12",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 18288.25,
+      "stop_price": 18296.5,
+      "target_price": 18273.75,
+      "risk_pts": 8.25,
+      "n_value": 1.75,
+      "contracts": 1,
+      "entry_time": "2024-04-12 11:35:44.643047879-04:00",
+      "exit_time": "2024-04-12 11:36:58.020160159-04:00",
+      "exit_price": 18273.75,
+      "exit_reason": "TP",
+      "pnl_pts": 14.5,
+      "pnl_dollars": 285.5,
+      "is_win": true,
+      "group_id": "d9ed4858e37a",
+      "fvg_id": "bcbb9a67b331"
+    }
+  ]
+}

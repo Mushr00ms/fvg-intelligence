@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2025-03-04",
+    "balance": 147174.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 2,
+    "wins": 2,
+    "losses": 0,
+    "eod_exits": 0,
+    "net_pnl": 4044.0,
+    "start_balance": 147174.0,
+    "end_balance": 151218.0,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2025-03-04",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "BUY",
+      "entry_price": 20436.5,
+      "stop_price": 20430.25,
+      "target_price": 20453.75,
+      "risk_pts": 6.25,
+      "n_value": 2.75,
+      "contracts": 4,
+      "entry_time": "2025-03-04 13:50:51.879396193-05:00",
+      "exit_time": "2025-03-04 13:51:23.661234095-05:00",
+      "exit_price": 20453.75,
+      "exit_reason": "TP",
+      "pnl_pts": 17.25,
+      "pnl_dollars": 1362.0,
+      "is_win": true,
+      "group_id": "15c62f756575",
+      "fvg_id": "1959a34dc7a6"
+    },
+    {
+      "trade_id": 2,
+      "date": "2025-03-04",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "BUY",
+      "entry_price": 20497.75,
+      "stop_price": 20475.25,
+      "target_price": 20531.5,
+      "risk_pts": 22.5,
+      "n_value": 1.5,
+      "contracts": 4,
+      "entry_time": "2025-03-04 15:40:55.018772833-05:00",
+      "exit_time": "2025-03-04 15:43:17.865072329-05:00",
+      "exit_price": 20531.5,
+      "exit_reason": "TP",
+      "pnl_pts": 33.75,
+      "pnl_dollars": 2682.0,
+      "is_win": true,
+      "group_id": "90639399b403",
+      "fvg_id": "ee7fa794cdb9"
+    }
+  ]
+}

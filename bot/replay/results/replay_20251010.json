@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2025-10-10",
+    "balance": 281573.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 1,
+    "wins": 1,
+    "losses": 0,
+    "eod_exits": 0,
+    "net_pnl": 16364.0,
+    "start_balance": 281573.0,
+    "end_balance": 297937.0,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2025-10-10",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mid_extreme",
+      "side": "SELL",
+      "entry_price": 24714.25,
+      "stop_price": 24759.75,
+      "target_price": 24611.75,
+      "risk_pts": 45.5,
+      "n_value": 2.25,
+      "contracts": 8,
+      "entry_time": "2025-10-10 13:28:25.699163901-04:00",
+      "exit_time": "2025-10-10 14:48:21.156506371-04:00",
+      "exit_price": 24611.75,
+      "exit_reason": "TP",
+      "pnl_pts": 102.5,
+      "pnl_dollars": 16364.0,
+      "is_win": true,
+      "group_id": "9e2c36213644",
+      "fvg_id": "44433bf8e598"
+    }
+  ]
+}

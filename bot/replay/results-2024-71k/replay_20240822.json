@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2024-08-22",
+    "balance": 297145.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 2,
+    "wins": 1,
+    "losses": 1,
+    "eod_exits": 0,
+    "net_pnl": 1830.0,
+    "start_balance": 297145.0,
+    "end_balance": 298975.0,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2024-08-22",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 19828.25,
+      "stop_price": 19841.0,
+      "target_price": 19796.25,
+      "risk_pts": 12.75,
+      "n_value": 2.5,
+      "contracts": 5,
+      "entry_time": "2024-08-22 12:30:38.607081947-04:00",
+      "exit_time": "2024-08-22 12:48:45.894605311-04:00",
+      "exit_price": 19796.25,
+      "exit_reason": "TP",
+      "pnl_pts": 32.0,
+      "pnl_dollars": 3177.5,
+      "is_win": true,
+      "group_id": "afb593788787",
+      "fvg_id": "ec053570db79"
+    },
+    {
+      "trade_id": 2,
+      "date": "2024-08-22",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 19641.75,
+      "stop_price": 19655.0,
+      "target_price": 19625.25,
+      "risk_pts": 13.25,
+      "n_value": 1.25,
+      "contracts": 5,
+      "entry_time": "2024-08-22 15:02:06.713872847-04:00",
+      "exit_time": "2024-08-22 15:02:43.339773215-04:00",
+      "exit_price": 19655.0,
+      "exit_reason": "SL",
+      "pnl_pts": -13.25,
+      "pnl_dollars": -1347.5,
+      "is_win": false,
+      "group_id": "cef293241f1e",
+      "fvg_id": "fcb239fcc71d"
+    }
+  ]
+}

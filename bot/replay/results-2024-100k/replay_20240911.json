@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2024-09-11",
+    "balance": 624913.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 2,
+    "wins": 1,
+    "losses": 1,
+    "eod_exits": 0,
+    "net_pnl": 22690.5,
+    "start_balance": 624913.0,
+    "end_balance": 647603.5,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2024-09-11",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 18646.25,
+      "stop_price": 18657.0,
+      "target_price": 18614.0,
+      "risk_pts": 10.75,
+      "n_value": 3.0,
+      "contracts": 14,
+      "entry_time": "2024-09-11 11:05:57.986265035-04:00",
+      "exit_time": "2024-09-11 11:06:58.983522975-04:00",
+      "exit_price": 18657.0,
+      "exit_reason": "SL",
+      "pnl_pts": -10.75,
+      "pnl_dollars": -3073.0,
+      "is_win": false,
+      "group_id": "1819081da1eb",
+      "fvg_id": "b62e7563bfe7"
+    },
+    {
+      "trade_id": 2,
+      "date": "2024-09-11",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mid_extreme",
+      "side": "BUY",
+      "entry_price": 18734.5,
+      "stop_price": 18691.0,
+      "target_price": 18810.5,
+      "risk_pts": 43.5,
+      "n_value": 1.75,
+      "contracts": 17,
+      "entry_time": "2024-09-11 11:56:39.728345311-04:00",
+      "exit_time": "2024-09-11 12:02:39.910816327-04:00",
+      "exit_price": 18810.5,
+      "exit_reason": "TP",
+      "pnl_pts": 76.0,
+      "pnl_dollars": 25763.5,
+      "is_win": true,
+      "group_id": "10a9ee776500",
+      "fvg_id": "9b8a8288892c"
+    }
+  ]
+}

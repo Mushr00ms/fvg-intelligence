@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2025-02-27",
+    "balance": 98039.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 1,
+    "wins": 1,
+    "losses": 0,
+    "eod_exits": 0,
+    "net_pnl": 735.5,
+    "start_balance": 98039.0,
+    "end_balance": 98774.5,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2025-02-27",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "SELL",
+      "entry_price": 20863.0,
+      "stop_price": 20900.0,
+      "target_price": 20826.0,
+      "risk_pts": 37.0,
+      "n_value": 1.0,
+      "contracts": 1,
+      "entry_time": "2025-02-27 14:47:31.889686405-05:00",
+      "exit_time": "2025-02-27 14:48:34.481122717-05:00",
+      "exit_price": 20826.0,
+      "exit_reason": "TP",
+      "pnl_pts": 37.0,
+      "pnl_dollars": 735.5,
+      "is_win": true,
+      "group_id": "1722b5bf352e",
+      "fvg_id": "f4d800421197"
+    }
+  ]
+}

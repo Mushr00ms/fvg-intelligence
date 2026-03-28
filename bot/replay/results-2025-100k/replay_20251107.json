@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "source": "replay",
+    "replay_date": "2025-11-07",
+    "balance": 637072.0,
+    "risk_pct": 0.01,
+    "replay_mode": true
+  },
+  "summary": {
+    "total_trades": 2,
+    "wins": 1,
+    "losses": 1,
+    "eod_exits": 0,
+    "net_pnl": -15877.5,
+    "start_balance": 637072.0,
+    "end_balance": 621194.5,
+    "kill_switch_hit": false
+  },
+  "trades": [
+    {
+      "trade_id": 1,
+      "date": "2025-11-07",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mid_extreme",
+      "side": "SELL",
+      "entry_price": 24915.25,
+      "stop_price": 24963.5,
+      "target_price": 24818.75,
+      "risk_pts": 48.25,
+      "n_value": 2.0,
+      "contracts": 18,
+      "entry_time": "2025-11-07 13:25:19.633003053-05:00",
+      "exit_time": "2025-11-07 14:24:27.517601637-05:00",
+      "exit_price": 24964.0,
+      "exit_reason": "SL",
+      "pnl_pts": -48.75,
+      "pnl_dollars": -17631.0,
+      "is_win": false,
+      "group_id": "44bb0c3d10ea",
+      "fvg_id": "920edd771b54"
+    },
+    {
+      "trade_id": 2,
+      "date": "2025-11-07",
+      "fvg_type": "",
+      "time_period": "",
+      "risk_range": "",
+      "setup": "mit_extreme",
+      "side": "BUY",
+      "entry_price": 25046.25,
+      "stop_price": 25036.0,
+      "target_price": 25059.0,
+      "risk_pts": 10.25,
+      "n_value": 1.25,
+      "contracts": 7,
+      "entry_time": "2025-11-07 15:21:22.269247221-05:00",
+      "exit_time": "2025-11-07 15:21:59.110556557-05:00",
+      "exit_price": 25059.0,
+      "exit_reason": "TP",
+      "pnl_pts": 12.75,
+      "pnl_dollars": 1753.5,
+      "is_win": true,
+      "group_id": "92ce2d95fbeb",
+      "fvg_id": "ae1b83dde960"
+    }
+  ]
+}
