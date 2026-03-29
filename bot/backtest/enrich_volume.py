@@ -912,21 +912,80 @@ def main():
         # Recompute max drawdown from adjusted equity curve
         peak = start_bal
         max_dd = 0
+        max_dd_pct = 0
         for t in trades:
             bal = t.get("balance", start_bal)
             if bal > peak:
                 peak = bal
             dd = peak - bal
+            dd_pct = dd / peak if peak > 0 else 0
             if dd > max_dd:
                 max_dd = dd
+            if dd_pct > max_dd_pct:
+                max_dd_pct = dd_pct
         s["max_drawdown"] = round(max_dd, 2)
-        s["max_dd_pct"] = round(max_dd / peak * 100, 1) if peak > 0 else 0
+        s["max_dd_pct"] = round(max_dd_pct * 100, 1)
+
+        # Recompute drawdown percentiles from end-of-day equity snapshots
+        # (matches backtester logic — gives realistic "typical day" DD profile)
+        import numpy as _np_dd
+        from collections import defaultdict as _dd_defaultdict
+        _daily_equity = _dd_defaultdict(float)
+        _running = start_bal
+        for t in trades:
+            _running = t.get("balance", _running)
+            _daily_equity[t.get("date", "")] = _running
+        _eod_vals = [_daily_equity[d] for d in sorted(_daily_equity.keys())]
+        _eod_dd_pcts = []
+        _eod_peak = start_bal
+        for v in _eod_vals:
+            if v > _eod_peak:
+                _eod_peak = v
+            _eod_dd_pcts.append((_eod_peak - v) / _eod_peak * 100 if _eod_peak > 0 else 0)
+        _dd_arr = _np_dd.array(_eod_dd_pcts)
+        if len(_dd_arr):
+            s["dd_p50_pct"] = round(float(_np_dd.percentile(_dd_arr, 50)), 1)
+            s["dd_p75_pct"] = round(float(_np_dd.percentile(_dd_arr, 75)), 1)
+            s["dd_p90_pct"] = round(float(_np_dd.percentile(_dd_arr, 90)), 1)
+            s["dd_p95_pct"] = round(float(_np_dd.percentile(_dd_arr, 95)), 1)
+            s["dd_avg_pct"] = round(float(_dd_arr.mean()), 1)
+
         s["total_slippage_cost"] = round(total_slippage_cost, 2)
         s["slippage_pnl_impact_pct"] = enrichment_summary["slippage_pnl_impact_pct"]
         s["sl_slippage_rate"] = enrichment_summary["sl_slippage_rate"]
         s["avg_slippage_pts"] = enrichment_summary["avg_slippage_pts"]
 
     results["enrichment"] = enrichment_summary
+
+    # ── Rebuild equity_curve and drawdown_curve from adjusted balances ────────
+    # Without this, the DD chart shows pre-enrichment (stale) drawdown.
+    equity_curve = []
+    drawdown_curve = []
+    eq_bal = start_balance
+    eq_peak = start_balance
+    for t in trades:
+        eq_bal = t.get("balance", eq_bal)
+        if eq_bal > eq_peak:
+            eq_peak = eq_bal
+        dd = eq_peak - eq_bal
+        dd_pct = dd / eq_peak if eq_peak > 0 else 0
+        tid = t.get("trade_id", t.get("id", ""))
+        equity_curve.append({
+            "trade_id": tid,
+            "date": t.get("date", ""),
+            "exit_time": t.get("exit_time", ""),
+            "balance": round(eq_bal, 2),
+            "pnl": round(t.get("pnl_dollars", 0), 2),
+            "exit_reason": t.get("exit_reason", ""),
+        })
+        drawdown_curve.append({
+            "trade_id": tid,
+            "date": t.get("date", ""),
+            "drawdown": round(dd, 2),
+            "drawdown_pct": round(dd_pct * 100, 2),
+        })
+    results["equity_curve"] = equity_curve
+    results["drawdown_curve"] = drawdown_curve
 
     # ── Save enriched JSON ────────────────────────────────────────────────────
     results["trades"] = trades

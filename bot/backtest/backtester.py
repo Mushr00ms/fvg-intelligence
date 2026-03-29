@@ -1364,6 +1364,7 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
     _dd_arr = _np_dd.array(_eod_dd_pcts)
     dd_p50 = round(float(_np_dd.percentile(_dd_arr, 50)), 1) if len(_dd_arr) else 0
     dd_p75 = round(float(_np_dd.percentile(_dd_arr, 75)), 1) if len(_dd_arr) else 0
+    dd_p90 = round(float(_np_dd.percentile(_dd_arr, 90)), 1) if len(_dd_arr) else 0
     dd_p95 = round(float(_np_dd.percentile(_dd_arr, 95)), 1) if len(_dd_arr) else 0
     dd_avg = round(float(_dd_arr.mean()), 1) if len(_dd_arr) else 0
 
@@ -1469,6 +1470,7 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
             "dd_avg_pct": dd_avg,
             "dd_p50_pct": dd_p50,
             "dd_p75_pct": dd_p75,
+            "dd_p90_pct": dd_p90,
             "dd_p95_pct": dd_p95,
             "trades_per_day": round(trades_per_day, 1),
             "total_contracts": sum(t.contracts for t in trades),

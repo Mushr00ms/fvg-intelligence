@@ -87,6 +87,11 @@ class BotEngine:
         # NTP-synced clock — all time-sensitive operations use this
         self.clock = Clock()
         self.clock.sync()
+        if not self.clock.is_trusted:
+            # Logger not yet initialized — print to stderr as last resort
+            import sys
+            print("CRITICAL: NTP sync failed on startup — clock untrusted. "
+                  "New trade entries will be BLOCKED until NTP succeeds.", file=sys.stderr)
 
         self.logger = BotLogger(config.log_dir, clock=self.clock)
         self.state_mgr = StateManager(config.state_dir, self.logger, clock=self.clock)
@@ -284,6 +289,7 @@ class BotEngine:
         wall clock checks every iteration, NOT by call_later — which uses
         the monotonic clock and drifts on WSL2 over a full trading day.
         """
+        self._disconnect_flatten_done = False
         while not self._shutdown:
             if self.daily_state and self.daily_state.kill_switch_active:
                 await self._trigger_kill_switch()
@@ -302,12 +308,43 @@ class BotEngine:
                 self.logger.log("bot_stop", reason="session_ended")
                 break
 
+            # Disconnect safety: flatten all if IB has been down too long
+            await self._check_disconnect_timeout()
+
             # EOD actions — checked against NTP wall clock every tick
             await self._check_eod_actions()
 
             # Yield to event loop — ib_async processes bar updates and fill
             # callbacks during asyncio.sleep via nest_asyncio patching
             await asyncio.sleep(0.1)
+
+    async def _check_disconnect_timeout(self):
+        """Flatten all positions if IB has been disconnected beyond max_disconnect_minutes.
+
+        Fires once per disconnect event (reset on reconnect by _on_reconnect).
+        This prevents ghost positions sitting unmonitored while the connection is down.
+        """
+        if self._disconnect_flatten_done:
+            return
+        if self.config.dry_run or not self.ib_conn:
+            return
+
+        max_seconds = self.config.max_disconnect_minutes * 60
+        disc_secs = self.ib_conn.disconnect_seconds
+        if disc_secs >= max_seconds:
+            self._disconnect_flatten_done = True
+            self.logger.log(
+                "disconnect_timeout_flatten",
+                disconnect_seconds=round(disc_secs),
+                threshold_minutes=self.config.max_disconnect_minutes,
+            )
+            if self.order_mgr and self.daily_state:
+                await self.order_mgr.flatten_all(self.daily_state, "DISCONNECT_TIMEOUT")
+                self.state_mgr.save(self.daily_state, force=True)
+            if self.telegram.enabled:
+                await self.telegram.alert_connection_lost(
+                    f"IB disconnected for {round(disc_secs)}s — all positions flattened"
+                )
 
     async def _check_eod_actions(self):
         """Fire EOD actions based on NTP-corrected wall clock time."""
@@ -800,6 +837,7 @@ class BotEngine:
 
     async def _on_reconnect(self):
         """Re-subscribe bars/ticks and backfill FVGs after IB reconnect."""
+        self._disconnect_flatten_done = False  # Reset for next potential disconnect
         self.logger.log("reconnect_resubscribe")
         try:
             await self._subscribe_bars()
@@ -811,6 +849,9 @@ class BotEngine:
                 self._imbalance_accumulator.reset()
             await self._backfill_fvgs()
             await self._process_backfilled_fvgs()
+            # Verify TP/SL quantities match filled_qty (fix failed adjustments)
+            if self.order_mgr and self.daily_state:
+                await self.order_mgr.verify_child_order_quantities(self.daily_state)
             self.logger.log("reconnect_resubscribe_done",
                             active_fvgs=self.fvg_mgr.active_count)
         except Exception as e:
@@ -914,6 +955,12 @@ class BotEngine:
         if not self._reconciliation_complete:
             self.logger.log("setup_rejected", fvg_id=fvg.fvg_id,
                             gate="startup", reason="reconciliation not complete")
+            return
+
+        # Block entries if NTP has never synced — session timing cannot be trusted
+        if not self.clock.is_trusted:
+            self.logger.log("setup_rejected", fvg_id=fvg.fvg_id,
+                            gate="clock", reason="NTP never synced — clock untrusted")
             return
 
         allowed, reason = self._calendar_gate_allows_entry()
@@ -1049,6 +1096,8 @@ class BotEngine:
                 order.target_qty = scaled_qty
 
             # HFOIV gate — reduce size when imbalance volatility is elevated
+            hfoiv_mult = 1.0
+            hfoiv_info = {}
             if self.hfoiv_gate is not None:
                 _now = self.clock.now()
                 minutes_now = _now.hour * 60 + _now.minute if _now else 0
@@ -1071,8 +1120,7 @@ class BotEngine:
             # Place the bracket order
             risk_dollars = round(order.risk_pts * order.target_qty * 20, 2)
             reward_dollars = round(order.risk_pts * order.n_value * order.target_qty * 20, 2)
-            self.logger.log(
-                "setup_accepted",
+            setup_log = dict(
                 fvg_id=fvg.fvg_id,
                 fvg_type=fvg.fvg_type,
                 time_period=fvg.time_period,
@@ -1091,6 +1139,10 @@ class BotEngine:
                 cell_ev=cell["ev"],
                 cell_wr=cell["win_rate"],
             )
+            if hfoiv_mult < 1.0:
+                setup_log["hfoiv_mult"] = hfoiv_mult
+                setup_log["hfoiv_pct"] = hfoiv_info.get("percentile")
+            self.logger.log("setup_accepted", **setup_log)
 
             if self.order_mgr and (self.config.dry_run or self.ib_conn.is_connected):
                 if self.margin_priority and not self.config.dry_run:

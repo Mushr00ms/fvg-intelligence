@@ -186,13 +186,64 @@ class StateManager:
                     group_id=gid,
                 )
 
+        # Validate open positions against IB — detect positions that closed
+        # while the bot was down (TP/SL filled without callback reaching us).
+        # IB positions are net per-contract; we check if our expected side
+        # has any quantity at IB.
+        ib_net_position = 0
+        for pos in ib_positions:
+            # ib_positions is a list of Position objects with .position (signed qty)
+            if hasattr(pos, 'position'):
+                ib_net_position += int(pos.position)
+
+        # Count what our state thinks we hold
+        state_net_position = 0
+        for og in daily_state.open_positions:
+            qty = og.filled_qty or og.target_qty
+            if og.side == "BUY":
+                state_net_position += qty
+            else:
+                state_net_position -= qty
+
+        stale_positions = []
+        if daily_state.open_positions and ib_net_position == 0:
+            # IB flat but we think we have positions — they were closed without us
+            stale_positions = [og.group_id for og in daily_state.open_positions]
+        elif daily_state.open_positions and abs(ib_net_position) < abs(state_net_position):
+            # IB has fewer contracts than we expect — some positions closed.
+            # Close positions from the oldest until our count matches IB.
+            excess = abs(state_net_position) - abs(ib_net_position)
+            sorted_positions = sorted(
+                daily_state.open_positions,
+                key=lambda og: og.filled_at or og.submitted_at or "",
+            )
+            closed_qty = 0
+            for og in sorted_positions:
+                if closed_qty >= excess:
+                    break
+                stale_positions.append(og.group_id)
+                closed_qty += og.filled_qty or og.target_qty
+
+        for gid in stale_positions:
+            daily_state.move_to_closed(gid, "RECONCILE_IB_CLOSED")
+            if self._logger:
+                self._logger.log(
+                    "reconciliation",
+                    action="position_closed_at_ib",
+                    group_id=gid,
+                    note="TP/SL likely filled while bot was offline",
+                )
+
         if self._logger:
             self._logger.log(
                 "reconciliation",
                 action="complete",
                 orphans_removed=len(orphaned),
+                stale_positions_closed=len(stale_positions),
                 ib_orders=len(ib_orders),
                 ib_positions=len(ib_positions),
+                ib_net_qty=ib_net_position,
+                state_net_qty=state_net_position,
             )
 
         return daily_state

@@ -244,6 +244,16 @@ class Clock:
         return self._sync_count > 0
 
     @property
+    def is_trusted(self):
+        """True if the clock has had at least one successful NTP sync.
+
+        When False, the bot should block new trade entries — session timing
+        decisions (entry windows, EOD flatten) cannot be trusted because the
+        system clock may have drifted arbitrarily (especially on WSL2).
+        """
+        return self._sync_count > 0
+
+    @property
     def sync_age_seconds(self):
         """Seconds since last successful NTP sync."""
         if self._last_sync == 0:

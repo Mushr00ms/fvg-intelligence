@@ -314,6 +314,7 @@ function renderClosed(trades) {
 const EVENT_CLASSES = {
   fvg_detected: 'fvg', mitigation: 'fvg',
   setup_accepted: 'trade', order_placed: 'trade', order_filled: 'trade',
+  hfoiv_scale: 'trade', dd_scale: 'trade',
   tp_filled: 'win', sl_filled: 'loss', eod_exit: 'alert',
   kill_switch: 'alert', bot_error: 'alert', connection_lost: 'alert',
   bot_start: 'system', bot_stop: 'system', bars_subscribed: 'system',
@@ -341,6 +342,13 @@ function formatEvent(evt) {
       break;
     case 'setup_accepted':
       detail = `<span class="tag ${evt.side?.toLowerCase()}">${evt.side}</span> ${evt.setup} entry=${evt.entry} SL=${evt.stop} TP=${evt.target} ${evt.n}R qty=${evt.qty}`;
+      if (evt.hfoiv_mult) detail += ` <span class="tag" style="background:#ff9f43;color:#000;font-size:9px">HFOIV ${evt.hfoiv_mult}x (p${Math.round(evt.hfoiv_pct||0)})</span>`;
+      break;
+    case 'hfoiv_scale':
+      detail = `HFOIV scaled ${evt.original_qty}→${evt.scaled_qty}ct (${evt.multiplier}x) p${Math.round(evt.percentile||0)} hfoiv=${evt.hfoiv?.toFixed(1)||'?'}`;
+      break;
+    case 'dd_scale':
+      detail = `DD scaled ${evt.original_qty}→${evt.scaled_qty}ct (${evt.multiplier}x) daily_pnl=$${evt.daily_pnl}`;
       break;
     case 'order_placed':
       detail = `<span class="tag ${evt.side?.toLowerCase()}">${evt.side}</span> ${evt.setup} ${evt.contracts}ct @ ${evt.entry}`;

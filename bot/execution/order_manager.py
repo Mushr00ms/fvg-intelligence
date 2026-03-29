@@ -153,7 +153,12 @@ class OrderManager:
             transmit=True,  # Transmit the whole bracket
         )
 
-        # Place all three — wrapped for IB disconnect/rejection safety
+        # Place all three — wrapped for IB disconnect/rejection safety.
+        # If entry is placed but TP/SL fail, cancel the entry to prevent
+        # an unhedged position (no stop loss).
+        entry_trade = None
+        tp_trade = None
+        sl_trade = None
         try:
             entry_trade = ib.placeOrder(self._contract, parent)
             tp_trade = ib.placeOrder(self._contract, tp)
@@ -163,7 +168,18 @@ class OrderManager:
                 "order_placement_failed",
                 group_id=og.group_id,
                 error=str(e),
+                entry_placed=entry_trade is not None,
+                tp_placed=tp_trade is not None,
             )
+            # Cancel any orders that were placed to prevent unhedged positions
+            for placed_order in (parent, tp, sl):
+                try:
+                    if placed_order.orderId in {
+                        t.order.orderId for t in ib.openTrades()
+                    }:
+                        ib.cancelOrder(placed_order)
+                except Exception:
+                    pass  # Best-effort cleanup; reconciliation catches stragglers
             daily_state.move_to_closed(og.group_id, CLOSE_REJECTED)
             self._state_mgr.save(daily_state)
             return og
@@ -466,6 +482,60 @@ class OrderManager:
                     group_id=og.group_id,
                     error=str(e),
                 )
+
+    async def verify_child_order_quantities(self, daily_state):
+        """Verify TP/SL quantities match filled_qty for all open positions.
+
+        Called on reconnect to fix mismatches from failed adjustments during
+        a prior connection drop.  If an open position's TP/SL orders have a
+        different totalQuantity than filled_qty, re-adjust them.
+        """
+        if self._config.dry_run or not self._conn.is_connected:
+            return
+
+        ib = self._conn.ib
+        open_trades = {t.order.orderId: t for t in ib.openTrades()}
+        fixed = 0
+
+        for og in daily_state.open_positions:
+            expected_qty = og.filled_qty or og.target_qty
+            for ib_id in (og.ib_tp_order_id, og.ib_sl_order_id):
+                if ib_id and ib_id in open_trades:
+                    trade = open_trades[ib_id]
+                    if trade.order.totalQuantity != expected_qty:
+                        self._logger.log(
+                            "child_qty_mismatch_fixed",
+                            group_id=og.group_id,
+                            order_id=ib_id,
+                            was=trade.order.totalQuantity,
+                            expected=expected_qty,
+                        )
+                        trade.order.totalQuantity = expected_qty
+                        ib.placeOrder(self._contract, trade.order)
+                        fixed += 1
+
+        # Also check PARTIAL orders in pending
+        for og in daily_state.pending_orders:
+            if og.state != "PARTIAL" or og.filled_qty <= 0:
+                continue
+            for ib_id in (og.ib_tp_order_id, og.ib_sl_order_id):
+                if ib_id and ib_id in open_trades:
+                    trade = open_trades[ib_id]
+                    if trade.order.totalQuantity != og.filled_qty:
+                        self._logger.log(
+                            "child_qty_mismatch_fixed",
+                            group_id=og.group_id,
+                            order_id=ib_id,
+                            was=trade.order.totalQuantity,
+                            expected=og.filled_qty,
+                        )
+                        trade.order.totalQuantity = og.filled_qty
+                        ib.placeOrder(self._contract, trade.order)
+                        fixed += 1
+
+        if fixed > 0:
+            self._logger.log("child_qty_verify_done", adjustments=fixed)
+            self._state_mgr.save(daily_state)
 
     async def cancel_order_group(self, og, daily_state, reason=CLOSE_CANCEL):
         """Cancel all orders in an order group."""

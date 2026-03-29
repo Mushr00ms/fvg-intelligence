@@ -2142,10 +2142,8 @@ function _btStreakStats() {
 
 function _btDDPercentilesStats() {
   const s = _btResults.summary;
-  if (!s || s.dd_p50_pct == null) return '';
-  return `<div class="bt-stat"><span class="label">DD p50</span><span class="value neg">${s.dd_p50_pct}%</span></div>` +
-         `<div class="bt-stat"><span class="label">DD p75</span><span class="value neg">${s.dd_p75_pct}%</span></div>` +
-         `<div class="bt-stat"><span class="label">DD p95</span><span class="value neg">${s.dd_p95_pct}%</span></div>`;
+  if (!s || s.dd_p95_pct == null) return '';
+  return `<div class="bt-stat"><span class="label">DD p95</span><span class="value neg">${s.dd_p95_pct}%</span></div>`;
 }
 
 function _btAdjustedPnlStat() {
@@ -2327,7 +2325,7 @@ function btRenderTradePage() {
     const i = start + pi;
     const cls = t.exit_reason === 'TP' ? 'win' : (t.exit_reason === 'SL' ? 'loss' : 'eod');
     const setup = t.setup.replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
-    const bal = _btBalMap[t.id] != null ? _btBalMap[t.id] : (i === 0 ? startBal + t.pnl_dollars : '');
+    const bal = t.balance != null ? t.balance : (_btBalMap[t.id] != null ? _btBalMap[t.id] : (i === 0 ? startBal + t.pnl_dollars : ''));
     const balStr = typeof bal === 'number' ? '$' + Math.round(bal).toLocaleString() : '';
     let durStr = '';
     if (t.entry_time && t.exit_time) {
