@@ -2118,6 +2118,7 @@ function btRenderStats() {
     <div class="bt-stat"><span class="label">Avg Loss</span><span class="value neg">$${Math.round(s.avg_loss).toLocaleString()}</span></div>
     <div class="bt-stat"><span class="label">Trades/Day</span><span class="value">${s.trades_per_day}</span></div>
     ${_btStreakStats()}
+    ${_btDDPercentilesStats()}
     ${_btAdjustedPnlStat()}
   `;
 }
@@ -2137,6 +2138,14 @@ function _btStreakStats() {
   }
   return `<div class="bt-stat"><span class="label">Best Streak</span><span class="value pos">${winStreak}W</span></div>` +
          `<div class="bt-stat"><span class="label">Worst Streak</span><span class="value neg">${loseStreak}L</span></div>`;
+}
+
+function _btDDPercentilesStats() {
+  const s = _btResults.summary;
+  if (!s || s.dd_p50_pct == null) return '';
+  return `<div class="bt-stat"><span class="label">DD p50</span><span class="value neg">${s.dd_p50_pct}%</span></div>` +
+         `<div class="bt-stat"><span class="label">DD p75</span><span class="value neg">${s.dd_p75_pct}%</span></div>` +
+         `<div class="bt-stat"><span class="label">DD p95</span><span class="value neg">${s.dd_p95_pct}%</span></div>`;
 }
 
 function _btAdjustedPnlStat() {
@@ -2264,6 +2273,19 @@ function _btVolCell(v, exitReason) {
   const note = (exitReason === 'SL' || exitReason === 'EOD') ? '<span style="font-size:9px;opacity:0.5"> ★</span>' : '';
   return `<td style="color:${col};font-family:var(--mono)">${v}${note}</td>`;
 }
+function _btVolThroughCell(v) {
+  if (v == null) return '<td style="color:var(--text-dim)">—</td>';
+  const col = v >= 30 ? 'var(--green)' : v > 0 ? 'var(--amber)' : 'var(--red)';
+  return `<td style="color:${col};font-family:var(--mono)">${v.toLocaleString()}</td>`;
+}
+function _btSlipCell(t) {
+  const slip = t.stop_slippage_pts;
+  if (slip == null || t.exit_reason !== 'SL') return '<td style="color:var(--text-dim)">—</td>';
+  if (slip === 0) return '<td style="color:var(--green);font-family:var(--mono)">0</td>';
+  const col = slip >= 5 ? 'var(--red)' : slip >= 1 ? 'var(--amber)' : 'var(--text)';
+  const cost = Math.round(slip * t.contracts * 20);
+  return `<td style="color:${col};font-family:var(--mono)" title="Cost: $${cost.toLocaleString()}">${slip.toFixed(2)}</td>`;
+}
 
 function btRenderTradePage() {
   const allTrades = _btResults.trades || [];
@@ -2275,6 +2297,8 @@ function btRenderTradePage() {
 
   // Vol filter stats
   const hasVol = allTrades.some(t => t.volume_at_entry != null);
+  const hasVolTP = allTrades.some(t => t.volume_at_tp != null);
+  const hasSlip = allTrades.some(t => t.stop_slippage_pts != null);
   const hasDdNote = allTrades.some(t => t.dd_note);
   const hiCount = hasVol ? allTrades.filter(t => t.volume_at_entry != null && t.volume_at_entry >= 30).length : 0;
   const loCount = hasVol ? allTrades.filter(t => t.volume_at_entry == null || t.volume_at_entry < 30).length : 0;
@@ -2295,6 +2319,8 @@ function btRenderTradePage() {
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
     <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
     ${hasVol ? '<th title="Tick volume at exact entry price (formation→exit). ★=SL/EOD trade (already in market)">Vol@Entry</th>' : ''}
+    ${hasVolTP ? '<th title="Tick volume at exact TP price (entry→SL/EOD bracket window)">Vol@TP</th>' : ''}
+    ${hasSlip ? '<th title="Stop slippage in points (actual fill vs stop price). Hover for dollar cost.">SL Slip</th>' : ''}
     ${hasDdNote ? '<th>DD Note</th>' : ''}
   </tr></thead><tbody>`;
   page.forEach((t, pi) => {
@@ -2322,6 +2348,8 @@ function btRenderTradePage() {
       <td>${t.exit_price}</td><td>${t.exit_reason}</td><td>${durStr}</td>
       <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td>
       ${hasVol ? _btVolCell(t.volume_at_entry, t.exit_reason) : ''}
+      ${hasVolTP ? _btVolCell(t.volume_at_tp, t.exit_reason) : ''}
+      ${hasSlip ? _btSlipCell(t) : ''}
       ${hasDdNote ? `<td style="font-size:9px;color:#ff9f43;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.dd_note || ''}">${t.dd_note || ''}</td>` : ''}</tr>`;
   });
   html += '</tbody></table></div>';

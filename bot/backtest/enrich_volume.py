@@ -29,7 +29,7 @@ import os
 import sys
 import zipfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,8 @@ from logic.utils.contract_utils import generate_nq_expirations, get_contract_for
 _MONTH_LETTERS = {3: "H", 6: "M", 9: "U", 12: "Z"}
 
 # Extract to Linux FS for 10x faster I/O vs /mnt/c/
-DEFAULT_EXTRACT_DIR = "/tmp/databento_trades_nq"
+DEFAULT_EXTRACT_DIR = os.path.expanduser("~/databento_trades_nq")
+DEFAULT_TICK_DIR = os.path.join(_ROOT, "bot", "data", "ticks")
 
 
 def expiry_to_symbol(exp_date) -> str:
@@ -62,8 +63,8 @@ def expiry_to_symbol(exp_date) -> str:
 
 
 def find_trades_zip(root: str) -> str | None:
-    """Auto-detect the Databento trades zip in the project root."""
-    for fname in os.listdir(root):
+    """Auto-detect the first Databento trades zip in the project root."""
+    for fname in sorted(os.listdir(root)):
         if not (fname.startswith("GLBX") and fname.endswith(".zip")):
             continue
         path = os.path.join(root, fname)
@@ -75,6 +76,23 @@ def find_trades_zip(root: str) -> str | None:
         except Exception:
             continue
     return None
+
+
+def find_all_trades_zips(root: str) -> list[str]:
+    """Find ALL Databento trades zips in the project root."""
+    zips = []
+    for fname in sorted(os.listdir(root)):
+        if not (fname.startswith("GLBX") and fname.endswith(".zip")):
+            continue
+        path = os.path.join(root, fname)
+        try:
+            with zipfile.ZipFile(path) as zf:
+                names = [i.filename for i in zf.infolist()]
+                if any(".trades.dbn.zst" in n for n in names):
+                    zips.append(path)
+        except Exception:
+            continue
+    return zips
 
 
 def extract_zip(zip_path: str, out_dir: str, verbose: bool = True):
@@ -136,6 +154,34 @@ def load_day_ticks(date_str: str, extract_dir: str):
     return df
 
 
+def load_day_ticks_parquet(date_str: str, tick_dir: str):
+    """Load precomputed tick parquet for a day.
+
+    Converts parquet format (ts_ns/int8 side) back to the DataFrame format
+    expected by compute_volume_* functions (ts_event/str side), so all
+    existing enrichment code works unchanged.
+
+    Returns DataFrame or None if file missing.
+    """
+    compact = date_str.replace("-", "")
+    path = os.path.join(tick_dir, f"nq_ticks_{compact}.parquet")
+    if not os.path.exists(path):
+        return None
+
+    df = pd.read_parquet(path)
+    if df.empty:
+        return None
+
+    # Convert ts_ns (int64) → ts_event (datetime64[ns, UTC])
+    df["ts_event"] = pd.to_datetime(df["ts_ns"], unit="ns", utc=True)
+
+    # Convert side (int8: 1/-1/0) → str ('A'/'B'/'')
+    side_int = df["side"].to_numpy()
+    df["side"] = np.where(side_int == 1, "A", np.where(side_int == -1, "B", ""))
+
+    return df
+
+
 def compute_volume_at_price(df: pd.DataFrame, symbol: str,
                              entry_price: float,
                              formation_utc: datetime,
@@ -154,8 +200,8 @@ def compute_volume_at_price(df: pd.DataFrame, symbol: str,
 
     prices = df_sym["price"].to_numpy(dtype=np.float64)
     sizes = df_sym["size"].to_numpy(dtype=np.int64)
-    # ts_event is datetime64[ns, UTC] — astype int64 gives nanoseconds since epoch
-    ts_ns = df_sym["ts_event"].astype("int64").to_numpy()
+    # ts_event may be datetime64[ns] or datetime64[us] — normalize to ns int64
+    ts_ns = df_sym["ts_event"].to_numpy("datetime64[ns]").view("int64")
 
     t_start_ns = pd.Timestamp(formation_utc).value
     t_end_ns = pd.Timestamp(exit_utc).value
@@ -191,7 +237,7 @@ def compute_volume_first_touch(df: pd.DataFrame, symbol: str,
 
     prices = df_sym["price"].to_numpy(dtype=np.float64)
     sizes = df_sym["size"].to_numpy(dtype=np.int64)
-    ts_ns = df_sym["ts_event"].astype("int64").to_numpy()
+    ts_ns = df_sym["ts_event"].to_numpy("datetime64[ns]").view("int64")
 
     t_start_ns = pd.Timestamp(entry_utc).value
     t_end_ns = t_start_ns + 1_000_000_000  # +1 second in nanoseconds
@@ -205,14 +251,97 @@ def compute_volume_first_touch(df: pd.DataFrame, symbol: str,
     return int(sizes[mask].sum())
 
 
+def compute_volume_through_price(df: pd.DataFrame, symbol: str,
+                                  target_price: float, side: str,
+                                  start_utc: datetime,
+                                  end_utc: datetime) -> int | None:
+    """Sum tick volume at or through a price level within a time window.
+
+    For a BUY position's TP (sell limit): counts ticks >= target_price.
+    For a SELL position's TP (buy limit): counts ticks <= target_price.
+
+    This captures all fills that would execute a resting limit order at
+    the target, including ticks that gap through the level.
+
+    Returns:
+        Total contracts at-or-better than target_price.
+        None if the symbol had no ticks on this day.
+    """
+    df_sym = df[df["symbol"] == symbol]
+    if df_sym.empty:
+        return None
+
+    prices = df_sym["price"].to_numpy(dtype=np.float64)
+    sizes = df_sym["size"].to_numpy(dtype=np.int64)
+    ts_ns = df_sym["ts_event"].to_numpy("datetime64[ns]").view("int64")
+
+    t_start_ns = pd.Timestamp(start_utc).value
+    t_end_ns = pd.Timestamp(end_utc).value
+
+    time_mask = (ts_ns >= t_start_ns) & (ts_ns <= t_end_ns)
+
+    # BUY position → TP is a sell limit → fills at or above target
+    # SELL position → TP is a buy limit → fills at or below target
+    if side == "BUY":
+        price_mask = prices >= target_price - 1e-6
+    else:
+        price_mask = prices <= target_price + 1e-6
+
+    mask = time_mask & price_mask
+    return int(sizes[mask].sum())
+
+
+def find_bracket_end(df: pd.DataFrame, symbol: str,
+                     stop_price: float, side: str,
+                     after_utc: datetime) -> datetime:
+    """Find when the SL would trigger or EOD, scanning ticks after a given time.
+
+    For TP exits: tells us how long the bracket would have stayed open,
+    giving the full liquidity window for the TP limit order.
+
+    Returns the timestamp of the first SL-triggering tick, or 16:00 ET EOD.
+    """
+    df_sym = df[df["symbol"] == symbol]
+    if df_sym.empty:
+        # Default to EOD
+        d = after_utc.date() if hasattr(after_utc, 'date') else after_utc
+        return datetime(after_utc.year, after_utc.month, after_utc.day,
+                        21, 0, 0, tzinfo=timezone.utc)  # 16:00 ET = 21:00 UTC
+
+    prices = df_sym["price"].to_numpy(dtype=np.float64)
+    ts_ns = df_sym["ts_event"].to_numpy("datetime64[ns]").view("int64")
+
+    t_start_ns = pd.Timestamp(after_utc).value
+
+    # Scan forward from after_utc
+    start_idx = np.searchsorted(ts_ns, t_start_ns, side='left')
+
+    # BUY position → SL triggers when price <= stop
+    # SELL position → SL triggers when price >= stop
+    for i in range(start_idx, len(prices)):
+        if side == "BUY" and prices[i] <= stop_price:
+            return pd.Timestamp(ts_ns[i], unit='ns', tz='UTC').to_pydatetime()
+        elif side != "BUY" and prices[i] >= stop_price:
+            return pd.Timestamp(ts_ns[i], unit='ns', tz='UTC').to_pydatetime()
+
+    # No SL trigger found → EOD
+    return datetime(after_utc.year, after_utc.month, after_utc.day,
+                    21, 0, 0, tzinfo=timezone.utc)
+
+
 def compute_stop_slippage(df: pd.DataFrame, symbol: str,
                           stop_price: float, side: str,
-                          exit_utc: datetime) -> dict | None:
-    """Find the actual trade price at/through the stop level near exit time.
+                          exit_utc: datetime,
+                          qty: int = 1) -> dict | None:
+    """Simulate stop-loss market order fill using tick data.
 
-    Scans a 2-second window around the backtester's exit_time for the first
-    trade that would trigger the stop order. Returns the real fill price
-    and slippage vs the stop level.
+    A stop order becomes a market order when triggered. For large positions,
+    this eats through multiple price levels. We walk ticks from the trigger
+    point, accumulating volume at each price until `qty` contracts are filled.
+    The VWAP of those fills is the actual exit price.
+
+    This is conservative — real fills may be better due to hidden/iceberg
+    liquidity not visible in trade prints.
 
     Args:
         df: day's tick DataFrame (all symbols)
@@ -220,9 +349,10 @@ def compute_stop_slippage(df: pd.DataFrame, symbol: str,
         stop_price: the stop order price
         side: "BUY" or "SELL" (the position side, not the stop side)
         exit_utc: backtester's exit timestamp (UTC-aware)
+        qty: number of contracts to fill
 
     Returns:
-        dict with actual_stop_price, slippage_pts, slippage_dollars_per_contract
+        dict with actual_stop_price (VWAP), slippage_pts, fills breakdown
         None if no matching ticks found (data gap)
     """
     df_sym = df[df["symbol"] == symbol]
@@ -230,47 +360,73 @@ def compute_stop_slippage(df: pd.DataFrame, symbol: str,
         return None
 
     prices = df_sym["price"].to_numpy(dtype=np.float64)
-    ts_ns = df_sym["ts_event"].astype("int64").to_numpy()
+    sizes = df_sym["size"].to_numpy(dtype=np.int64)
+    ts_ns = df_sym["ts_event"].to_numpy("datetime64[ns]").view("int64")
 
-    # Search in a 2-second window around exit time
+    # Find the trigger point: first tick at-or-through stop near exit time
     t_center_ns = pd.Timestamp(exit_utc).value
-    t_start_ns = t_center_ns - 2_000_000_000   # -2 seconds
-    t_end_ns = t_center_ns + 2_000_000_000     # +2 seconds
+    t_start_ns = t_center_ns - 2_000_000_000   # look back 2s to find trigger
 
-    time_mask = (ts_ns >= t_start_ns) & (ts_ns <= t_end_ns)
-    window_prices = prices[time_mask]
-    window_ts = ts_ns[time_mask]
+    start_idx = int(np.searchsorted(ts_ns, t_start_ns, side='left'))
 
-    if len(window_prices) == 0:
-        return None
+    is_buy = side == "BUY"
+    trigger_idx = -1
+    for i in range(start_idx, len(prices)):
+        if is_buy and prices[i] <= stop_price:
+            trigger_idx = i
+            break
+        elif not is_buy and prices[i] >= stop_price:
+            trigger_idx = i
+            break
 
-    # Find first trade that triggers the stop
-    # BUY position → SL is a SELL stop → triggers when price <= stop_price
-    # SELL position → SL is a BUY stop → triggers when price >= stop_price
-    if side == "BUY":
-        trigger_mask = window_prices <= stop_price
-    else:
-        trigger_mask = window_prices >= stop_price
-
-    if not trigger_mask.any():
-        # Stop level not reached in window — fill at exact stop (no slippage)
+    if trigger_idx < 0:
         return {"actual_stop_price": stop_price, "slippage_pts": 0.0,
                 "slippage_per_contract": 0.0}
 
-    # First triggering trade
-    first_idx = np.argmax(trigger_mask)
-    actual_price = float(window_prices[first_idx])
+    # Walk forward from trigger until all qty contracts are filled.
+    # A stop-market order fills at the BID side once triggered:
+    # - Ticks at-or-worse than stop: real adverse fills (use actual price)
+    # - Ticks better than stop: represent ask-side trades (buyer aggressor),
+    #   not available bid liquidity. Cap these at stop price — the best
+    #   a stop-market can fill is at the stop level itself.
+    filled = 0
+    cost = 0.0
 
-    if side == "BUY":
-        slippage = stop_price - actual_price  # positive = worse (filled below stop)
+    for i in range(trigger_idx, len(prices)):
+        tick_price = float(prices[i])
+        # Cap at stop price — can't fill better than trigger level
+        if is_buy:
+            fill_price = min(tick_price, stop_price)   # sell stop: fills at or below
+        else:
+            fill_price = max(tick_price, stop_price)   # buy stop: fills at or above
+        tick_size = int(sizes[i])
+        take = min(tick_size, qty - filled)
+        cost += fill_price * take
+        filled += take
+        if filled >= qty:
+            break
+
+    if filled == 0:
+        return {"actual_stop_price": stop_price, "slippage_pts": 0.0,
+                "slippage_per_contract": 0.0}
+
+    vwap = cost / filled
+
+    if is_buy:
+        slippage = round(stop_price - vwap, 2)
     else:
-        slippage = actual_price - stop_price  # positive = worse (filled above stop)
+        slippage = round(vwap - stop_price, 2)
 
-    slippage = round(slippage, 2)
+    # Dollar cost is exact: each fill is grid_price × int_qty × $20
+    slippage_dollars = round((stop_price * filled - cost) * 20.0, 2) if is_buy else \
+                       round((cost - stop_price * filled) * 20.0, 2)
+
     return {
-        "actual_stop_price": actual_price,
+        "actual_stop_price": round(vwap, 2),
         "slippage_pts": slippage,
-        "slippage_per_contract": round(slippage * 20.0, 2),  # $20/point for NQ
+        "slippage_per_contract": round(slippage_dollars / filled, 2) if filled else 0,
+        "slippage_dollars": slippage_dollars,
+        "filled_of_qty": filled,
     }
 
 
@@ -333,14 +489,27 @@ def print_summary(trades: list):
 
     print("───────────────────────────────────────────────────────────────────")
 
+    # ── Volume at TP (entry → SL/EOD) ──
+    tp_enriched = [t for t in trades if t.get("volume_at_tp") is not None]
+    if tp_enriched:
+        tp_vols = [t["volume_at_tp"] for t in tp_enriched]
+        tp_tp_vols = [t["volume_at_tp"] for t in tp_enriched if t.get("exit_reason") == "TP"]
+
+        print("\n── Volume at Exact TP (entry → exit) ──────────────────────────────")
+        stats(tp_vols,    "ALL")
+        stats(tp_tp_vols, "TP wins")
+        breakdown(np.array(tp_vols), "Exact TP")
+
+    print("───────────────────────────────────────────────────────────────────")
+
     # ── Adjusted P&L (fill probability discount) ──
     adj_trades = [t for t in trades if t.get("adjusted_pnl_dollars") is not None]
     if adj_trades:
-        raw_pnl = sum(t["pnl_dollars"] for t in adj_trades)
+        raw_pnl = sum(t.get("raw_pnl_dollars", t["pnl_dollars"]) for t in adj_trades)
         adj_pnl = sum(t["adjusted_pnl_dollars"] for t in adj_trades)
         hi_conf = [t for t in adj_trades if t.get("fill_probability", 1) >= 1.0]
         lo_conf = [t for t in adj_trades if t.get("fill_probability", 1) < 1.0]
-        lo_raw = sum(t["pnl_dollars"] for t in lo_conf)
+        lo_raw = sum(t.get("raw_pnl_dollars", t["pnl_dollars"]) for t in lo_conf)
         lo_adj = sum(t["adjusted_pnl_dollars"] for t in lo_conf)
         print(f"\n── Fill Probability Adjusted P&L ──────────────────────────────────")
         print(f"  Raw P&L (touch=fill):     ${raw_pnl:>10,.0f}  ({len(adj_trades)} trades)")
@@ -394,10 +563,11 @@ def print_summary(trades: list):
         print(f"  Total slippage cost:      ${total_slip_cost:>10,.0f}")
 
         # Full P&L impact
-        all_pnl = sum(t["pnl_dollars"] for t in trades)
-        print(f"\n  Backtest total P&L:       ${all_pnl:>10,.0f}")
-        print(f"  Slippage-adjusted total:  ${all_pnl - total_slip_cost:>10,.0f}")
-        print(f"  Slippage impact:          ${-total_slip_cost:>10,.0f} ({total_slip_cost/abs(all_pnl)*100:.1f}% of P&L)")
+        raw_total = sum(t.get("raw_pnl_dollars", t["pnl_dollars"]) for t in trades)
+        adj_total = sum(t["pnl_dollars"] for t in trades)
+        print(f"\n  Raw P&L (touch=fill):     ${raw_total:>10,.0f}")
+        print(f"  Slippage-adjusted P&L:    ${adj_total:>10,.0f}")
+        print(f"  Slippage impact:          ${adj_total - raw_total:>10,.0f} ({total_slip_cost/abs(raw_total)*100:.1f}% of raw P&L)")
         print(f"───────────────────────────────────────────────────────────────────")
 
 
@@ -425,24 +595,41 @@ def main():
         "--force", action="store_true",
         help="Re-enrich even if volume_at_entry is already present"
     )
+    parser.add_argument(
+        "--tick-dir", default=DEFAULT_TICK_DIR,
+        help=f"Directory with precomputed tick parquets (default: {DEFAULT_TICK_DIR}). "
+             "Falls back to raw .dbn.zst if parquet missing for a day."
+    )
     args = parser.parse_args()
 
-    # ── Locate zip ────────────────────────────────────────────────────────────
+    # ── Check for precomputed tick parquets ─────────────────────────────────
+    tick_dir = args.tick_dir
+    has_tick_parquets = os.path.isdir(tick_dir) and any(
+        f.endswith(".parquet") for f in os.listdir(tick_dir)
+    ) if os.path.isdir(tick_dir) else False
+
+    if has_tick_parquets:
+        n_parquets = len([f for f in os.listdir(tick_dir) if f.endswith(".parquet")])
+        print(f"Tick parquets: {n_parquets} files in {tick_dir}")
+
+    # ── Locate zip (needed as fallback if parquets don't cover all days) ─────
     zip_path = args.zip
+    has_raw = False
     if zip_path is None:
         zip_path = find_trades_zip(_ROOT)
-        if zip_path is None:
-            print("ERROR: No Databento trades zip found in project root. Use --zip to specify.")
-            sys.exit(1)
-    print(f"Trades zip : {zip_path}")
-
-    # ── Extract ───────────────────────────────────────────────────────────────
-    if not args.skip_extract:
-        print(f"Extracting to {args.extract_dir} ...")
-        extract_zip(zip_path, args.extract_dir)
-    else:
-        n = len([f for f in os.listdir(args.extract_dir) if f.endswith(".dbn.zst")])
-        print(f"Skipping extraction — {n} files in {args.extract_dir}")
+    if zip_path:
+        print(f"Trades zip : {zip_path}")
+        if not args.skip_extract:
+            print(f"Extracting to {args.extract_dir} ...")
+            extract_zip(zip_path, args.extract_dir)
+        else:
+            n = len([f for f in os.listdir(args.extract_dir) if f.endswith(".dbn.zst")])
+            print(f"Skipping extraction — {n} files in {args.extract_dir}")
+        has_raw = True
+    elif not has_tick_parquets:
+        print("ERROR: No tick parquets and no Databento trades zip found. "
+              "Use --tick-dir or --zip to specify.")
+        sys.exit(1)
 
     # ── Load results ──────────────────────────────────────────────────────────
     results_path = os.path.join(_ROOT, args.results) if not os.path.isabs(args.results) else args.results
@@ -460,7 +647,14 @@ def main():
     print(f"\nEnriching {len(trades)} trades from {results_path}")
 
     # ── Build NQ expiration calendar ──────────────────────────────────────────
-    exp_dates = generate_nq_expirations(2024, 2026)
+    # Derive year range from trade dates
+    all_years = set()
+    for t in trades:
+        y = int(t["date"][:4])
+        all_years.add(y)
+    min_year = min(all_years) if all_years else 2020
+    max_year = max(all_years) + 1 if all_years else 2027
+    exp_dates = generate_nq_expirations(min_year, max_year)
 
     # ── Group trades by date (load each day's ticks once) ────────────────────
     by_date: dict[str, list] = defaultdict(list)
@@ -481,13 +675,23 @@ def main():
 
         print(f"[{i+1:3d}/{total_dates}] {date_str}  {symbol}  ({len(day_trades)} trades)", end="", flush=True)
 
-        # Load tick data for this day
-        df = load_day_ticks(date_str, args.extract_dir)
+        # Load tick data — prefer precomputed parquets, fall back to raw .dbn.zst
+        df = None
+        tick_source = ""
+        if has_tick_parquets:
+            df = load_day_ticks_parquet(date_str, tick_dir)
+            if df is not None:
+                tick_source = "pq"
+        if df is None and has_raw:
+            df = load_day_ticks(date_str, args.extract_dir)
+            if df is not None:
+                tick_source = "dbn"
         if df is None:
             print(f"  ✗ no tick file")
             for t in day_trades:
                 t["volume_at_entry"] = None
                 t["volume_first_touch"] = None
+                t["volume_at_tp"] = None
             missing_days.append(date_str)
             continue
 
@@ -505,12 +709,19 @@ def main():
             formation_utc = parse_utc(trade["formation_time"])
             entry_utc = parse_utc(trade["entry_time"])
             exit_utc = parse_utc(trade["exit_time"])
+            # exit_time is the START of the exit bar. For volume lookups,
+            # extend to cover the full bar where the fill actually occurs.
+            # For stop slippage: use raw exit_utc (has its own ±2s search).
+            if exit_utc.second == 0 and exit_utc.microsecond == 0:
+                exit_utc_vol = exit_utc + timedelta(seconds=60)   # minute bar
+            else:
+                exit_utc_vol = exit_utc + timedelta(seconds=1)    # 1s bar
 
             vol_total = compute_volume_at_price(
                 df, symbol,
                 trade["entry_price"],
                 formation_utc,
-                exit_utc,
+                exit_utc_vol,
             )
             vol_ft = compute_volume_first_touch(
                 df, symbol,
@@ -528,7 +739,7 @@ def main():
                         df, alt_sym,
                         trade["entry_price"],
                         formation_utc,
-                        exit_utc,
+                        exit_utc_vol,
                     )
                     if alt_vol is not None and alt_vol > (vol_total or 0):
                         alt_ft = compute_volume_first_touch(
@@ -543,6 +754,38 @@ def main():
             trade["volume_at_entry"] = vol_total
             trade["volume_first_touch"] = vol_ft
 
+            # Volume at TP: measure over full bracket lifetime [entry, SL-or-EOD]
+            # For TP exits: extend past TP to when SL would trigger or EOD,
+            # giving the full liquidity window the limit order had to fill.
+            # For SL/EOD exits: window is already [entry, exit].
+            tp_price = trade.get("target_price")
+            trade_side = trade.get("side", "BUY")
+            stop_price = trade.get("stop_price")
+            if tp_price is not None:
+                if trade.get("exit_reason") == "TP" and stop_price:
+                    bracket_end = find_bracket_end(
+                        df, used_sym, stop_price, trade_side, exit_utc_vol,
+                    )
+                else:
+                    bracket_end = exit_utc_vol
+
+                vol_tp = compute_volume_at_price(
+                    df, used_sym, tp_price, entry_utc, bracket_end,
+                )
+                trade["volume_at_tp"] = vol_tp
+
+                # First-touch at TP: volume at TP during the exit 1s bar
+                if trade.get("exit_reason") == "TP":
+                    vol_tp_ft = compute_volume_first_touch(
+                        df, used_sym, tp_price, exit_utc_vol,
+                    )
+                    trade["volume_tp_first_touch"] = vol_tp_ft
+                else:
+                    trade["volume_tp_first_touch"] = None
+            else:
+                trade["volume_at_tp"] = None
+                trade["volume_tp_first_touch"] = None
+
             # Fill probability: ≥30 vol = 100%, <30 vol = vol/30 (linear discount)
             FILL_THRESHOLD = 30
             if vol_total is not None and vol_total >= FILL_THRESHOLD:
@@ -555,31 +798,166 @@ def main():
             trade["fill_probability"] = fill_prob
             trade["adjusted_pnl_dollars"] = round(trade["pnl_dollars"] * fill_prob, 2)
 
-            # Stop slippage: for SL exits, find actual tick price at stop level
+            # Stop slippage: for SL exits, simulate market order fill
             if trade.get("exit_reason") == "SL":
                 sl_result = compute_stop_slippage(
                     df, used_sym,
                     trade["stop_price"], trade["side"],
                     exit_utc,
+                    qty=trade.get("contracts", 1),
                 )
                 if sl_result:
                     trade["actual_stop_price"] = sl_result["actual_stop_price"]
                     trade["stop_slippage_pts"] = sl_result["slippage_pts"]
                     trade["stop_slippage_per_ct"] = sl_result["slippage_per_contract"]
-                    # Adjusted P&L accounting for stop slippage
-                    slip_cost = sl_result["slippage_pts"] * trade["contracts"] * 20.0
-                    trade["slippage_adjusted_pnl"] = round(trade["pnl_dollars"] - slip_cost, 2)
 
             suffix = f"→{used_sym}" if used_sym != symbol else ""
-            day_results.append(f"{vol_total}({vol_ft}ft){suffix}")
+            vtt = trade.get('volume_through_tp', 0)
+            tp_tag = f" thru:{vtt}" if tp_price else ""
+            day_results.append(f"{vol_total}({vol_ft}ft{tp_tag}){suffix}")
             enriched_count += 1
 
-        print(f"  [{', '.join(day_results)}]")
+        print(f"  [{tick_source}] [{', '.join(day_results[:5])}{'...' if len(day_results) > 5 else ''}]")
+
+    # ── Restore raw values before adjusting (idempotent re-enrichment) ───────
+    for t in trades:
+        if "raw_pnl_dollars" in t:
+            t["pnl_dollars"] = t["raw_pnl_dollars"]
+            t["pnl_pts"] = t["raw_pnl_pts"]
+            t["exit_price"] = t["raw_exit_price"]
+
+    # ── Apply per-trade slippage adjustments ──────────────────────────────────
+    for t in trades:
+        if t.get("stop_slippage_pts", 0) > 0 and t.get("exit_reason") == "SL":
+            slip = t["stop_slippage_pts"]
+            slip_cost = slip * t["contracts"] * 20.0
+            if "raw_pnl_dollars" not in t:
+                t["raw_pnl_dollars"] = t["pnl_dollars"]
+                t["raw_pnl_pts"] = t["pnl_pts"]
+                t["raw_exit_price"] = t.get("exit_price", t["stop_price"])
+            t["pnl_dollars"] = round(t["raw_pnl_dollars"] - slip_cost, 2)
+            t["pnl_pts"] = round(t["raw_pnl_pts"] - slip, 2)
+            t["exit_price"] = t["actual_stop_price"]
+            t["slippage_adjusted_pnl"] = t["pnl_dollars"]
+        elif "raw_pnl_dollars" not in t:
+            t["raw_pnl_dollars"] = t["pnl_dollars"]
+            t["raw_pnl_pts"] = t["pnl_pts"]
+            t["raw_exit_price"] = t.get("exit_price", 0)
+
+    # ── Recompute equity curve with adjusted PNL ──────────────────────────────
+    start_balance = (results.get("meta") or {}).get("balance", 100000)
+    running_bal = start_balance
+    for t in trades:
+        running_bal += t["pnl_dollars"]
+        t["balance"] = round(running_bal, 2)
+
+    # ── Compute enrichment summary stats ────────────────────────────────────
+    sl_trades = [t for t in trades if t.get("exit_reason") == "SL"]
+    slipped = [t for t in sl_trades if t.get("stop_slippage_pts", 0) > 0]
+    total_slippage_cost = sum(
+        t["stop_slippage_pts"] * t["contracts"] * 20.0
+        for t in slipped
+    )
+    # pnl_dollars is already adjusted; raw totals come from raw_pnl_dollars
+    raw_pnl = sum(t.get("raw_pnl_dollars", t["pnl_dollars"]) for t in trades)
+    slippage_adjusted_pnl = round(raw_pnl - total_slippage_cost, 2)
+
+    enrichment_summary = {
+        "enriched_trades": enriched_count,
+        "missing_days": len(missing_days),
+        "sl_trades": len(sl_trades),
+        "sl_slipped": len(slipped),
+        "sl_slippage_rate": round(len(slipped) / len(sl_trades) * 100, 1) if sl_trades else 0,
+        "avg_slippage_pts": round(
+            sum(t["stop_slippage_pts"] for t in slipped) / len(slipped), 2
+        ) if slipped else 0,
+        "max_slippage_pts": max(
+            (t["stop_slippage_pts"] for t in slipped), default=0
+        ),
+        "total_slippage_cost": round(total_slippage_cost, 2),
+        "raw_pnl": round(raw_pnl, 2),
+        "slippage_adjusted_pnl": slippage_adjusted_pnl,
+        "slippage_pnl_impact_pct": round(
+            total_slippage_cost / abs(raw_pnl) * 100, 1
+        ) if raw_pnl != 0 else 0,
+        "tp_exits_with_volume_through": sum(
+            1 for t in trades
+            if t.get("exit_reason") == "TP" and t.get("volume_through_tp", 0) > 0
+        ),
+        "tp_exits_total": sum(1 for t in trades if t.get("exit_reason") == "TP"),
+    }
+
+    # Update summary — overwrite primary PNL fields, preserve originals as raw_*
+    if "summary" in results:
+        s = results["summary"]
+        # Preserve raw values (only on first enrichment)
+        if "raw_net_pnl" not in s:
+            s["raw_net_pnl"] = s.get("net_pnl", 0)
+            s["raw_pnl_pct"] = s.get("pnl_pct", 0)
+            s["raw_final_balance"] = s.get("final_balance", 0)
+            s["raw_gross_loss"] = s.get("gross_loss", 0)
+            s["raw_profit_factor"] = s.get("profit_factor", 0)
+
+        # Overwrite with slippage-adjusted values
+        s["net_pnl"] = slippage_adjusted_pnl
+        start_bal = (results.get("meta") or {}).get("balance", 100000)
+        s["pnl_pct"] = round(slippage_adjusted_pnl / start_bal * 100, 1)
+        s["final_balance"] = round(start_bal + slippage_adjusted_pnl, 2)
+        s["gross_loss"] = round(s.get("raw_gross_loss", 0) - total_slippage_cost, 2)
+        raw_gross_profit = s.get("gross_profit", 0)
+        adj_gross_loss = abs(s["gross_loss"])
+        s["profit_factor"] = round(raw_gross_profit / adj_gross_loss, 2) if adj_gross_loss > 0 else 0
+        s["avg_loss"] = round(s["gross_loss"] / s.get("losses", 1), 2)
+
+        # Recompute max drawdown from adjusted equity curve
+        peak = start_bal
+        max_dd = 0
+        for t in trades:
+            bal = t.get("balance", start_bal)
+            if bal > peak:
+                peak = bal
+            dd = peak - bal
+            if dd > max_dd:
+                max_dd = dd
+        s["max_drawdown"] = round(max_dd, 2)
+        s["max_dd_pct"] = round(max_dd / peak * 100, 1) if peak > 0 else 0
+        s["total_slippage_cost"] = round(total_slippage_cost, 2)
+        s["slippage_pnl_impact_pct"] = enrichment_summary["slippage_pnl_impact_pct"]
+        s["sl_slippage_rate"] = enrichment_summary["sl_slippage_rate"]
+        s["avg_slippage_pts"] = enrichment_summary["avg_slippage_pts"]
+
+    results["enrichment"] = enrichment_summary
 
     # ── Save enriched JSON ────────────────────────────────────────────────────
     results["trades"] = trades
     with open(results_path, "w") as f:
         json.dump(results, f, separators=(",", ":"))
+
+    # ── Update manifest ──────────────────────────────────────────────────────
+    manifest_path = os.path.join(os.path.dirname(results_path), "manifest.json")
+    if os.path.exists(manifest_path):
+        run_id = os.path.basename(results_path).replace(".json", "")
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            for run in manifest.get("runs", []):
+                if run.get("run_id") == run_id:
+                    if "raw_net_pnl" not in run:
+                        run["raw_net_pnl"] = run.get("net_pnl", 0)
+                        run["raw_pnl_pct"] = run.get("pnl_pct", 0)
+                        run["raw_final_balance"] = run.get("final_balance", 0)
+                    run["net_pnl"] = slippage_adjusted_pnl
+                    run["pnl_pct"] = results["summary"]["pnl_pct"]
+                    run["final_balance"] = results["summary"]["final_balance"]
+                    run["profit_factor"] = results["summary"]["profit_factor"]
+                    run["total_slippage_cost"] = round(total_slippage_cost, 2)
+                    run["enriched"] = True
+                    break
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f, indent=4)
+            print(f"Manifest updated → {manifest_path}")
+        except Exception as e:
+            print(f"Warning: could not update manifest: {e}")
 
     print(f"\nSaved → {results_path}")
     if missing_days:
