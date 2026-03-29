@@ -215,6 +215,7 @@ def _make_engine_deps(config, strategy, logger=None, clock=None):
         clock: object
         ib_conn: object
         telegram: object = field(default_factory=lambda: type("T", (), {"enabled": False})())
+        hfoiv_gate: object = None
         _reconciliation_complete: bool = True
         _detection_lock: object = field(default_factory=asyncio.Lock)
 

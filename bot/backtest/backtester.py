@@ -34,6 +34,7 @@ from bot.backtest.us_holidays import is_trading_day
 from bot.strategy.fvg_detector import check_fvg_3bars, SESSION_INTERVALS, _assign_time_period
 from bot.strategy.trade_calculator import round_to_tick, TICK_SIZE, POINT_VALUE
 from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
+from bot.risk.hfoiv_gate import HFOIVGate, HFOIVConfig
 
 
 # ── Data Loading ──────────────────────────────────────────────────────────
@@ -744,6 +745,32 @@ def run_backtest(df_1s, strategy, config=None):
     if use_tier_reset:
         print(f"Tier reset: loss→{_small_risk:.2%} all buckets, first win→restore tiers")
 
+    # ── HFOIV gate ───────────────────────────────────────────────────
+    hfoiv_cfg_raw = config.get("hfoiv", {})
+    hfoiv_enabled = hfoiv_cfg_raw.get("enabled", False)
+    hfoiv_gate = HFOIVGate(HFOIVConfig(
+        enabled=hfoiv_enabled,
+        rolling_bars=hfoiv_cfg_raw.get("rolling_bars", 6),
+        lookback_sessions=hfoiv_cfg_raw.get("lookback_sessions", 90),
+        bucket_minutes=hfoiv_cfg_raw.get("bucket_minutes", 30),
+        thresholds=hfoiv_cfg_raw.get("thresholds", [(70, 0.25)]),
+    ))
+
+    # Load pre-computed imbalance bars (keyed by date string YYYYMMDD)
+    _imbalance_by_date = {}
+    imbalance_dir = config.get("imbalance_dir",
+                               os.path.join(_ROOT, "bot", "data", "imbalance"))
+    if hfoiv_enabled:
+        _imb_pattern = os.path.join(imbalance_dir, "nq_imbalance_5min_*.parquet")
+        _imb_files = sorted(glob.glob(_imb_pattern))
+        for f in _imb_files:
+            fname = os.path.basename(f)
+            dstr = fname.replace("nq_imbalance_5min_", "").replace(".parquet", "")
+            _imbalance_by_date[dstr] = f
+        print(f"HFOIV gate: enabled, {len(_imb_files)} imbalance files loaded "
+              f"(rolling={hfoiv_gate.config.rolling_bars}, "
+              f"lookback={hfoiv_gate.config.lookback_sessions} sessions)")
+
     # Group 1s bars by trading day (pre-group once, avoids O(N) scan per day)
     df_1s['trade_date'] = df_1s['date'].dt.date
     _day_groups = {day: grp for day, grp in df_1s.groupby('trade_date')}
@@ -780,6 +807,23 @@ def run_backtest(df_1s, strategy, config=None):
 
         # Pre-extract numpy arrays for numba (once per day, reused for all trades)
         day_arrays = _prepare_day_arrays(day_df)
+
+        # ── Feed HFOIV gate for this day ─────────────────────────────
+        hfoiv_by_minute = {}   # {bar_start_minutes: (mult, info)}
+        if hfoiv_enabled:
+            hfoiv_gate.reset_day()
+            day_compact = day.strftime("%Y%m%d")
+            imb_path = _imbalance_by_date.get(day_compact)
+            if imb_path:
+                imb_df = pd.read_parquet(imb_path)
+                imb_df["date"] = pd.to_datetime(imb_df["date"])
+                if imb_df["date"].dt.tz is None:
+                    imb_df["date"] = imb_df["date"].dt.tz_localize("America/New_York")
+                for _, row in imb_df.iterrows():
+                    bar_min = row["date"].hour * 60 + row["date"].minute
+                    hfoiv_gate.update(bar_min, row["imbalance"])
+                    mult, info = hfoiv_gate.get_size_multiplier(bar_min)
+                    hfoiv_by_minute[int(bar_min)] = (mult, info)
 
         # Track state for this day
         active_fvgs = []
@@ -971,6 +1015,21 @@ def run_backtest(df_1s, strategy, config=None):
                         _pre_dd = contracts
                         contracts = max(1, math.floor(contracts * dd_mult))
                         _dd_notes.append(f"DD scale {_pre_dd}→{contracts} (daily {dd_pct:+.1%})")
+
+                # HFOIV gate — reduce size when imbalance volatility is elevated
+                if hfoiv_enabled and hfoiv_by_minute:
+                    # Look up HFOIV multiplier for the most recent 5-min bar
+                    _mit_min = int(day_arrays['minutes'][mit_idx])
+                    _bar_min = (_mit_min // 5) * 5  # floor to 5-min grid
+                    _hfoiv_mult, _hfoiv_info = hfoiv_by_minute.get(
+                        _bar_min, (1.0, {}))
+                    if _hfoiv_mult < 1.0:
+                        _pre_hfoiv = contracts
+                        contracts = max(1, math.floor(contracts * _hfoiv_mult))
+                        _pct = _hfoiv_info.get("percentile", 0)
+                        _dd_notes.append(
+                            f"HFOIV {_pre_hfoiv}→{contracts} "
+                            f"(p{_pct:.0f} {_hfoiv_info.get('bucket', '')})")
 
                 # Check entry fill:
                 # --slip: price must reach slipped level (1 tick into zone)
@@ -1166,7 +1225,25 @@ def print_report(trades, start_balance, final_balance):
     print(f"  Profit factor:   {profit_factor:.2f}")
     print(f"  Avg win:         ${avg_win:,.0f}")
     print(f"  Avg loss:        ${avg_loss:,.0f}")
+    # Drawdown percentiles (end-of-day equity)
+    _daily_eq = defaultdict(float)
+    _run_bal = start_balance
+    for t in trades:
+        _run_bal += t.pnl_dollars
+        _daily_eq[t.date] = _run_bal
+    _eod = [_daily_eq[d] for d in sorted(_daily_eq.keys())]
+    _eod_dd = []
+    _pk = start_balance
+    for v in _eod:
+        if v > _pk:
+            _pk = v
+        _eod_dd.append((_pk - v) / _pk * 100 if _pk > 0 else 0)
+    _dd_a = np.array(_eod_dd)
+
     print(f"\n  Max drawdown:    ${max_dd:,.0f} ({max_dd_pct*100:.1f}%)")
+    if len(_dd_a):
+        print(f"  DD percentiles:  avg={_dd_a.mean():.1f}%  p50={np.percentile(_dd_a,50):.1f}%  "
+              f"p75={np.percentile(_dd_a,75):.1f}%  p95={np.percentile(_dd_a,95):.1f}%")
 
     print(f"\n  {'CELL':<42} {'TRADES':>6} {'WR%':>6} {'P&L':>10}")
     print(f"  {'-'*42} {'-'*6} {'-'*6} {'-'*10}")
@@ -1269,6 +1346,27 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
             "drawdown": round(dd, 2), "drawdown_pct": round(dd_pct * 100, 2),
         })
 
+    # Drawdown percentiles — computed on end-of-day equity snapshots
+    # This gives a realistic picture: "what DD level am I at on a typical day?"
+    import numpy as _np_dd
+    _daily_equity = defaultdict(float)
+    _running = start_balance
+    for t in trades:
+        _running += t.pnl_dollars
+        _daily_equity[t.date] = _running
+    _eod_vals = [_daily_equity[d] for d in sorted(_daily_equity.keys())]
+    _eod_dd_pcts = []
+    _eod_peak = start_balance
+    for v in _eod_vals:
+        if v > _eod_peak:
+            _eod_peak = v
+        _eod_dd_pcts.append((_eod_peak - v) / _eod_peak * 100 if _eod_peak > 0 else 0)
+    _dd_arr = _np_dd.array(_eod_dd_pcts)
+    dd_p50 = round(float(_np_dd.percentile(_dd_arr, 50)), 1) if len(_dd_arr) else 0
+    dd_p75 = round(float(_np_dd.percentile(_dd_arr, 75)), 1) if len(_dd_arr) else 0
+    dd_p95 = round(float(_np_dd.percentile(_dd_arr, 95)), 1) if len(_dd_arr) else 0
+    dd_avg = round(float(_dd_arr.mean()), 1) if len(_dd_arr) else 0
+
     # Daily P&L
     daily_map = defaultdict(lambda: {"pnl": 0, "trades": 0, "wins": 0})
     for t in trades:
@@ -1368,6 +1466,10 @@ def build_results_json(trades, start_balance, final_balance, strategy, config):
             "avg_loss": round(avg_loss, 2),
             "max_drawdown": round(max_dd, 2),
             "max_dd_pct": round(max_dd_pct * 100, 1),
+            "dd_avg_pct": dd_avg,
+            "dd_p50_pct": dd_p50,
+            "dd_p75_pct": dd_p75,
+            "dd_p95_pct": dd_p95,
             "trades_per_day": round(trades_per_day, 1),
             "total_contracts": sum(t.contracts for t in trades),
             "final_balance": round(final_balance, 2),
@@ -1441,6 +1543,15 @@ def main():
                         help="Streak max risk pct cap (default: 0.04 = 4%%)")
     parser.add_argument("--margin", type=float, default=33000.0,
                         help="Margin per contract (default: NQ intraday initial $33,000)")
+    parser.add_argument("--hfoiv", action="store_true",
+                        help="Enable HFOIV gate (requires pre-computed imbalance bars)")
+    parser.add_argument("--hfoiv-rolling", type=int, default=12,
+                        help="HFOIV rolling window in 5-min bars (default: 12 = 60min)")
+    parser.add_argument("--hfoiv-lookback", type=int, default=60,
+                        help="HFOIV normalization lookback in sessions (default: 60)")
+    parser.add_argument("--imbalance-dir",
+                        default=os.path.join(_ROOT, "bot", "data", "imbalance"),
+                        help="Directory with pre-computed imbalance parquets")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
     args = parser.parse_args()
@@ -1472,6 +1583,12 @@ def main():
         "streak_base": args.streak_base,
         "streak_mult": args.streak_mult,
         "streak_max": args.streak_max,
+        "hfoiv": {
+            "enabled": args.hfoiv,
+            "rolling_bars": args.hfoiv_rolling,
+            "lookback_sessions": args.hfoiv_lookback,
+        },
+        "imbalance_dir": args.imbalance_dir,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 
@@ -1498,6 +1615,12 @@ def main():
                 "base_pct": args.streak_base,
                 "multiplier": args.streak_mult,
                 "max_pct": args.streak_max,
+            }
+        if args.hfoiv:
+            results["meta"]["hfoiv_gate"] = {
+                "enabled": True,
+                "rolling_bars": args.hfoiv_rolling,
+                "lookback_sessions": args.hfoiv_lookback,
             }
         os.makedirs(os.path.dirname(args.json_output) or '.', exist_ok=True)
         with open(args.json_output, 'w') as f:

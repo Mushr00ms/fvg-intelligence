@@ -40,6 +40,19 @@
       "no_trade_witching_day": true,
       "no_trade_witching_day_minus_1": true,
       "description": "No trades from December 20 through end of year (low liquidity / holiday risk). Also skip quarterly witching day and prior weekday."
+    },
+    "hfoiv_gate": {
+      "enabled": true,
+      "rolling_bars": 6,
+      "lookback_sessions": 90,
+      "bucket_minutes": 30,
+      "thresholds": [
+        [
+          70,
+          0.25
+        ]
+      ],
+      "config_label": "p70_x0.25_r6_lb90"
     }
   },
   "cells": [

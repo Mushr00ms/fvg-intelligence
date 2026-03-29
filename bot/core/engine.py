@@ -28,6 +28,7 @@ from bot.strategy.strategy_loader import StrategyLoader
 from bot.strategy.fvg_detector import ActiveFVGManager
 from bot.strategy.mitigation_scanner import scan_active_fvgs
 from bot.strategy.tick_bar_builder import TickBarBuilder
+from bot.strategy.tick_imbalance_accumulator import TickImbalanceAccumulator
 from bot.strategy.trade_calculator import calculate_setup
 from bot.risk.risk_gates import RiskGates
 from bot.risk.time_gates import TimeGates
@@ -112,6 +113,8 @@ class BotEngine:
         self._tick_bar_builder = TickBarBuilder()
         self._tick_subscription = None
         self._tick_detected_bars = set()  # window_start datetimes already tick-detected
+        self.hfoiv_gate = None              # Initialized in _startup if enabled
+        self._imbalance_accumulator = None  # TickImbalanceAccumulator for live HFOIV
         self._shutdown = False
         self._reconciliation_complete = False  # Block trading until startup finishes
         self._detection_lock = asyncio.Lock()
@@ -142,6 +145,24 @@ class BotEngine:
         # 1. Load strategy
         self.strategy.load()
         self.fvg_mgr = ActiveFVGManager(self.strategy, self.config.min_fvg_size, self.logger)
+
+        # 1b. Initialize HFOIV gate (optional — config in strategy meta)
+        strategy_meta = self.strategy.strategy.get("meta", {}) if self.strategy.strategy else {}
+        hfoiv_cfg = strategy_meta.get("hfoiv_gate", {})
+        if hfoiv_cfg.get("enabled", False):
+            from bot.risk.hfoiv_gate import HFOIVGate, HFOIVConfig
+            self.hfoiv_gate = HFOIVGate(HFOIVConfig(
+                enabled=True,
+                rolling_bars=hfoiv_cfg.get("rolling_bars", 6),
+                lookback_sessions=hfoiv_cfg.get("lookback_sessions", 90),
+                bucket_minutes=hfoiv_cfg.get("bucket_minutes", 30),
+                thresholds=[tuple(t) for t in hfoiv_cfg.get("thresholds", [(70, 0.25)])],
+            ))
+            self._imbalance_accumulator = TickImbalanceAccumulator()
+            self.logger.log("hfoiv_gate_init",
+                            config_label=hfoiv_cfg.get("config_label", ""),
+                            rolling=self.hfoiv_gate.config.rolling_bars,
+                            lookback=self.hfoiv_gate.config.lookback_sessions)
 
         # 2. Connect to IB
         if not self.config.dry_run:
@@ -219,6 +240,10 @@ class BotEngine:
             await self._subscribe_bars()
             self._seed_recent_bars()
             self._subscribe_ticks()
+
+            # 6a-ii. Pre-populate HFOIV normalization history from stored parquets
+            if self.hfoiv_gate is not None:
+                self._load_hfoiv_history()
 
             # 6b. Backfill FVGs from today's existing 5-min bars
             # On crash/restart mid-session, the bot needs to know about
@@ -466,6 +491,57 @@ class BotEngine:
 
         self.logger.log("recent_bars_seeded", count=len(self.fvg_mgr._recent_bars))
 
+    def _load_hfoiv_history(self):
+        """Load historical imbalance parquets to pre-populate HFOIV normalization.
+
+        Reads the last N (lookback_sessions) parquets from bot/data/imbalance/,
+        feeds each day's bars through reset_day() + update() to build the
+        cross-session percentile history.  Calls reset_day() one final time
+        to prepare for today's live session.
+        """
+        import glob
+        import pandas as pd
+
+        imbalance_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "data", "imbalance"
+        )
+        if not os.path.isdir(imbalance_dir):
+            self.logger.log("hfoiv_history_skip", reason="no_imbalance_dir")
+            return
+
+        pattern = os.path.join(imbalance_dir, "nq_imbalance_5min_*.parquet")
+        files = sorted(glob.glob(pattern))
+        lookback = self.hfoiv_gate.config.lookback_sessions
+        files = files[-lookback:] if len(files) > lookback else files
+
+        loaded = 0
+        for fpath in files:
+            try:
+                df = pd.read_parquet(fpath)
+                # Validate schema before committing to gate state
+                if "date" not in df.columns or "imbalance" not in df.columns:
+                    self.logger.log("hfoiv_history_error",
+                                    file=os.path.basename(fpath),
+                                    error="missing date/imbalance columns")
+                    continue
+                if df.empty:
+                    continue
+                self.hfoiv_gate.reset_day()
+                for _, row in df.iterrows():
+                    bar_dt = row["date"]
+                    bar_min = bar_dt.hour * 60 + bar_dt.minute
+                    self.hfoiv_gate.update(bar_min, float(row["imbalance"]))
+                loaded += 1
+            except Exception as e:
+                self.logger.log("hfoiv_history_error",
+                                file=os.path.basename(fpath), error=str(e))
+
+        # Final reset for today's live session
+        self.hfoiv_gate.reset_day()
+        self.logger.log("hfoiv_history_loaded",
+                        sessions=loaded,
+                        session_count=self.hfoiv_gate._session_count)
+
     def _subscribe_ticks(self):
         """Subscribe to tick-by-tick trade data for sub-ms FVG detection.
 
@@ -498,6 +574,16 @@ class BotEngine:
 
             # Tick-based mitigation: check every trade against active FVGs
             self._check_tick_mitigation(tick.price, tick_time_et)
+
+            # Feed imbalance accumulator for HFOIV gate (ETH 08:30-16:00)
+            if self._imbalance_accumulator is not None:
+                tick_size = getattr(tick, 'size', None)
+                if tick_size is not None and tick_size > 0:
+                    imb_bar = self._imbalance_accumulator.on_tick(
+                        tick.price, tick_size, tick_time_et)
+                    if imb_bar is not None and self.hfoiv_gate is not None:
+                        self.hfoiv_gate.update(
+                            imb_bar["bar_minutes"], imb_bar["imbalance"])
 
             completed = self._tick_bar_builder.on_tick(tick.price, tick_time_et)
             if completed is not None:
@@ -720,6 +806,9 @@ class BotEngine:
             self._seed_recent_bars()
             self._subscribe_ticks()
             self._tick_detected_bars.clear()
+            # Reset imbalance accumulator (tick rule state stale after disconnect)
+            if self._imbalance_accumulator is not None:
+                self._imbalance_accumulator.reset()
             await self._backfill_fvgs()
             await self._process_backfilled_fvgs()
             self.logger.log("reconnect_resubscribe_done",
@@ -959,6 +1048,26 @@ class BotEngine:
                 )
                 order.target_qty = scaled_qty
 
+            # HFOIV gate — reduce size when imbalance volatility is elevated
+            if self.hfoiv_gate is not None:
+                _now = self.clock.now()
+                minutes_now = _now.hour * 60 + _now.minute if _now else 0
+                hfoiv_mult, hfoiv_info = self.hfoiv_gate.get_size_multiplier(minutes_now)
+                if hfoiv_mult < 1.0:
+                    pre_hfoiv_qty = order.target_qty
+                    import math as _math
+                    order.target_qty = max(1, _math.floor(order.target_qty * hfoiv_mult))
+                    self.logger.log(
+                        "hfoiv_scale",
+                        group_id=order.group_id,
+                        original_qty=pre_hfoiv_qty,
+                        scaled_qty=order.target_qty,
+                        multiplier=hfoiv_mult,
+                        percentile=hfoiv_info.get("percentile"),
+                        bucket=hfoiv_info.get("bucket"),
+                        hfoiv=hfoiv_info.get("hfoiv"),
+                    )
+
             # Place the bracket order
             risk_dollars = round(order.risk_pts * order.target_qty * 20, 2)
             reward_dollars = round(order.risk_pts * order.n_value * order.target_qty * 20, 2)
@@ -1179,6 +1288,14 @@ class BotEngine:
         expired = self.fvg_mgr.expire_all()
         self.daily_state.active_fvgs = []
         self._tick_detected_bars.clear()
+
+        # Flush today's HFOIV values to history + reset for next session
+        if self.hfoiv_gate is not None:
+            self.hfoiv_gate.reset_day()
+            self.logger.log("hfoiv_eod_flush",
+                            session_count=self.hfoiv_gate._session_count)
+        if self._imbalance_accumulator is not None:
+            self._imbalance_accumulator.reset()
 
         # Compute comprehensive daily stats
         closed = self.daily_state.closed_trades
