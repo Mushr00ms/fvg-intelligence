@@ -43,11 +43,24 @@ class OrderManager:
         self._on_order_resolved = None         # Callback for margin re-evaluation
         self._partial_timers = {}  # group_id -> asyncio.Task
         self._adjustment_lock = asyncio.Lock()  # Serialize partial fill qty adjustments
+        self._loop = None  # Cached event loop for thread-safe callback marshalling
 
     def _now_iso(self):
         if self._clock is not None:
             return self._clock.now().isoformat()
         return datetime.now(NY_TZ).isoformat()
+
+    def _safe_callback(self, fn, *args):
+        """Marshal a callback into the asyncio event loop (thread-safe).
+
+        IB callbacks may fire from IB's network thread. This ensures
+        state mutations happen on the asyncio loop thread.
+        """
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(fn, *args)
+        else:
+            fn(*args)
 
     async def place_bracket(self, order_group, daily_state):
         """
@@ -58,8 +71,11 @@ class OrderManager:
         reactivate_order() which skips the trade_count increment.
         Returns the updated OrderGroup.
         """
-        daily_state.trade_count += 1
-        return await self._place_bracket_internal(order_group, daily_state)
+        og = await self._place_bracket_internal(order_group, daily_state)
+        if og.state != "CLOSED":  # Only count if placement succeeded
+            daily_state.trade_count += 1
+            self._state_mgr.save(daily_state)
+        return og
 
     async def _place_bracket_internal(self, order_group, daily_state):
         """Internal bracket placement. Does NOT increment trade_count.
@@ -137,16 +153,33 @@ class OrderManager:
             transmit=True,  # Transmit the whole bracket
         )
 
-        # Place all three
-        entry_trade = ib.placeOrder(self._contract, parent)
-        tp_trade = ib.placeOrder(self._contract, tp)
-        sl_trade = ib.placeOrder(self._contract, sl)
+        # Place all three — wrapped for IB disconnect/rejection safety
+        try:
+            entry_trade = ib.placeOrder(self._contract, parent)
+            tp_trade = ib.placeOrder(self._contract, tp)
+            sl_trade = ib.placeOrder(self._contract, sl)
+        except Exception as e:
+            self._logger.log(
+                "order_placement_failed",
+                group_id=og.group_id,
+                error=str(e),
+            )
+            daily_state.move_to_closed(og.group_id, CLOSE_REJECTED)
+            self._state_mgr.save(daily_state)
+            return og
 
-        # Register fill callbacks
-        entry_trade.filledEvent += lambda trade: self._on_entry_fill(trade, og, daily_state)
-        entry_trade.statusEvent += lambda trade: self._on_entry_status(trade, og, daily_state)
-        tp_trade.filledEvent += lambda trade: self._on_tp_fill(trade, og, daily_state)
-        sl_trade.filledEvent += lambda trade: self._on_sl_fill(trade, og, daily_state)
+        # Cache event loop for thread-safe callback marshalling
+        self._loop = asyncio.get_event_loop()
+
+        # Register fill callbacks — marshalled via call_soon_threadsafe
+        entry_trade.filledEvent += lambda trade: self._safe_callback(
+            self._on_entry_fill, trade, og, daily_state)
+        entry_trade.statusEvent += lambda trade: self._safe_callback(
+            self._on_entry_status, trade, og, daily_state)
+        tp_trade.filledEvent += lambda trade: self._safe_callback(
+            self._on_tp_fill, trade, og, daily_state)
+        sl_trade.filledEvent += lambda trade: self._safe_callback(
+            self._on_sl_fill, trade, og, daily_state)
 
         self._logger.log(
             "order_placed",
@@ -257,6 +290,7 @@ class OrderManager:
             og.actual_entry_price = avg_fill
             og.entry_slippage_pts = slippage
             daily_state.move_to_open(og.group_id)
+            self._state_mgr.save(daily_state)
             self._logger.log(
                 "order_filled",
                 group_id=og.group_id,
@@ -305,6 +339,8 @@ class OrderManager:
                 self._partial_fill_timeout(og.group_id, daily_state, timeout)
             )
             self._partial_timers[og.group_id] = task
+
+        self._state_mgr.save(daily_state)
 
     async def _locked_adjust_child_qty(self, og, new_qty):
         """Serialize TP/SL qty adjustments to prevent race conditions between partial fills."""
@@ -358,6 +394,7 @@ class OrderManager:
                 og.state = "FILLED"
                 og.filled_at = self._now_iso()
                 daily_state.move_to_open(og.group_id)
+                self._state_mgr.save(daily_state)
 
                 self._logger.log(
                     "partial_fill_timeout",
@@ -410,6 +447,7 @@ class OrderManager:
                     og.state = "FILLED"
                     og.filled_at = self._now_iso()
                     daily_state.move_to_open(og.group_id)
+                    self._state_mgr.save(daily_state)
                 else:
                     # Timer still active — resume with remaining time
                     self._logger.log(
@@ -585,6 +623,7 @@ class OrderManager:
         """Take profit filled — log P&L, commissions, trade metrics."""
         if og.close_reason:
             return  # Already processed — guard against duplicate ib_async callbacks
+        og.close_reason = CLOSE_TP  # Atomic claim — prevents TP/SL race
         # Cancel any unfilled entry remainder + kill partial fill timer
         self._cleanup_entry_remainder(og)
 
@@ -674,6 +713,7 @@ class OrderManager:
         """Stop loss filled — log P&L, slippage, commissions."""
         if og.close_reason:
             return  # Already processed — guard against duplicate ib_async callbacks
+        og.close_reason = CLOSE_SL  # Atomic claim — prevents TP/SL race
         # Cancel any unfilled entry remainder + kill partial fill timer
         self._cleanup_entry_remainder(og)
 
