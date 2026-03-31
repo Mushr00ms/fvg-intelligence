@@ -1,7 +1,10 @@
 """Tests for FVG detection (check_fvg_3bars + ActiveFVGManager)."""
 
 import pytest
-from bot.strategy.fvg_detector import check_fvg_3bars, _assign_time_period, SESSION_INTERVALS, ActiveFVGManager
+from bot.strategy.fvg_detector import (
+    check_fvg_3bars, _assign_time_period, SESSION_INTERVALS,
+    ActiveFVGManager, _bars_same_day,
+)
 from datetime import time
 
 
@@ -294,3 +297,106 @@ class TestActiveFVGManager:
         result = mgr.on_5min_bar({"open": 19540, "high": 19555, "low": 19530, "close": 19548, "date": "2026-03-22T10:45:00"})
         assert result is None
         assert len(mgr._recent_bars) == 4
+
+
+class TestBarsSameDay:
+    """Tests for the _bars_same_day cross-session guard."""
+
+    def test_same_day_returns_true(self):
+        bar1 = {"date": "2026-03-30T10:30:00"}
+        bar3 = {"date": "2026-03-30T10:40:00"}
+        assert _bars_same_day(bar1, bar3) is True
+
+    def test_different_days_returns_false(self):
+        bar1 = {"date": "2026-03-27T15:55:00"}  # Friday
+        bar3 = {"date": "2026-03-30T09:30:00"}  # Monday
+        assert _bars_same_day(bar1, bar3) is False
+
+    def test_different_days_with_datetime_objects(self):
+        from datetime import datetime
+        bar1 = {"date": datetime(2026, 3, 27, 15, 55)}
+        bar3 = {"date": datetime(2026, 3, 30, 9, 30)}
+        assert _bars_same_day(bar1, bar3) is False
+
+
+class TestMondayOpeningGap:
+    """Regression tests: Friday→Monday gap must NOT trigger FVG detection.
+
+    Scenario: NQ closes Friday at ~23276, opens Monday at ~23457.
+    With useRTH=True, IB returns Friday bars + Monday bars.
+    The 181-point weekend gap must not be detected as an intraday FVG.
+    """
+
+    # Friday 2026-03-27 last RTH bars
+    FRIDAY_BAR1 = {"open": 23260, "high": 23276, "low": 23250, "close": 23270,
+                   "date": "2026-03-27T15:50:00"}
+    FRIDAY_BAR2 = {"open": 23270, "high": 23280, "low": 23260, "close": 23275,
+                   "date": "2026-03-27T15:55:00"}
+    # Monday 2026-03-30 first RTH bars (gapped up 181 points)
+    MONDAY_BAR3 = {"open": 23460, "high": 23480, "low": 23457, "close": 23475,
+                   "date": "2026-03-30T09:30:00"}
+    MONDAY_BAR4 = {"open": 23475, "high": 23490, "low": 23465, "close": 23485,
+                   "date": "2026-03-30T09:35:00"}
+    MONDAY_BAR5 = {"open": 23485, "high": 23500, "low": 23470, "close": 23495,
+                   "date": "2026-03-30T09:40:00"}
+
+    class _CaptureLogger:
+        def __init__(self):
+            self.records = []
+
+        def log(self, event, **kwargs):
+            self.records.append({"event": event, **kwargs})
+
+    def _make_manager(self, sample_strategy, logger=None):
+        strategy_dir, _ = sample_strategy
+        from bot.strategy.strategy_loader import StrategyLoader
+        loader = StrategyLoader(strategy_dir)
+        loader.load()
+        return ActiveFVGManager(loader, logger=logger)
+
+    def test_on_5min_bar_rejects_cross_day_gap(self, sample_strategy):
+        """on_5min_bar with Friday bars then Monday bar must NOT detect weekend gap."""
+        mgr = self._make_manager(sample_strategy)
+        mgr.on_5min_bar(self.FRIDAY_BAR1)
+        mgr.on_5min_bar(self.FRIDAY_BAR2)
+        result = mgr.on_5min_bar(self.MONDAY_BAR3)
+
+        assert result is None
+        assert mgr.active_count == 0
+
+    def test_detect_from_tick_bar_rejects_cross_day_gap(self, sample_strategy):
+        """detect_from_tick_bar with Friday bar1/bar2 and Monday bar3 must NOT detect."""
+        mgr = self._make_manager(sample_strategy)
+        # Seed bar1 and bar2 from Friday (simulating _seed_recent_bars with Friday bars)
+        mgr.append_bar(self.FRIDAY_BAR1)
+        mgr.append_bar(self.FRIDAY_BAR2)
+
+        result = mgr.detect_from_tick_bar(self.MONDAY_BAR3)
+        assert result is None
+        assert mgr.active_count == 0
+
+    def test_same_day_fvg_still_detected_after_cross_day_bars(self, sample_strategy):
+        """After cross-day bars are rejected, same-day Monday FVGs must still work."""
+        mgr = self._make_manager(sample_strategy)
+        # Feed Friday bars (will be in deque but cross-day checks block them)
+        mgr.on_5min_bar(self.FRIDAY_BAR1)
+        mgr.on_5min_bar(self.FRIDAY_BAR2)
+        mgr.on_5min_bar(self.MONDAY_BAR3)
+
+        # Now feed bars that form a valid Monday intraday FVG at 10:30-11:00
+        # (time period with a strategy cell)
+        mgr.on_5min_bar(self.MONDAY_BAR4)
+        mgr.on_5min_bar(self.MONDAY_BAR5)
+
+        # These Monday bars overlap, so no FVG. Feed a gapping sequence at 10:30+
+        mgr.on_5min_bar({"open": 23480, "high": 23500, "low": 23470, "close": 23495,
+                         "date": "2026-03-30T10:30:00"})
+        mgr.on_5min_bar({"open": 23505, "high": 23530, "low": 23490, "close": 23520,
+                         "date": "2026-03-30T10:35:00"})
+        result = mgr.on_5min_bar(
+            {"open": 23525, "high": 23550, "low": 23515, "close": 23545,
+             "date": "2026-03-30T10:40:00"})
+
+        assert result is not None
+        assert result.fvg_type == "bullish"
+        assert mgr.active_count == 1

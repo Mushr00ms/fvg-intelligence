@@ -31,6 +31,25 @@ def _bar_in_rth(bar):
     return t >= RTH_START
 
 
+def _bars_same_day(bar1, bar3):
+    """Return True if bar1 and bar3 are from the same calendar date.
+
+    Prevents cross-session gaps (e.g. Friday→Monday) from being detected
+    as intraday FVGs. Only checks bar1 vs bar3 since bar2 is between them.
+    """
+    def _to_date(bar):
+        d = bar["date"]
+        if isinstance(d, str):
+            d = datetime.fromisoformat(d)
+        return d.date() if hasattr(d, "date") else None
+
+    d1 = _to_date(bar1)
+    d3 = _to_date(bar3)
+    if d1 is None or d3 is None:
+        return True  # Can't determine — allow (shouldn't happen in practice)
+    return d1 == d3
+
+
 def check_fvg_3bars(bar1, bar2, bar3, min_size=DEFAULT_MIN_SIZE):
     """
     Check if 3 consecutive bars form a Fair Value Gap.
@@ -174,6 +193,11 @@ class ActiveFVGManager:
         if not _bar_in_rth(bar1):
             return None
 
+        # All bars must be same calendar day — prevents cross-session gaps
+        # (e.g. Friday→Monday weekend gap) from triggering as intraday FVGs
+        if not _bars_same_day(bar1, bar3):
+            return None
+
         fvg = check_fvg_3bars(bar1, bar2, bar3, self._min_size)
         return self._finalize_fvg(fvg, bar3)
 
@@ -198,6 +222,10 @@ class ActiveFVGManager:
 
         # All 3 bars must be within RTH — prevents overnight gaps triggering as FVGs
         if not _bar_in_rth(bar1):
+            return None
+
+        # All bars must be same calendar day — prevents cross-session gaps
+        if not _bars_same_day(bar1, bar3):
             return None
 
         fvg = check_fvg_3bars(bar1, bar2, bar3, self._min_size)

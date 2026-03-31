@@ -1104,10 +1104,10 @@ function renderHeatmap() {
         };
       }).filter(Boolean),
       ...annotations],
-    xaxis: { tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+    xaxis: { type: 'category', tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
       showgrid: false, zeroline: false, linecolor: '#2a2a2a', linewidth: 1, showline: true,
-      title: { text: 'Risk (pts)', font: { size: 10, color: '#555' } } },
-    yaxis: { tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
+      title: { text: _data.meta.ticker === 'BTCUSDT' ? 'Risk (bps)' : 'Risk (pts)', font: { size: 10, color: '#555' } } },
+    yaxis: { type: 'category', tickfont: { family: 'IBM Plex Mono', size: 9, color: '#888' },
       showgrid: false, zeroline: false, linecolor: '#2a2a2a', linewidth: 1, showline: true,
       autorange: 'reversed',
       title: { text: 'Time Period', font: { size: 10, color: '#555' } } },
@@ -2281,7 +2281,7 @@ function _btSlipCell(t) {
   if (slip == null || t.exit_reason !== 'SL') return '<td style="color:var(--text-dim)">—</td>';
   if (slip === 0) return '<td style="color:var(--green);font-family:var(--mono)">0</td>';
   const col = slip >= 5 ? 'var(--red)' : slip >= 1 ? 'var(--amber)' : 'var(--text)';
-  const cost = Math.round(slip * t.contracts * 20);
+  const cost = Math.round(slip * (t.contracts || 1) * 20);
   return `<td style="color:${col};font-family:var(--mono)" title="Cost: $${cost.toLocaleString()}">${slip.toFixed(2)}</td>`;
 }
 
@@ -2315,7 +2315,7 @@ function btRenderTradePage() {
   html += `<div class="bt-log-wrap"><table class="bt-table"><thead><tr>
     <th>#</th><th>Date</th><th>Time Period</th><th>Type</th><th>Setup</th><th>Side</th>
     <th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>N</th><th>Qty</th>
-    <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L pts</th><th>P&L $</th><th>Balance</th>
+    <th>Exit</th><th>Reason</th><th>Duration</th><th>P&L R</th><th>P&L $</th><th>Balance</th>
     ${hasVol ? '<th title="Tick volume at exact entry price (formation→exit). ★=SL/EOD trade (already in market)">Vol@Entry</th>' : ''}
     ${hasVolTP ? '<th title="Tick volume at exact TP price (entry→SL/EOD bracket window)">Vol@TP</th>' : ''}
     ${hasSlip ? '<th title="Stop slippage in points (actual fill vs stop price). Hover for dollar cost.">SL Slip</th>' : ''}
@@ -2342,9 +2342,9 @@ function btRenderTradePage() {
     html += `<tr class="${cls}" data-trade-id="${t.id}" onclick="btSelectTrade(${t.id})" style="cursor:pointer"><td>${t.id}</td><td>${t.date}</td><td>${t.time_period}</td>
       <td>${t.fvg_type}</td><td>${setup}</td><td>${t.side}</td>
       <td>${t.entry_price}</td><td>${t.stop_price}</td><td>${t.target_price}</td>
-      <td>${t.risk_pts}</td><td>${t.n_value}R</td><td>${t.contracts} ${ddTag}</td>
+      <td>${t.risk_pts != null ? t.risk_pts : (t.risk_bps != null ? t.risk_bps + 'bp' : '')}</td><td>${t.n_value}R</td><td>${t.contracts != null ? t.contracts : (t.risk_pct != null ? t.risk_pct + '%' : '')} ${ddTag}</td>
       <td>${t.exit_price}</td><td>${t.exit_reason}</td><td>${durStr}</td>
-      <td>${t.pnl_pts}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td>
+      <td>${t.pnl_r != null ? (t.pnl_r >= 0 ? '+' : '') + t.pnl_r + 'R' : (t.pnl_pts != null ? t.pnl_pts : '')}</td><td>$${t.pnl_dollars.toLocaleString()}</td><td>${balStr}</td>
       ${hasVol ? _btVolCell(t.volume_at_entry, t.exit_reason) : ''}
       ${hasVolTP ? _btVolCell(t.volume_at_tp, t.exit_reason) : ''}
       ${hasSlip ? _btSlipCell(t) : ''}
@@ -2545,9 +2545,9 @@ function btTdRenderChart(bars, trade) {
     <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Side</span><span style="${isBuy?'color:#00d68f':'color:#ff4d6a'}">${trade.side}</span></div>
     <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Setup</span><span>${trade.setup}</span></div>
     <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Period</span><span>${trade.time_period}</span></div>
-    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Risk</span><span>${trade.risk_range} (${trade.risk_pts}pt)</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Risk</span><span>${trade.risk_range}${trade.risk_pts != null ? ' (' + trade.risk_pts + 'pt)' : (trade.risk_bps != null ? ' (' + trade.risk_bps + 'bp)' : '')}</span></div>
     <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">N</span><span>${trade.n_value}R</span></div>
-    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Qty</span><span>${trade.contracts}</span></div>
+    <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">${trade.contracts != null ? 'Qty' : 'Risk%'}</span><span>${trade.contracts != null ? trade.contracts : (trade.risk_pct != null ? trade.risk_pct + '%' : '')}</span></div>
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>
     <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">Entry</span><span style="color:#00d68f">${fp(trade.entry_price)}</span></div>
     <div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#6b7d94">TP</span><span style="color:#4da6ff">${fp(trade.target_price)}</span></div>
