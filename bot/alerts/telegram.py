@@ -161,6 +161,10 @@ class TelegramAlerter:
         )
         await self.send(msg)
 
+    async def alert_reconciliation(self, report_html):
+        """Send EOD reconciliation report (queued for guaranteed delivery)."""
+        await self.send_queued("reconciliation", report_html)
+
     async def alert_bot_start(self, config, strategy_id):
         """Send bot startup notification."""
         mode = "PAPER" if config.paper_mode else "LIVE"

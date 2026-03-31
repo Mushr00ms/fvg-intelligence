@@ -180,8 +180,8 @@ _ENV_MAP = {
     "BOT_KILL_SWITCH_PCT": ("kill_switch_pct", float),
     "BOT_PAPER_MODE": ("paper_mode", lambda x: x.lower() in ("1", "true", "yes")),
     "BOT_DRY_RUN": ("dry_run", lambda x: x.lower() in ("1", "true", "yes")),
-    "BOT_TELEGRAM_TOKEN": ("telegram_bot_token", str),
-    "BOT_TELEGRAM_CHAT_ID": ("telegram_chat_id", str),
+    # Telegram token/chat_id intentionally excluded — load from config file only
+    # to avoid accidental exposure via shell history or process listing.
     "BOT_STRATEGY_DIR": ("strategy_dir", str),
     "BOT_STATE_DIR": ("state_dir", str),
     "BOT_LOG_DIR": ("log_dir", str),

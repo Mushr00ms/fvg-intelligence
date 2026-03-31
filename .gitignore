@@ -1,6 +1,7 @@
 # Data (too large for git)
 logic/databento_data/
 logic/databento_cache/
+logic/binance_data/
 logic/fvg_cache/
 logic/csv/
 logic/charts/
@@ -14,6 +15,7 @@ bot/bot_state/
 bot/logs/
 bot/backtest/results/
 bot/replay/results*/
+bot/bot_config.json
 *.db
 
 # Heatmap data (generated)

@@ -166,6 +166,22 @@ def init_db(db_path=None):
         )
     ''')
 
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS reconciliation_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date TEXT UNIQUE NOT NULL,
+            live_count INTEGER,
+            backtest_count INTEGER,
+            matched_count INTEGER,
+            divergence_count INTEGER,
+            live_net_pnl REAL,
+            backtest_net_pnl REAL,
+            divergences_json TEXT,
+            error TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # Indexes for common queries
     c.execute('CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(trade_date)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_trades_setup ON trades(setup)')
@@ -174,6 +190,7 @@ def init_db(db_path=None):
     c.execute('CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_fvg_log_date ON fvg_log(trade_date)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(trade_date)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_recon_date ON reconciliation_results(trade_date)')
 
     conn.commit()
     conn.close()
@@ -230,6 +247,20 @@ class TradeDB:
         conflict_sets = ', '.join(f'{k} = excluded.{k}' for k in kwargs.keys() if k != 'trade_date')
         conn.execute(
             f'INSERT INTO daily_stats ({cols}) VALUES ({placeholders}) '
+            f'ON CONFLICT(trade_date) DO UPDATE SET {conflict_sets}',
+            list(kwargs.values())
+        )
+        conn.commit()
+        conn.close()
+
+    def insert_reconciliation(self, **kwargs):
+        """Insert or update reconciliation result for a trading day."""
+        conn = self._conn()
+        cols = ', '.join(kwargs.keys())
+        placeholders = ', '.join(['?'] * len(kwargs))
+        conflict_sets = ', '.join(f'{k} = excluded.{k}' for k in kwargs.keys() if k != 'trade_date')
+        conn.execute(
+            f'INSERT INTO reconciliation_results ({cols}) VALUES ({placeholders}) '
             f'ON CONFLICT(trade_date) DO UPDATE SET {conflict_sets}',
             list(kwargs.values())
         )

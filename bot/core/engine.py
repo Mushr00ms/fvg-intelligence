@@ -508,14 +508,23 @@ class BotEngine:
         The tick path needs bar1/bar2 in _recent_bars immediately to detect FVGs
         on the very first bar completion. Without seeding, FVGs formed from the
         first few bars after startup would be missed.
+
+        IMPORTANT: Only seeds bars from TODAY's session. With useRTH=True and
+        durationStr="1 D", IB may return prior-day bars (e.g. Friday bars on
+        Monday). Seeding cross-day bars causes false FVG detections from
+        weekend/overnight gaps.
         """
         if not self._bars_5min or not self.fvg_mgr:
             return
 
+        today = datetime.now(NY_TZ).date()
+
         # All bars except the last one (which is incomplete with keepUpToDate)
         completed = self._bars_5min[:-1] if len(self._bars_5min) > 1 else []
 
-        # Seed the last N completed bars (deque maxlen=10 handles overflow)
+        # Seed the last N completed bars from TODAY only
+        # (deque maxlen=10 handles overflow)
+        seeded = 0
         for bar in completed[-10:]:
             bar_dict = {
                 "open": bar.open,
@@ -524,9 +533,13 @@ class BotEngine:
                 "close": bar.close,
                 "date": _bar_date_to_et(bar.date),
             }
+            bar_date = bar_dict["date"]
+            if hasattr(bar_date, "date") and bar_date.date() != today:
+                continue
             self.fvg_mgr.append_bar(bar_dict)
+            seeded += 1
 
-        self.logger.log("recent_bars_seeded", count=len(self.fvg_mgr._recent_bars))
+        self.logger.log("recent_bars_seeded", count=seeded)
 
     def _load_hfoiv_history(self):
         """Load historical imbalance parquets to pre-populate HFOIV normalization.
@@ -713,18 +726,48 @@ class BotEngine:
 
     async def _backfill_fvgs(self):
         """
-        Scan today's existing 5-min bars for un-mitigated FVGs.
+        Scan today's COMPLETED 5-min bars for un-mitigated FVGs.
 
         On crash/restart mid-session, the bot loses its active FVG list.
         This replays the already-loaded 5-min bars (from the keepUpToDate
         subscription which includes today's history) to rebuild the list.
         Then checks 1-min bars to see if any were already mitigated.
+
+        IMPORTANT: With useRTH=True and durationStr="1 D", IB may return
+        prior-day bars (e.g. Friday bars on Monday). We filter to today's
+        bars only and exclude the last bar (incomplete with keepUpToDate)
+        to prevent false FVGs from weekend/overnight gaps.
         """
         if self._bars_5min is None or len(self._bars_5min) < 3:
             return
 
         from bot.strategy.fvg_detector import check_fvg_3bars, _assign_time_period, SESSION_INTERVALS
         from bot.strategy.trade_calculator import round_to_tick
+
+        today = datetime.now(NY_TZ).date()
+
+        # Build today-only completed bars list.
+        # Exclude the last bar (incomplete with keepUpToDate).
+        completed_bars = []
+        source = self._bars_5min[:-1] if len(self._bars_5min) > 1 else []
+        for bar in source:
+            bar_et = _bar_date_to_et(bar.date)
+            if hasattr(bar_et, "date") and bar_et.date() != today:
+                continue
+            completed_bars.append({
+                "open": bar.open, "high": bar.high,
+                "low": bar.low, "close": bar.close,
+                "date": bar_et,
+            })
+
+        if len(completed_bars) < 3:
+            self.logger.log(
+                "fvg_backfill",
+                bars_scanned=len(completed_bars),
+                fvgs_found=0,
+                total_active=self.fvg_mgr.active_count,
+            )
+            return
 
         # Build set of already-traded zones to prevent duplicate entries on restart
         _traded_zones = set()
@@ -733,16 +776,12 @@ class BotEngine:
                    + self.daily_state.closed_trades):
             _traded_zones.add((round(og.entry_price, 2), round(og.stop_price, 2)))
 
-        # Replay all completed 5-min bars to detect FVGs
+        # Replay today's completed 5-min bars to detect FVGs
         detected = 0
-        for i in range(2, len(self._bars_5min)):
-            bar1 = self._bars_5min[i - 2]
-            bar2 = self._bars_5min[i - 1]
-            bar3 = self._bars_5min[i]
-
-            b1 = {"open": bar1.open, "high": bar1.high, "low": bar1.low, "close": bar1.close, "date": _bar_date_to_et(bar1.date)}
-            b2 = {"open": bar2.open, "high": bar2.high, "low": bar2.low, "close": bar2.close, "date": _bar_date_to_et(bar2.date)}
-            b3 = {"open": bar3.open, "high": bar3.high, "low": bar3.low, "close": bar3.close, "date": _bar_date_to_et(bar3.date)}
+        for i in range(2, len(completed_bars)):
+            b1 = completed_bars[i - 2]
+            b2 = completed_bars[i - 1]
+            b3 = completed_bars[i]
 
             fvg = check_fvg_3bars(b1, b2, b3, self.config.min_fvg_size)
             if fvg is None:
@@ -793,7 +832,7 @@ class BotEngine:
 
         self.logger.log(
             "fvg_backfill",
-            bars_scanned=len(self._bars_5min),
+            bars_scanned=len(completed_bars),
             fvgs_found=detected,
             total_active=self.fvg_mgr.active_count,
         )
@@ -1424,7 +1463,359 @@ class BotEngine:
         if self.telegram.enabled:
             await self.telegram.alert_daily_summary(self.daily_state)
 
+        # Run EOD reconciliation (data download + backtest vs live comparison)
+        try:
+            await self._eod_reconcile()
+        except Exception as e:
+            self.logger.log("eod_reconcile_error", error=str(e), phase="orchestration")
+            # Never let reconciliation failure block shutdown
+
         self._shutdown = True
+
+    # ── EOD Reconciliation ────────────────────────────────────────────────
+
+    async def _eod_reconcile(self):
+        """Download today's data, run backtest, compare to live trades, report."""
+        from bot.backtest.eod_reconciler import (
+            match_trades, format_telegram_report, build_backtest_config,
+            build_weekly_summary, result_to_db_kwargs, ReconciliationResult,
+            validate_fills, has_bad_fills,
+        )
+
+        today = self.daily_state.date          # "2026-03-31"
+        today_fmt = today.replace("-", "")      # "20260331"
+
+        self.logger.log("eod_reconcile_start", date=today)
+
+        # 1. Wait for IB data to become available
+        await asyncio.sleep(180)
+
+        # 2. Download 1-second bars via Windows subprocess
+        data_dir = self._download_data_dir()
+        data_file = await self._download_today_data(today_fmt, data_dir)
+        if data_file is None:
+            err = "1-second bar download failed after 3 attempts"
+            self.logger.log("eod_reconcile_skip", reason=err)
+            result = ReconciliationResult(date=today, live_count=0,
+                                          backtest_count=0, matched_count=0,
+                                          error=err)
+            self.db.insert_reconciliation(**result_to_db_kwargs(result))
+            if self.telegram.enabled:
+                await self.telegram.alert_reconciliation(
+                    format_telegram_report(result))
+            return
+
+        # 3. Run backtester
+        try:
+            bt_trades = await self._run_reconciliation_backtest(
+                today_fmt, data_dir)
+        except Exception as e:
+            err = f"Backtest failed: {e}"
+            self.logger.log("eod_reconcile_error", error=str(e), phase="backtest")
+            result = ReconciliationResult(date=today, live_count=0,
+                                          backtest_count=0, matched_count=0,
+                                          error=err)
+            self.db.insert_reconciliation(**result_to_db_kwargs(result))
+            if self.telegram.enabled:
+                await self.telegram.alert_reconciliation(
+                    format_telegram_report(result))
+            return
+
+        # 4. Load live trades from DB (only closed trades with exit_reason)
+        live_trades = self.db.get_trades(date=today, limit=999)
+        live_trades = [t for t in live_trades if t.get("exit_reason")]
+
+        # 5. Compare
+        hfoiv_on = self.hfoiv_gate is not None
+        result = match_trades(live_trades, bt_trades, hfoiv_active=hfoiv_on)
+        result.date = today
+        result.kill_switch_active = self.daily_state.kill_switch_active
+
+        # 6. Tick-validate paper fills
+        fills_garbage = False
+        if live_trades:
+            try:
+                ticks_by_window = await self._fetch_fill_ticks(
+                    today_fmt, live_trades)
+                if ticks_by_window:
+                    checks = validate_fills(live_trades, ticks_by_window)
+                    fills_garbage = has_bad_fills(checks)
+                    bad_count = sum(1 for c in checks if not c.valid)
+                    self.logger.log("eod_reconcile_tick_validation",
+                                    checked=len(checks), bad=bad_count)
+            except Exception as e:
+                self.logger.log("eod_reconcile_tick_error", error=str(e))
+
+        # 7. Save to DB
+        self.db.insert_reconciliation(**result_to_db_kwargs(result))
+
+        # 8. Build weekly summary (Fridays only)
+        balance = self.daily_state.start_balance + self.daily_state.realized_pnl
+        weekly_html = build_weekly_summary(self.db, today, balance)
+
+        # 9. Send Telegram report
+        self.logger.log(
+            "eod_reconcile_done",
+            date=today,
+            live_trades=result.live_count,
+            backtest_trades=result.backtest_count,
+            matched=result.matched_count,
+            divergences=len(result.divergences),
+            weekly_report=weekly_html is not None,
+        )
+
+        if self.telegram.enabled:
+            msg = format_telegram_report(result, weekly_html,
+                                         fills_garbage=fills_garbage)
+            await self.telegram.alert_reconciliation(msg)
+
+    def _download_data_dir(self):
+        """Return the bot/data/ directory path (creating if needed)."""
+        d = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    async def _download_today_data(self, date_str, data_dir):
+        """Download today's 1-second bars directly via ib_async.
+
+        Connects with a separate clientId (20) so it doesn't interfere
+        with the bot's main connection. Returns parquet path or None.
+        """
+        out_file = os.path.join(data_dir, f"nq_1secs_{date_str}.parquet")
+
+        # If already downloaded, skip
+        if os.path.exists(out_file):
+            self.logger.log("eod_reconcile_download_cached", file=out_file)
+            return out_file
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            import time as _time
+            from datetime import date as _date
+            import pandas as _pd
+            import pytz as _pz
+            from ib_async import IB, Future
+
+            _ET = _pz.timezone('US/Eastern')
+            _UTC = _pz.utc
+
+            def _to_utc_str(naive_et_dt):
+                return _ET.localize(naive_et_dt).astimezone(_UTC).strftime('%Y%m%d-%H:%M:%S')
+
+            # Resolve NQ contract for the date
+            from bot.bridge.ib_data_fetcher import get_nq_contract_for_date
+            trade_date = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+            exp_date = get_nq_contract_for_date(trade_date)
+            contract = Future('NQ', exchange='CME',
+                              lastTradeDateOrContractMonth=exp_date.strftime('%Y%m'))
+
+            ib = IB()
+            ib.connect(self.config.ib_host, self.config.ib_port,
+                       clientId=20, timeout=15)
+
+            try:
+                ib.qualifyContracts(contract)
+
+                # Paginate in 30-min chunks (IB limit for 1-sec bars)
+                all_records = []
+                chunks = []
+                end_hour, end_min = 16, 0
+                for _ in range(14):
+                    end_dt = datetime(trade_date.year, trade_date.month,
+                                      trade_date.day, end_hour, end_min, 0)
+                    chunks.append(end_dt)
+                    end_min -= 30
+                    if end_min < 0:
+                        end_min += 60
+                        end_hour -= 1
+                    if end_hour < 9 or (end_hour == 9 and end_min < 30):
+                        break
+                chunks.reverse()
+
+                pacing_error = [False]
+                def on_error(reqId, errorCode, errorString, contract):
+                    if errorCode == 162:
+                        pacing_error[0] = True
+                ib.errorEvent += on_error
+
+                for ci, end_dt in enumerate(chunks):
+                    end_str = _to_utc_str(end_dt)
+                    bars = None
+                    for attempt in range(4):
+                        pacing_error[0] = False
+                        try:
+                            bars = ib.reqHistoricalData(
+                                contract, endDateTime=end_str,
+                                durationStr='1800 S', barSizeSetting='1 secs',
+                                whatToShow='TRADES', useRTH=True,
+                                formatDate=2, timeout=60)
+                        except Exception:
+                            bars = None
+                        if pacing_error[0] or (bars is not None and len(bars) == 0):
+                            _time.sleep(20 * (attempt + 1))
+                            continue
+                        break
+                    if bars:
+                        for bar in bars:
+                            all_records.append({
+                                'date': str(bar.date), 'open': bar.open,
+                                'high': bar.high, 'low': bar.low,
+                                'close': bar.close, 'volume': bar.volume,
+                            })
+                    _time.sleep(11)  # IB pacing
+
+                ib.errorEvent -= on_error
+
+                if not all_records:
+                    return None
+
+                # Deduplicate + sort
+                seen = set()
+                deduped = []
+                for r in all_records:
+                    if r['date'] not in seen:
+                        seen.add(r['date'])
+                        deduped.append(r)
+                deduped.sort(key=lambda x: x['date'])
+
+                # Write parquet
+                df = _pd.DataFrame(deduped)
+                df.to_parquet(out_file, index=False)
+                return out_file
+
+            finally:
+                ib.disconnect()
+
+        for attempt in range(3):
+            try:
+                result = await loop.run_in_executor(None, _fetch)
+                if result:
+                    self.logger.log("eod_reconcile_download_ok",
+                                    file=out_file)
+                    return result
+                self.logger.log("eod_reconcile_download_retry",
+                                attempt=attempt + 1, reason="no bars returned")
+                await asyncio.sleep(60)
+            except Exception as e:
+                self.logger.log("eod_reconcile_download_retry",
+                                attempt=attempt + 1, error=str(e))
+                await asyncio.sleep(60)
+
+        return None
+
+    async def _fetch_fill_ticks(self, date_str, live_trades):
+        """Fetch tick data around each live trade's fill times for validation.
+
+        Returns dict mapping (group_id, "entry"|"exit") -> list of tick dicts.
+        Each tick: {"price": float, "size": int, "time_utc": str}
+        """
+        from datetime import date as _date, timedelta as _td
+        from bot.bridge.ib_data_fetcher import get_nq_contract_for_date
+
+        trade_date = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+        WINDOW_SECS = 10  # +/- 10 seconds around each fill
+
+        # Collect unique (fill_time, fill_type, group_id) windows
+        windows = []
+        for t in live_trades:
+            for fill_type, time_key in [("entry", "entry_time"), ("exit", "exit_time")]:
+                ft = t.get(time_key)
+                if not ft:
+                    continue
+                windows.append((t["group_id"], fill_type, ft))
+
+        if not windows:
+            return {}
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            import time as _time
+            import pytz as _pz
+            from ib_async import IB, Future
+            from dateutil import parser as dtparser
+
+            _ET = _pz.timezone('US/Eastern')
+            _UTC = _pz.utc
+
+            exp_date = get_nq_contract_for_date(trade_date)
+            contract = Future('NQ', exchange='CME',
+                              lastTradeDateOrContractMonth=exp_date.strftime('%Y%m'))
+
+            ib = IB()
+            ib.connect(self.config.ib_host, self.config.ib_port,
+                       clientId=21, timeout=15)
+
+            try:
+                ib.qualifyContracts(contract)
+                result = {}
+
+                for gid, fill_type, fill_time_str in windows:
+                    # Parse fill time to UTC
+                    ft = dtparser.parse(fill_time_str)
+                    if ft.tzinfo is not None:
+                        ft_utc = ft.astimezone(_UTC)
+                    else:
+                        ft_utc = _ET.localize(ft).astimezone(_UTC)
+
+                    start_utc = ft_utc - _td(seconds=WINDOW_SECS)
+                    start_str = start_utc.strftime('%Y%m%d-%H:%M:%S')
+
+                    try:
+                        ticks = ib.reqHistoricalTicks(
+                            contract,
+                            startDateTime=start_str,
+                            endDateTime='',
+                            numberOfTicks=1000,
+                            whatToShow='TRADES',
+                            useRth=True,
+                        )
+                    except Exception:
+                        ticks = []
+
+                    end_utc = ft_utc + _td(seconds=WINDOW_SECS)
+                    filtered = []
+                    for tick in (ticks or []):
+                        t_utc = tick.time
+                        if t_utc.tzinfo is None:
+                            t_utc = _UTC.localize(t_utc)
+                        if start_utc <= t_utc <= end_utc:
+                            filtered.append({
+                                "price": tick.price,
+                                "size": tick.size,
+                                "time_utc": t_utc.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                            })
+
+                    result[(gid, fill_type)] = filtered
+                    _time.sleep(2)  # Pacing between tick requests
+
+                return result
+            finally:
+                ib.disconnect()
+
+        return await loop.run_in_executor(None, _fetch)
+
+    async def _run_reconciliation_backtest(self, date_str, data_dir):
+        """Run the backtester on today's data with the current strategy.
+
+        Returns list of backtester.Trade objects.
+        """
+        from bot.backtest.backtester import load_1s_bars, run_backtest
+        from bot.backtest.eod_reconciler import build_backtest_config
+
+        strategy_dict = self.strategy.strategy
+        config = build_backtest_config(
+            self.config, strategy_dict, self.daily_state.start_balance)
+
+        loop = asyncio.get_event_loop()
+
+        def _run():
+            df = load_1s_bars(data_dir, start_date=date_str, end_date=date_str)
+            trades, _ = run_backtest(df, strategy_dict, config)
+            return trades
+
+        return await loop.run_in_executor(None, _run)
 
     async def _shutdown_gracefully(self):
         """Clean shutdown: cancel tasks, save state, disconnect."""
