@@ -3,16 +3,16 @@
     {
       "id": "mixed-best-ev-v3-touch-moderate",
       "name": "Mixed Best EV v3 +touch moderate",
-      "description": "v3 with realistic fills. Kelly-inspired moderate risk: 0.5% on 5-15pt, 1.5% on 15-40pt, 3% on 40-80pt. Dec 20 hard gate. Backtested: touch=fill model (verified via tick data), $321k over 2021-2026Q1.",
+      "description": "v4: split 40-80 bucket into 40-50 and 50-200. touch=fill model. Kelly 3% on 40-50/50-200pt. Dec 20 hard gate.",
       "source_dataset": "rr_nq_5min_5y_30min",
       "ticker": "NQ",
       "timeframe": "5min",
-      "cell_count": 37,
-      "enabled_count": 37,
-      "weighted_ev": 0.148,
-      "expected_trades_per_day": 5.08,
+      "cell_count": 35,
+      "enabled_count": 35,
+      "weighted_ev": 0.177,
+      "expected_trades_per_day": 4.9031,
       "created_at": "2026-03-23T22:07:25.076857+00:00",
-      "updated_at": "2026-03-26T14:00:00.000000+00:00"
+      "updated_at": "2026-03-31T00:00:00.000000+00:00"
     }
   ],
   "active_strategy": "mixed-best-ev-v3-touch-moderate",

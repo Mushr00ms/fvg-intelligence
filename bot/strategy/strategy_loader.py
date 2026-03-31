@@ -173,9 +173,9 @@ class StrategyLoader:
     def _risk_to_range(risk_pts):
         """
         Map a risk value in points to its risk range bucket string.
-        Uses the standard bins: [5, 10, 15, 20, 25, 30, 40, 80]
+        Uses the standard bins: [5, 10, 15, 20, 25, 30, 40, 50, 200]
         """
-        bins = [5, 10, 15, 20, 25, 30, 40, 80]
+        bins = [5, 10, 15, 20, 25, 30, 40, 50, 200]
         for i in range(len(bins) - 1):
             if bins[i] <= risk_pts < bins[i + 1]:
                 return f"{bins[i]}-{bins[i + 1]}"

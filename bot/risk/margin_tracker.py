@@ -5,14 +5,23 @@ Time-aware: uses IB's intraday maintenance margin during RTH (09:30–16:00 ET)
 and overnight initial margin outside RTH. Since the bot flattens before overnight,
 the intraday rate is what matters for position sizing.
 
-At startup, probes IB with whatIfOrder to get the exact initial margin per contract
-for the current front-month NQ contract. Tracks available margin via accountValues().
-Falls back to time-aware configurable estimates in dry_run mode or on API failure.
+Probe strategy for per-contract margin (in order):
+  1. whatIfOrderAsync with LimitOrder at current market price — most accurate
+  2. whatIfOrderAsync with MarketOrder — fallback if price unavailable
+  3. Derive from open NQ positions: InitMarginReq-C / position_size
+  4. Time-aware configured fallback estimate
+
+Also tracks locally-reserved margin for pending orders to avoid race conditions
+where two orders are evaluated against the same pre-order available funds before
+IB updates accountValues.
 """
 
 import math
 from datetime import datetime, time, timedelta
 from typing import Optional
+
+# IB uses DBL_MAX as a sentinel meaning "field not computed/applicable"
+_IB_MAX_DOUBLE = 1.7976931348623157e+308
 
 
 class MarginTracker:
@@ -27,6 +36,7 @@ class MarginTracker:
         self._margin_per_contract: float = 0.0
         self._last_fetch_time: Optional[datetime] = None
         self._initialized = False
+        self._reserved_margin: float = 0.0  # locally reserved for pending orders
 
         # Parse intraday window from config (ET times)
         self._intraday_start = _parse_time(config.margin_intraday_start)
@@ -58,6 +68,33 @@ class MarginTracker:
         """Fetch initial margin per contract at startup. Returns margin_per_contract."""
         margin = await self._fetch_margin_per_contract()
         self._initialized = True
+
+        # Log account segment state so we can see the real margin capacity
+        if not self._config.dry_run and self._conn.is_connected:
+            try:
+                avs = self._conn.ib.accountValues()
+                vals = {}
+                for av in avs:
+                    if av.currency == "USD" and av.tag in (
+                        "NetLiquidation", "NetLiquidation-C",
+                        "AvailableFunds-C", "InitMarginReq-C",
+                    ):
+                        vals[av.tag] = float(av.value)
+                nlv_c = vals.get("NetLiquidation-C", 0)
+                avail_c = vals.get("AvailableFunds-C", 0)
+                max_contracts = int(avail_c / (margin * (1 + self._config.margin_buffer_pct))) if margin > 0 else 0
+                self._logger.log(
+                    "margin_account_state",
+                    nlv=round(vals.get("NetLiquidation", 0), 2),
+                    nlv_c=round(nlv_c, 2),
+                    avail_c=round(avail_c, 2),
+                    init_margin_c=round(vals.get("InitMarginReq-C", 0), 2),
+                    per_contract=round(margin, 2),
+                    max_new_contracts=max_contracts,
+                )
+            except Exception:
+                pass
+
         return margin
 
     async def refresh_if_stale(self):
@@ -68,10 +105,40 @@ class MarginTracker:
         if elapsed >= self._config.margin_refresh_interval:
             await self._fetch_margin_per_contract()
 
-    async def _fetch_margin_per_contract(self) -> float:
-        """Use ib.whatIfOrderAsync to get initMarginChange for 1 contract.
+    def reserve(self, qty: int):
+        """Reserve margin for a pending order immediately after placement.
 
-        Retries once on invalid result (IB sometimes returns 0 transiently).
+        Prevents a race condition where two orders are evaluated against the
+        same pre-order accountValues snapshot before IB updates AvailableFunds.
+        """
+        reserved = self._margin_per_contract * qty
+        self._reserved_margin += reserved
+        self._logger.log(
+            "margin_reserved",
+            qty=qty,
+            reserved=round(reserved, 2),
+            total_reserved=round(self._reserved_margin, 2),
+        )
+
+    def release(self, qty: int):
+        """Release reserved margin when an order fills or cancels."""
+        released = self._margin_per_contract * qty
+        self._reserved_margin = max(0.0, self._reserved_margin - released)
+        self._logger.log(
+            "margin_released",
+            qty=qty,
+            released=round(released, 2),
+            total_reserved=round(self._reserved_margin, 2),
+        )
+
+    async def _fetch_margin_per_contract(self) -> float:
+        """Fetch initial margin per NQ contract via IB API.
+
+        Probe order:
+          1. LimitOrder at current market price (most reliable for futures)
+          2. MarketOrder (fallback if no price available)
+          3. Derive from open NQ positions via InitMarginReq-C
+          4. Time-aware configured fallback
         """
         fallback = self._time_aware_fallback()
 
@@ -87,79 +154,202 @@ class MarginTracker:
             return fallback
 
         import asyncio
-        from ib_async import MarketOrder
+        from ib_async import LimitOrder, MarketOrder
 
-        for attempt in range(2):
+        ib = self._conn.ib
+
+        # ── Step 1: get current market price for limit order probe ──────────
+        # First try passive tickers (already subscribed via bar feed).
+        # If nothing available, request an active snapshot — IB needs a price
+        # to compute initMarginChange for futures; MarketOrder returns empty.
+        current_price = None
+        try:
+            tickers = ib.tickers()
+            for t in tickers:
+                symbol = getattr(getattr(t, "contract", None), "symbol", "") or ""
+                if "NQ" not in symbol:
+                    continue
+                last = getattr(t, "last", None)
+                bid = getattr(t, "bid", None)
+                ask = getattr(t, "ask", None)
+                if last and last > 0:
+                    current_price = round(last * 4) / 4
+                    break
+                if bid and ask and bid > 0 and ask > 0:
+                    current_price = round(((bid + ask) / 2) * 4) / 4
+                    break
+        except Exception:
+            pass
+
+        if not current_price:
+            # Active snapshot — waits up to 3s for bid/ask/last/close
             try:
-                ib = self._conn.ib
-                probe_order = MarketOrder(action="BUY", totalQuantity=1)
-                what_if = await ib.whatIfOrderAsync(self._contract, probe_order)
+                snap = ib.reqMktData(self._contract, snapshot=True, regulatorySnapshot=False)
+                for _ in range(15):  # 15 × 0.2s = 3s max
+                    await asyncio.sleep(0.2)
+                    _bid = getattr(snap, "bid", None)
+                    _ask = getattr(snap, "ask", None)
+                    _last = getattr(snap, "last", None)
+                    _close = getattr(snap, "close", None)
+                    if _last and _last > 0:
+                        current_price = round(_last * 4) / 4
+                        break
+                    if _bid and _ask and _bid > 0 and _ask > 0:
+                        current_price = round(((_bid + _ask) / 2) * 4) / 4
+                        break
+                    if _close and _close > 0:
+                        current_price = round(_close * 4) / 4
+                        break
+                ib.cancelMktData(self._contract)
+                if current_price:
+                    self._logger.log("margin_price_snapshot", price=current_price)
+            except Exception as e:
+                self._logger.log("margin_price_snapshot_error", error=str(e))
 
-                # whatIfOrder returns an OrderState with initMarginChange
-                init_margin_str = getattr(what_if, "initMarginChange", "0")
-                init_margin = float(init_margin_str) if init_margin_str else 0.0
+        # ── Step 2: whatIfOrder probes ──────────────────────────────────────
+        probes = []
+        if current_price:
+            probes.append((
+                "LimitOrder",
+                LimitOrder(action="BUY", totalQuantity=1, lmtPrice=current_price),
+            ))
+        probes.append(("MarketOrder", MarketOrder(action="BUY", totalQuantity=1)))
 
-                if init_margin > 0:
-                    self._margin_per_contract = init_margin
-                    self._logger.log(
-                        "margin_fetched",
-                        mode="live",
-                        per_contract=round(init_margin, 2),
+        for probe_name, probe_order in probes:
+            for attempt in range(2):
+                try:
+                    what_if = await asyncio.wait_for(
+                        ib.whatIfOrderAsync(self._contract, probe_order),
+                        timeout=5.0,
                     )
-                    self._last_fetch_time = self._now()
-                    return self._margin_per_contract
 
-                # Invalid result — retry once after a brief pause
-                if attempt == 0:
+                    # ib_async returns [] when IB sends UNSET_DOUBLE for
+                    # initMarginChange (wrapper never resolves the future)
+                    if isinstance(what_if, list):
+                        self._logger.log(
+                            "margin_fetch_invalid",
+                            probe=probe_name,
+                            raw_value="[] (whatIfOrder broken — UNSET_DOUBLE)",
+                            attempt=attempt + 1,
+                        )
+                        break  # no point retrying same probe type
+
+                    raw = getattr(what_if, "initMarginChange", "") or ""
+                    raw = str(raw).strip()
+
+                    try:
+                        val = float(raw) if raw else 0.0
+                    except (ValueError, OverflowError):
+                        val = 0.0
+
+                    # IB returns DBL_MAX as sentinel for "not computed"
+                    if val >= _IB_MAX_DOUBLE * 0.99:
+                        val = 0.0
+
+                    if val > 1000:  # sanity: NQ margin must be > $1,000
+                        self._margin_per_contract = val
+                        self._last_fetch_time = self._now()
+                        self._logger.log(
+                            "margin_fetched",
+                            mode="live",
+                            probe=probe_name,
+                            per_contract=round(val, 2),
+                        )
+                        return self._margin_per_contract
+
                     self._logger.log(
                         "margin_fetch_invalid",
-                        raw_value=init_margin_str,
-                        attempt=1,
-                        retrying=True,
+                        probe=probe_name,
+                        raw_value=raw,
+                        parsed=round(val, 2),
+                        attempt=attempt + 1,
                     )
-                    await asyncio.sleep(1.0)
-                    continue
+                    if attempt == 0:
+                        await asyncio.sleep(1.5)
 
-                # Second attempt also failed
-                self._logger.log(
-                    "margin_fetch_invalid",
-                    raw_value=init_margin_str,
-                    attempt=2,
-                    using_fallback=True,
-                    fallback=fallback,
-                )
-                self._margin_per_contract = fallback
+                except asyncio.TimeoutError:
+                    self._logger.log(
+                        "margin_fetch_error",
+                        probe=probe_name,
+                        error="timeout_5s",
+                        attempt=attempt + 1,
+                    )
+                except Exception as e:
+                    self._logger.log(
+                        "margin_fetch_error",
+                        probe=probe_name,
+                        error=str(e),
+                        attempt=attempt + 1,
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(1.0)
 
-            except Exception as e:
-                self._logger.log(
-                    "margin_fetch_error",
-                    error=str(e),
-                    attempt=attempt + 1,
-                    using_fallback=True,
-                )
-                self._margin_per_contract = fallback
+        # ── Step 3: derive from open NQ positions ───────────────────────────
+        try:
+            positions = ib.positions()
+            nq_qty = sum(
+                abs(int(p.position)) for p in positions
+                if "NQ" in (getattr(p.contract, "symbol", "") or "")
+                   and p.position != 0
+            )
+            if nq_qty > 0:
+                account_values = ib.accountValues()
+                for av in account_values:
+                    if av.tag in ("InitMarginReq-C", "FullInitMarginReq-C") and av.currency == "USD":
+                        total_req = float(av.value)
+                        if total_req > 1000:
+                            per_contract = total_req / nq_qty
+                            self._margin_per_contract = per_contract
+                            self._last_fetch_time = self._now()
+                            self._logger.log(
+                                "margin_fetched",
+                                mode="from_positions",
+                                nq_qty=nq_qty,
+                                total_req=round(total_req, 2),
+                                per_contract=round(per_contract, 2),
+                            )
+                            return self._margin_per_contract
+        except Exception as e:
+            self._logger.log(
+                "margin_fetch_error", probe="from_positions", error=str(e)
+            )
 
+        # ── Step 4: configured fallback ─────────────────────────────────────
+        self._margin_per_contract = fallback
         self._last_fetch_time = self._now()
-        return self._margin_per_contract
+        self._logger.log(
+            "margin_fetched",
+            mode="fallback",
+            per_contract=fallback,
+            period="intraday" if self._is_intraday() else "overnight",
+        )
+        return fallback
 
     def get_available_margin(self) -> float:
-        """Query ib.accountValues() for available funds in the Commodities segment.
+        """Query IB accountValues for available funds, minus locally reserved margin.
+
+        Subtracts _reserved_margin to account for pending orders that have been
+        placed but not yet reflected in IB's accountValues snapshot.
 
         Priority: AvailableFunds-C → AvailableFunds → 0.0
         """
         if self._config.dry_run or not self._conn.is_connected:
             return self._time_aware_fallback() * 3  # Assume 3-contract capacity in dry_run
 
+        raw_available = 0.0
         try:
             account_values = self._conn.ib.accountValues()
-            # Try Commodities segment first (exact match for futures margin)
             for tag in ("AvailableFunds-C", "AvailableFunds"):
                 for av in account_values:
                     if av.tag == tag and av.currency == "USD":
-                        return float(av.value)
+                        raw_available = float(av.value)
+                        break
+                if raw_available > 0:
+                    break
         except Exception:
             pass
-        return 0.0
+
+        return max(0.0, raw_available - self._reserved_margin)
 
     def max_contracts_by_margin(self, available_margin: Optional[float] = None) -> int:
         """How many contracts can be opened with available margin (including buffer)."""

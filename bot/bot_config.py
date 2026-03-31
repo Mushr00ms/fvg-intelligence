@@ -33,9 +33,9 @@ class BotConfig:
     risk_per_trade: float = 0.01    # Default fallback (used if tiers disabled)
     risk_small_pct: float = 0.005   # 0.5% for 5-10pt, 10-15pt risk buckets
     risk_medium_pct: float = 0.015  # 1.5% for 15-20pt, 20-25pt, 25-30pt, 30-40pt
-    risk_large_pct: float = 0.03    # 3.0% for 40-80pt risk buckets
+    risk_large_pct: float = 0.03    # 3.0% for 40-50pt, 50-200pt risk buckets
     small_buckets: list = field(default_factory=lambda: ["5-10", "10-15"])
-    large_buckets: list = field(default_factory=lambda: ["40-80"])
+    large_buckets: list = field(default_factory=lambda: ["40-50", "50-200"])
     use_risk_tiers: bool = True     # Enable 3-tier risk (False = uniform risk_per_trade)
     max_trade_loss_pct: float = 0.015  # 1.5% max single trade loss (slippage buffer)
     max_concurrent: int = 3         # Max open positions at any time
@@ -89,13 +89,13 @@ class BotConfig:
     # Intraday initial applies during RTH for NEW positions (used as fallback when whatIfOrder fails)
     # Intraday maintenance is what IB requires to HOLD existing positions (lower than initial)
     # Overnight initial applies outside RTH (we're always flat before this)
-    margin_intraday_initial: float = 33000.0      # NQ intraday initial margin (for new orders)
+    margin_intraday_initial: float = 36750.0      # NQ intraday initial margin (empirical from IB rejection: $110,241/3)
     margin_intraday_maintenance: float = 22924.0   # NQ intraday maintenance margin (holding)
     margin_overnight_initial: float = 46373.0      # NQ overnight initial margin
-    margin_fallback_per_contract: float = 33000.0  # Ultimate fallback (= intraday initial)
+    margin_fallback_per_contract: float = 36750.0  # Ultimate fallback (= intraday initial)
     margin_intraday_start: str = "09:30"           # ET — intraday margin begins
     margin_intraday_end: str = "16:00"             # ET — intraday margin ends (15 min before RTH close)
-    margin_buffer_pct: float = 0.05                # 5% safety buffer above required margin
+    margin_buffer_pct: float = 0.0                  # No buffer — using empirical margin from IB
     margin_refresh_interval: int = 1800            # Re-fetch margin every 30 minutes
     margin_management_enabled: bool = True         # Enable intelligent margin priority system
 

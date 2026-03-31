@@ -61,9 +61,10 @@ class TestStrategyLoader:
 
     def test_risk_to_range_out_of_bounds(self):
         loader = StrategyLoader("/tmp/nonexistent")
-        assert loader._risk_to_range(3.0) is None   # Below 5
-        assert loader._risk_to_range(80.0) is None   # At upper boundary (80 is edge of last bin)
-        assert loader._risk_to_range(100.0) is None  # Above 80
+        assert loader._risk_to_range(3.0) is None    # Below 5
+        assert loader._risk_to_range(80.0) == "50-200"  # 80 now falls in 50-200 bucket
+        assert loader._risk_to_range(200.0) is None  # At upper boundary (200 is edge of last bin)
+        assert loader._risk_to_range(250.0) is None  # Above 200
 
     def test_load_no_strategy_raises(self, tmp_dir):
         import os
