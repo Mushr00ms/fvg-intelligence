@@ -127,7 +127,7 @@ def build_strategy_lookup(strategy):
 
 def risk_to_range(risk_pts):
     """Map risk in points to risk range bucket string."""
-    bins = [5, 10, 15, 20, 25, 30, 40, 80]
+    bins = [5, 10, 15, 20, 25, 30, 40, 50, 200]
     for i in range(len(bins) - 1):
         if bins[i] <= risk_pts < bins[i + 1]:
             return f"{bins[i]}-{bins[i + 1]}"
@@ -672,6 +672,8 @@ def run_backtest(df_1s, strategy, config=None):
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
     mit_entry_ticks = config.get("mit_entry_ticks", 0)  # MIT entry slippage (0=limit, 1-4=MIT)
+    consecutive_filter = config.get("consecutive_filter", False)  # skip near, take far
+    consecutive_near_only = config.get("consecutive_near_only", False)  # skip far, take near (live behavior)
     # confirmed_limit removed — volume analysis showed 95% of trades have ≥30
     # contracts at entry price, making touch=fill the correct default model
     tp_mode = config.get("tp_mode", "fixed")  # fixed, runner, runner-be, split
@@ -716,7 +718,7 @@ def run_backtest(df_1s, strategy, config=None):
         return round(total_comm, 2)
     use_risk_tiers = config.get("risk_tiers", False)
     margin_per_contract = config.get("margin_per_contract", 33000.0)  # NQ intraday initial
-    margin_buffer_pct = config.get("margin_buffer_pct", 0.05)
+    margin_buffer_pct = config.get("margin_buffer_pct", 0.0)
 
     # Load risk tier config from strategy meta if enabled
     _risk_rules = strategy.get("meta", {}).get("risk_rules", {}) if use_risk_tiers else {}
@@ -780,6 +782,8 @@ def run_backtest(df_1s, strategy, config=None):
     all_trades = []
     trade_counter = 0
     running_balance = balance
+    consecutive_pairs_total = 0
+    consecutive_skipped_total = 0
 
     # Hard gates from strategy metadata
     hard_gates = strategy.get("meta", {}).get("hard_gates", {})
@@ -831,6 +835,7 @@ def run_backtest(df_1s, strategy, config=None):
         daily_trades = 0
         daily_pnl = 0.0
         day_start_balance = running_balance
+        day_margin_reserved = 0.0  # concurrent margin reservation (matches live bot)
         emergency_halt = False
 
         # Process each 5-min bar for FVG detection
@@ -861,6 +866,52 @@ def run_backtest(df_1s, strategy, config=None):
             bar3_close_time = bar3['date'] + pd.Timedelta(minutes=5)
             active_fvgs.append((fvg, bar3_close_time))
 
+        # ── Consecutive FVG filter ────────────────────────────────────────────
+        # When near.stop == far.entry (exact price, same side), the far FVG can
+        # only trigger after the near FVG is stopped out. Skip the near FVG to
+        # avoid absorbing its SL loss as the cost of entry into the far setup.
+        consecutive_skip = set()
+        if (consecutive_filter or consecutive_near_only) and active_fvgs:
+            _fvg_entry = {}
+            _fvg_stop = {}
+            _fvg_has_cell = {}
+            for _fvg, _ in active_fvgs:
+                _entry = round_to_tick(_fvg.zone_high if _fvg.fvg_type == "bullish" else _fvg.zone_low)
+                _stop = round_to_tick(_fvg.middle_low if _fvg.fvg_type == "bullish" else _fvg.middle_high)
+                _risk = round_to_tick(abs(_entry - _stop))
+                _has_cell = False
+                if _risk > 0:
+                    _rr = risk_to_range(_risk)
+                    if _rr:
+                        _c = strategy_lookup.get((_fvg.time_period, _rr))
+                        _has_cell = _c is not None and _c["setup"] == "mit_extreme"
+                _fvg_entry[id(_fvg)] = _entry
+                _fvg_stop[id(_fvg)] = _stop
+                _fvg_has_cell[id(_fvg)] = _has_cell
+
+            # Build lookup: (entry_price, fvg_type) → fvg ids that have a cell
+            _entry_lookup = defaultdict(list)
+            for _fvg, _ in active_fvgs:
+                if _fvg_has_cell[id(_fvg)]:
+                    _entry_lookup[(_fvg_entry[id(_fvg)], _fvg.fvg_type)].append(id(_fvg))
+
+            # Detect pairs and populate skip set
+            for _fvg, _ in active_fvgs:
+                if not _fvg_has_cell[id(_fvg)]:
+                    continue
+                _stop = _fvg_stop[id(_fvg)]
+                _far_ids = [fid for fid in _entry_lookup.get((_stop, _fvg.fvg_type), [])
+                            if fid != id(_fvg)]
+                if _far_ids:
+                    if consecutive_filter:
+                        # Skip near, take far
+                        consecutive_skip.add(id(_fvg))
+                    else:
+                        # Skip far, take near (mirrors live margin-priority behavior)
+                        for _fid in _far_ids:
+                            consecutive_skip.add(_fid)
+                    consecutive_pairs_total += 1
+
         # Process mitigations on 1s bars
         for fvg, formation_time in active_fvgs:
             if daily_trades >= max_daily_trades:
@@ -881,6 +932,11 @@ def run_backtest(df_1s, strategy, config=None):
             # Use pre-computed ET minutes array (not UTC timestamp)
             mit_minutes_et = day_arrays['minutes'][mit_idx]
             if mit_minutes_et >= 15 * 60 + 45:
+                continue
+
+            # Consecutive FVG filter: skip near FVG, take far FVG only
+            if id(fvg) in consecutive_skip:
+                consecutive_skipped_total += 1
                 continue
 
             # Calculate setup and match to strategy
@@ -992,13 +1048,16 @@ def run_backtest(df_1s, strategy, config=None):
                 if risk_pts * POINT_VALUE * contracts > running_balance * _gate_pct * 1.01:
                     contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * POINT_VALUE)))
 
-                # Margin cap — can't exceed what balance supports
+                # Margin cap — can't exceed what available margin supports
+                # Subtract day_margin_reserved to model concurrent bracket orders
+                # (matches live bot reservation tracking)
                 _pre_margin_contracts = contracts
                 buffered_margin = margin_per_contract * (1.0 + margin_buffer_pct)
-                max_by_margin = math.floor(running_balance / buffered_margin)
+                _available_for_margin = max(0.0, running_balance - day_margin_reserved)
+                max_by_margin = math.floor(_available_for_margin / buffered_margin)
                 if contracts > max_by_margin:
                     contracts = max(1, max_by_margin)
-                    _dd_notes.append(f"margin cap {_pre_margin_contracts}→{contracts} (bal ${running_balance:,.0f})")
+                    _dd_notes.append(f"margin cap {_pre_margin_contracts}→{contracts} (avail ${_available_for_margin:,.0f} reserved ${day_margin_reserved:,.0f})")
 
                 # Drawdown scaling — reduce size as daily losses accumulate
                 if day_start_balance > 0:
@@ -1043,6 +1102,10 @@ def run_backtest(df_1s, strategy, config=None):
                                              _arrays=day_arrays, _start_hint=mit_idx)
                 if fill_time is None:
                     continue
+
+                # Reserve margin for this position (matches live bot reservation)
+                _trade_margin = contracts * margin_per_contract
+                day_margin_reserved += _trade_margin
 
                 # Walk trade with fill price (slipped if MIT), limit TP (touch)
                 resolved_tp_mode = _resolve_tp_mode(tp_mode, contracts)
@@ -1123,6 +1186,7 @@ def run_backtest(df_1s, strategy, config=None):
                 all_trades.append(trade)
 
                 running_balance += pnl_dollars
+                day_margin_reserved = max(0.0, day_margin_reserved - _trade_margin)
                 daily_trades += 1
                 daily_pnl += pnl_dollars
 
@@ -1152,6 +1216,16 @@ def run_backtest(df_1s, strategy, config=None):
 
                 # Only one setup per FVG
                 break
+
+    if (consecutive_filter or consecutive_near_only) and consecutive_pairs_total > 0:
+        mode = "far-only (skip near)" if consecutive_filter else "near-only (skip far)"
+        print(f"\nConsecutive FVG filter [{mode}]: {consecutive_pairs_total} pairs detected, "
+              f"{consecutive_skipped_total} FVGs skipped")
+        config["_consecutive_stats"] = {
+            "mode": mode,
+            "pairs_detected": consecutive_pairs_total,
+            "fvgs_skipped": consecutive_skipped_total,
+        }
 
     return all_trades, running_balance
 
@@ -1554,6 +1628,10 @@ def main():
     parser.add_argument("--imbalance-dir",
                         default=os.path.join(_ROOT, "bot", "data", "imbalance"),
                         help="Directory with pre-computed imbalance parquets")
+    parser.add_argument("--consecutive-filter", action="store_true",
+                        help="Skip near FVG when near.stop == far.entry (far has better EV)")
+    parser.add_argument("--consecutive-near-only", action="store_true",
+                        help="Skip far FVG when near.stop == far.entry (mirrors live margin-priority behavior)")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
     args = parser.parse_args()
@@ -1591,6 +1669,8 @@ def main():
             "lookback_sessions": args.hfoiv_lookback,
         },
         "imbalance_dir": args.imbalance_dir,
+        "consecutive_filter": args.consecutive_filter,
+        "consecutive_near_only": args.consecutive_near_only,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 
@@ -1624,6 +1704,8 @@ def main():
                 "rolling_bars": args.hfoiv_rolling,
                 "lookback_sessions": args.hfoiv_lookback,
             }
+        if args.consecutive_filter:
+            results["meta"]["consecutive_filter"] = config.get("_consecutive_stats", {})
         os.makedirs(os.path.dirname(args.json_output) or '.', exist_ok=True)
         with open(args.json_output, 'w') as f:
             json.dump(results, f, indent=2)

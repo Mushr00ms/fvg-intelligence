@@ -1034,13 +1034,13 @@ class TestConfigFields:
             log_dir=tempfile.mkdtemp(),
             strategy_dir=tempfile.mkdtemp(),
         )
-        assert config.margin_intraday_initial == 33000.0
+        assert config.margin_intraday_initial == 36750.0
         assert config.margin_intraday_maintenance == 22924.0
         assert config.margin_overnight_initial == 46373.0
-        assert config.margin_fallback_per_contract == 33000.0
+        assert config.margin_fallback_per_contract == 36750.0
         assert config.margin_intraday_start == "09:30"
         assert config.margin_intraday_end == "16:00"
-        assert config.margin_buffer_pct == 0.05
+        assert config.margin_buffer_pct == 0.0
         assert config.margin_refresh_interval == 1800
         assert config.margin_management_enabled is True
 

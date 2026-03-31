@@ -1,0 +1,68 @@
+{
+  "market_name": "BTCUSDT",
+  "description": "Binance BTCUSDT Perpetual Futures Configuration",
+  "data_source": "binance_aggtrades",
+  "fvg_parameters": {
+    "min_fvg_size": 10.0,
+    "min_fvg_sizes_range": {
+      "start": 50.0,
+      "end": 500.0,
+      "step": 25.0
+    },
+    "min_expansion_size": 100.0,
+    "min_fvg_size_3min": 5.0,
+    "min_fvg_sizes_range_3min": {
+      "start": 25.0,
+      "end": 250.0,
+      "step": 12.5
+    },
+    "min_expansion_size_3min": 50.0,
+    "min_fvg_size_15min": 25.0,
+    "min_fvg_sizes_range_15min": {
+      "start": 100.0,
+      "end": 1000.0,
+      "step": 50.0
+    },
+    "min_expansion_size_15min": 200.0
+  },
+  "session_config": {
+    "continuous": {
+      "start": "00:00",
+      "end": "00:00"
+    },
+    "us_overlap": {
+      "start": "09:30",
+      "end": "16:00"
+    },
+    "asian_session": {
+      "start": "00:00",
+      "end": "08:00"
+    },
+    "london_session": {
+      "start": "08:00",
+      "end": "16:00"
+    },
+    "primary_session": "continuous"
+  },
+  "contract_specifications": {
+    "point_value": 1,
+    "tick_size": 0.1,
+    "symbol_prefix": "BTCUSDT",
+    "perpetual": true
+  },
+  "analysis_parameters": {
+    "lookback_period": 10,
+    "min_search_bars_1min": 300,
+    "min_search_bars_5min": 100,
+    "min_search_bars_3min": 150,
+    "roll_days": 0,
+    "mitigation_same_day": false,
+    "session_period_minutes": 60,
+    "session_period_minutes_3min": 60,
+    "size_filtering_method": "bins",
+    "size_filtering_method_3min": "bins",
+    "size_filtering_method_15min": "bins",
+    "min_search_bars_15min": 60,
+    "session_period_minutes_15min": 120
+  }
+}

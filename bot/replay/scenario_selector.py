@@ -174,7 +174,7 @@ def _detect_large_fvg(trades_by_day):
     dates = []
     for day, trades in trades_by_day.items():
         large = [t for t in trades
-                 if t.get("risk_range") == "40-80" or (t.get("risk_pts") or 0) > 30]
+                 if t.get("risk_range") in ("40-50", "50-200") or (t.get("risk_pts") or 0) > 30]
         if large:
             max_risk = max(t.get("risk_pts", 0) for t in large)
             dates.append((day, f"{len(large)} large FVG trades "

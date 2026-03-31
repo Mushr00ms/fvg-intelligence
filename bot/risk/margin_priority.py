@@ -50,6 +50,7 @@ class MarginPriorityManager:
                 )
                 proposed_order.target_qty = max(1, max_qty)
             await self._order_mgr.place_bracket(proposed_order, daily_state)
+            self._margin.reserve(proposed_order.target_qty)
             return "PLACED"
 
         # ── Can't afford even 1 contract: evaluate priority ───────────────
@@ -115,6 +116,7 @@ class MarginPriorityManager:
 
         proposed_order.target_qty = min(proposed_order.target_qty, max(1, max_qty))
         await self._order_mgr.place_bracket(proposed_order, daily_state)
+        self._margin.reserve(proposed_order.target_qty)
 
         self._logger.log(
             "margin_priority_resolved",

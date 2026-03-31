@@ -288,12 +288,22 @@ class BotEngine:
         EOD actions (cancel/flatten/cleanup) are triggered by NTP-corrected
         wall clock checks every iteration, NOT by call_later — which uses
         the monotonic clock and drifts on WSL2 over a full trading day.
+
+        IMPORTANT: _check_eod_actions() runs BEFORE the session-active check
+        so that the 16:00 cleanup (including EOD reconciliation) fires before
+        the loop exits on session_end.
         """
         self._disconnect_flatten_done = False
         while not self._shutdown:
             if self.daily_state and self.daily_state.kill_switch_active:
                 await self._trigger_kill_switch()
                 break
+
+            # EOD actions — checked FIRST against NTP wall clock every tick.
+            # Must run before the session-active check because session_end and
+            # eod_cleanup both trigger at 16:00; if session check runs first
+            # the loop breaks before cleanup (and reconciliation) ever fires.
+            await self._check_eod_actions()
 
             if not self.time_gates.is_session_active():
                 # Before session start: wait for market open instead of exiting
@@ -310,9 +320,6 @@ class BotEngine:
 
             # Disconnect safety: flatten all if IB has been down too long
             await self._check_disconnect_timeout()
-
-            # EOD actions — checked against NTP wall clock every tick
-            await self._check_eod_actions()
 
             # Yield to event loop — ib_async processes bar updates and fill
             # callbacks during asyncio.sleep via nest_asyncio patching
@@ -381,8 +388,11 @@ class BotEngine:
             return False, reason
         return True, ""
 
-    async def _on_order_resolved(self):
-        """Called when any order resolves (TP/SL/cancel). Re-evaluates suspended orders."""
+    async def _on_order_resolved(self, released_qty: int = 0):
+        """Called when any order resolves (TP/SL/cancel). Releases reserved margin
+        and re-evaluates suspended orders."""
+        if self.margin_tracker and released_qty > 0:
+            self.margin_tracker.release(released_qty)
         if not self.margin_priority or not self.daily_state or not self.daily_state.suspended_orders:
             return
         async with self._detection_lock:

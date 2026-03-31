@@ -265,7 +265,7 @@ def compute_rr_for_fvgs(df_fvgs, df_walk, filter_end_time, cache_file=None):
 # Aggregation: time x risk cells -> win rates / EV per setup x n
 # ---------------------------------------------------------------------------
 
-DEFAULT_RISK_BINS = [5, 10, 15, 20, 25, 30, 40, 80]
+DEFAULT_RISK_BINS = [5, 10, 15, 20, 25, 30, 40, 50, 200]
 
 
 def aggregate_rr_cells(

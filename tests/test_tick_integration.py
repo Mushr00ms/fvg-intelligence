@@ -106,7 +106,8 @@ class _FakeStrategy:
         ("09:30-10:00", "20-25"): {"setup": "mit_extreme"},
         ("09:30-10:00", "25-30"): {"setup": "mit_extreme"},
         ("09:30-10:00", "30-40"): {"setup": "mit_extreme"},
-        ("09:30-10:00", "40-80"): {"setup": "mit_extreme"},
+        ("09:30-10:00", "40-50"): {"setup": "mit_extreme"},
+        ("09:30-10:00", "50-200"): {"setup": "mit_extreme"},
         ("10:00-10:30", "5-10"): {"setup": "mit_extreme"},
         ("10:00-10:30", "10-15"): {"setup": "mit_extreme"},
     }

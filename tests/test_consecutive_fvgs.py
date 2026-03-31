@@ -29,7 +29,7 @@ class _AllCellsStrategy:
         def keys(self):
             """Yield cells for every 30-min window so _finalize_fvg never skips."""
             from bot.strategy.fvg_detector import SESSION_INTERVALS
-            risk_ranges = ["5-10", "10-15", "15-20", "20-25", "25-30", "30-40", "40-80"]
+            risk_ranges = ["5-10", "10-15", "15-20", "20-25", "25-30", "30-40", "40-50", "50-200"]
             for start, end in SESSION_INTERVALS:
                 tp = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
                 for rr in risk_ranges:

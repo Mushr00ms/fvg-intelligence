@@ -286,10 +286,10 @@ class OrderManager:
         )
         return result
 
-    def _notify_order_resolved(self):
+    def _notify_order_resolved(self, released_qty: int = 0):
         """Trigger margin re-evaluation callback if registered."""
         if self._on_order_resolved:
-            asyncio.ensure_future(self._on_order_resolved())
+            asyncio.ensure_future(self._on_order_resolved(released_qty))
 
     def _on_entry_fill(self, trade, og, daily_state):
         """Handle entry order fill (full or partial)."""
@@ -559,7 +559,7 @@ class OrderManager:
             group_id=og.group_id,
             reason=reason,
         )
-        self._notify_order_resolved()
+        self._notify_order_resolved(released_qty=og.target_qty)
 
     async def cancel_all_pending(self, daily_state, reason=CLOSE_EOD):
         """Cancel all unfilled entry orders (EOD cleanup)."""
@@ -777,7 +777,7 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
-        self._notify_order_resolved()
+        self._notify_order_resolved(released_qty=og.filled_qty)
 
     def _on_sl_fill(self, trade, og, daily_state):
         """Stop loss filled — log P&L, slippage, commissions."""
@@ -868,7 +868,7 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
-        self._notify_order_resolved()
+        self._notify_order_resolved(released_qty=og.filled_qty)
 
     def _cleanup_entry_remainder(self, og):
         """Cancel unfilled entry contracts and kill partial fill timer on TP/SL fill.

@@ -32,7 +32,7 @@ def get_risk_pct_for_bucket(risk_range, config=None):
     if config is None or not getattr(config, 'use_risk_tiers', False):
         return getattr(config, 'risk_per_trade', 0.01) if config else 0.01
 
-    if risk_range in getattr(config, 'large_buckets', ['40-80']):
+    if risk_range in getattr(config, 'large_buckets', ['40-50', '50-200']):
         return config.risk_large_pct
     elif risk_range in getattr(config, 'small_buckets', ['5-10', '10-15']):
         return config.risk_small_pct
@@ -42,7 +42,7 @@ def get_risk_pct_for_bucket(risk_range, config=None):
 
 def risk_to_range(risk_pts):
     """Map risk in points to risk range bucket string."""
-    bins = [5, 10, 15, 20, 25, 30, 40, 80]
+    bins = [5, 10, 15, 20, 25, 30, 40, 50, 200]
     for i in range(len(bins) - 1):
         if bins[i] <= risk_pts < bins[i + 1]:
             return f"{bins[i]}-{bins[i + 1]}"

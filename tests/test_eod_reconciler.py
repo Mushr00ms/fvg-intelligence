@@ -347,7 +347,7 @@ class TestBuildBacktestConfig:
         assert config["max_concurrent"] == 3
         assert config["max_daily_trades"] == 15
         assert config["slip"] is False
-        assert config["margin_per_contract"] == 33000.0
+        assert config["margin_per_contract"] == 36750.0
 
     def test_risk_tiers_from_strategy(self):
         from bot.bot_config import BotConfig
