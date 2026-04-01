@@ -5,7 +5,7 @@ import hashlib
 import os
 import sys
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
@@ -21,11 +21,15 @@ def get_session():
     s.mount("https://", HTTPAdapter(max_retries=retry))
     return s
 
-def download_klines(interval, start_year=2020, end_year=2025):
+def download_klines(interval, start_year=2020, end_year=None):
     """Download monthly kline ZIPs for given interval."""
     out = OUT_DIR / interval
     out.mkdir(parents=True, exist_ok=True)
     session = get_session()
+    last_complete_month = date.today().replace(day=1) - timedelta(days=1)
+    last_complete_tag = f"{last_complete_month.year}-{last_complete_month.month:02d}"
+    if end_year is None:
+        end_year = last_complete_month.year
 
     downloaded = 0
     skipped = 0
@@ -33,9 +37,9 @@ def download_klines(interval, start_year=2020, end_year=2025):
 
     for year in range(start_year, end_year + 1):
         for month in range(1, 13):
-            if year == 2025 and month > 10:
-                break
             tag = f"{year}-{month:02d}"
+            if tag > last_complete_tag:
+                break
             fname = f"BTCUSDT-{interval}-{tag}.zip"
             url = f"{BASE}/{interval}/{fname}"
             dest = out / fname

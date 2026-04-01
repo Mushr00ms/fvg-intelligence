@@ -13,8 +13,36 @@
       "expected_trades_per_day": 4.9031,
       "created_at": "2026-03-23T22:07:25.076857+00:00",
       "updated_at": "2026-03-31T00:00:00.000000+00:00"
+    },
+    {
+      "id": "btc-5min-locked-ev007-s30-both",
+      "name": "btc-5min-locked-ev007-s30-both",
+      "description": "Locked fee-aware exact EV strategy: EV>=0.07, 30+ samples, both, 165 cells, ~17.7 trades/day, 2025 replay DD 24.2%, Sharpe 3.113.",
+      "source_dataset": "rr_btcusdt_5min_5y_60min",
+      "ticker": "BTCUSDT",
+      "timeframe": "5min",
+      "cell_count": 165,
+      "enabled_count": 165,
+      "weighted_ev": 0.1372,
+      "expected_trades_per_day": 17.96,
+      "created_at": "2026-04-01T14:03:05.351887+00:00",
+      "updated_at": "2026-04-01T14:03:05.351887+00:00"
+    },
+    {
+      "id": "btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15",
+      "name": "btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15",
+      "description": "Walk-forward BTC strategy: train<= 2024, prune on 2025, EV>=0.07, samples>=200, setups=mit_only, prune>=15.",
+      "source_dataset": "official_audit_trades_2020_2026ytd.json",
+      "ticker": "BTCUSDT",
+      "timeframe": "5min",
+      "cell_count": 29,
+      "enabled_count": 29,
+      "weighted_ev": 0.1428,
+      "expected_trades_per_day": 4.62,
+      "created_at": "2026-04-01T23:49:20.072679",
+      "updated_at": "2026-04-01T23:49:20.072679"
     }
   ],
   "active_strategy": "mixed-best-ev-v3-touch-moderate",
-  "last_updated": "2026-03-26T14:00:00.000000+00:00"
+  "last_updated": "2026-04-01T23:49:20.072679"
 }

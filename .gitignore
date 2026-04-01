@@ -16,6 +16,9 @@ bot/logs/
 bot/backtest/results/
 bot/replay/results*/
 bot/bot_config.json
+crypto_bot/crypto_bot_config.json
+crypto_bot/logs/
+crypto_bot/state/
 *.db
 
 # Heatmap data (generated)
