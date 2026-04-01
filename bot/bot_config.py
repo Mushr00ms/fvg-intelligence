@@ -1,5 +1,5 @@
 """
-bot_config.py — Bot configuration: IB connection, risk parameters, operational modes.
+bot_config.py — Bot configuration: broker connection, risk parameters, operational modes.
 
 Loads from bot/bot_config.json with environment variable overrides.
 """
@@ -14,11 +14,26 @@ from typing import Optional
 class BotConfig:
     """Complete bot configuration."""
 
+    # Execution backend
+    execution_backend: str = "ib"   # "ib" | "binance_um"
+
     # IB Connection
     ib_host: str = "127.0.0.1"
     ib_port: int = 7497             # Paper: 7497, Live: 7496
     ib_client_id: int = 1
     ib_timeout: int = 30            # Connection timeout in seconds
+
+    # Binance USDⓈ-M Futures
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+    binance_api_base_url: str = "https://fapi.binance.com"
+    binance_ws_base_url: str = "wss://fstream.binance.com"
+    binance_recv_window: int = 5000
+    binance_symbol: str = "BTCUSDT"
+    binance_margin_type: str = "CROSSED"   # CROSSED | ISOLATED
+    binance_position_mode: str = "ONE_WAY" # ONE_WAY | HEDGE
+    binance_default_leverage: int = 10
+    binance_user_stream_keepalive: int = 1800
 
     # Contract
     ticker: str = "NQ"
@@ -111,6 +126,13 @@ class BotConfig:
         bot_dir = os.path.dirname(os.path.abspath(__file__))
         project_dir = os.path.dirname(bot_dir)
 
+        self.execution_backend = (self.execution_backend or "ib").lower()
+        if self.execution_backend not in {"ib", "binance_um"}:
+            raise ValueError(
+                f"Unsupported execution_backend={self.execution_backend!r}; "
+                "expected 'ib' or 'binance_um'"
+            )
+
         # WSL2: auto-detect Windows host IP if ib_host is still localhost
         if self.ib_host == "127.0.0.1":
             detected = _detect_wsl_windows_host()
@@ -163,9 +185,9 @@ def _detect_wsl_windows_host():
         pass
     return None
 
-
 # Environment variable overrides (BOT_ prefix)
 _ENV_MAP = {
+    "BOT_EXECUTION_BACKEND": ("execution_backend", str),
     "BOT_IB_HOST": ("ib_host", str),
     "BOT_IB_PORT": ("ib_port", int),
     "BOT_IB_CLIENT_ID": ("ib_client_id", int),
@@ -182,6 +204,15 @@ _ENV_MAP = {
     "BOT_DRY_RUN": ("dry_run", lambda x: x.lower() in ("1", "true", "yes")),
     # Telegram token/chat_id intentionally excluded — load from config file only
     # to avoid accidental exposure via shell history or process listing.
+    # Binance API key/secret intentionally excluded for the same reason.
+    "BOT_BINANCE_API_BASE_URL": ("binance_api_base_url", str),
+    "BOT_BINANCE_WS_BASE_URL": ("binance_ws_base_url", str),
+    "BOT_BINANCE_RECV_WINDOW": ("binance_recv_window", int),
+    "BOT_BINANCE_SYMBOL": ("binance_symbol", str),
+    "BOT_BINANCE_MARGIN_TYPE": ("binance_margin_type", str),
+    "BOT_BINANCE_POSITION_MODE": ("binance_position_mode", str),
+    "BOT_BINANCE_DEFAULT_LEVERAGE": ("binance_default_leverage", int),
+    "BOT_BINANCE_USER_STREAM_KEEPALIVE": ("binance_user_stream_keepalive", int),
     "BOT_STRATEGY_DIR": ("strategy_dir", str),
     "BOT_STATE_DIR": ("state_dir", str),
     "BOT_LOG_DIR": ("log_dir", str),
