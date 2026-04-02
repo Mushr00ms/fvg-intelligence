@@ -18,13 +18,17 @@ Fee per trade:
   At 50 bps risk: loss costs 1.0R + 0.08R = 1.08R total loss
 
 EV formula after fees:
-  EV = WR * n_value - (1 - WR) * (1 + fee_loss_ratio)
-  where fee_loss_ratio = taker_fee * 10000 / avg_risk_bps
+  EV = mean(per-trade R after fees)
+     = mean(n_value - win_fee_ratio(risk_bps_i)) on wins
+       and (-1 - loss_fee_ratio(risk_bps_i)) on losses
+
+This uses each trade's own risk_bps so cell selection matches replay math.
 
 This script recomputes best_n per cell with fees, finds surviving cells,
 and runs the strategy sweep with fee-adjusted P&L.
 """
 
+import importlib.util
 import json
 import math
 import os
@@ -34,6 +38,13 @@ from collections import defaultdict
 import numpy as np
 
 _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+_STORE_PATH = os.path.join(_ROOT, "logic", "utils", "strategy_store.py")
+_store_spec = importlib.util.spec_from_file_location("strategy_store", _STORE_PATH)
+_strategy_store = importlib.util.module_from_spec(_store_spec)
+_store_spec.loader.exec_module(_strategy_store)
+
+save_strategy = _strategy_store.save_strategy
+set_active_strategy = _strategy_store.set_active_strategy
 
 N_VALUES = [round(1.0 + i * 0.25, 2) for i in range(9)]
 RISK_BINS = [1, 7, 10, 12, 14, 17, 20, 24, 31, 43, 994]
@@ -66,10 +77,80 @@ def ev_after_fees(win_rate, n_value, avg_risk_bps):
     return win_rate * (n_value - fw) - (1 - win_rate) * (1 + fl)
 
 
+def exact_group_ev_after_fees(group, n_value):
+    """Compute fee-aware EV exactly using each trade's own risk in bps."""
+    nv_str = str(n_value)
+    pnl_r = []
+    for trade in group:
+        rbps = trade["risk_bps"]
+        if trade["outcomes"].get(nv_str) is True:
+            pnl_r.append(n_value - fee_win_ratio(rbps))
+        else:
+            pnl_r.append(-1 - fee_loss_ratio(rbps))
+    return float(np.mean(pnl_r))
+
+
+def build_strategy_export(export_id, export_name, export_description, export_spec):
+    """Build a bot-ready strategy JSON from qualifying fee-adjusted cells."""
+    cells = []
+    for key in sorted(export_spec["qual"].keys()):
+        tp, rb, setup = key
+        cell = export_spec["qual"][key]
+        rr_stats = cell["rr_fee"][cell["best_n_fee"]]
+        cells.append({
+            "time_period": tp,
+            "risk_range": rb,
+            "setup": setup,
+            "rr_target": cell["best_n_fee"],
+            "best_n": cell["best_n_fee"],
+            "ev": round(cell["best_ev_fee"], 4),
+            "win_rate": rr_stats["wr"],
+            "samples": cell["samples"],
+            "median_risk": round(cell["median_risk_bps"], 2),
+            "median_risk_bps": round(cell["median_risk_bps"], 2),
+            "avg_risk_bps": cell["avg_risk_bps"],
+            "trades_per_day": round(cell["trades_per_day"], 2),
+            "enabled": True,
+            "notes": "",
+        })
+
+    return {
+        "schema_version": "1.0",
+        "meta": {
+            "id": export_id,
+            "name": export_name,
+            "description": export_description,
+            "source_dataset": "rr_btcusdt_5min_5y_60min",
+            "ticker": "BTCUSDT",
+            "timeframe": "5min",
+            "selection_label": export_spec["label"],
+            "risk_rules": {
+                "risk_bins": RISK_BINS,
+            },
+            "fee_model": {
+                "entry_fee": ENTRY_FEE,
+                "tp_fee": TP_FEE,
+                "sl_fee": SL_FEE,
+                "model": "exact_per_trade_risk_bps",
+            },
+        },
+        "filters": {
+            "min_samples": export_spec["min_samples"],
+            "min_ev": export_spec["min_ev"],
+            "setups": sorted(export_spec["setups"]),
+        },
+        "cells": cells,
+    }
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--year", default=None, help="Filter trades to year (e.g. 2025)")
+    parser.add_argument("--export-label", default=None, help="Export strategy for a sweep label, e.g. ev0.07_s30_both")
+    parser.add_argument("--export-strategy-id", default=None, help="Override exported strategy id")
+    parser.add_argument("--export-name", default=None, help="Override exported strategy name")
+    parser.add_argument("--set-active", action="store_true", help="Set the exported strategy as the active strategy")
     args = parser.parse_args()
 
     print("Loading trades...")
@@ -89,6 +170,7 @@ def main():
 
     # Build cells from full 5Y (never in-sample)
     trades = all_5y
+    dataset_days = len({t["formation_time"][:10] for t in trades})
     groups = defaultdict(list)
     for t in trades:
         rb = None
@@ -111,6 +193,9 @@ def main():
 
         tp, rb, setup = key
         avg_risk_bps = np.mean([t["risk_bps"] for t in group])
+        median_risk_bps = np.median([t["risk_bps"] for t in group])
+        avg_fee_loss_ratio = np.mean([fee_loss_ratio(t["risk_bps"]) for t in group])
+        trades_per_day = len(group) / dataset_days if dataset_days else 0
 
         best_ev_raw = -999
         best_n_raw = 1.0
@@ -126,7 +211,7 @@ def main():
             wr = wins / n
 
             ev_raw = wr * (nv + 1) - 1
-            ev_f = ev_after_fees(wr, nv, avg_risk_bps)
+            ev_f = exact_group_ev_after_fees(group, nv)
 
             rr_raw[nv] = {"wr": round(wr, 4), "ev": round(ev_raw, 4), "wins": wins}
             rr_fee[nv] = {"wr": round(wr, 4), "ev": round(ev_f, 4), "wins": wins}
@@ -141,11 +226,13 @@ def main():
         cells[key] = {
             "samples": n,
             "avg_risk_bps": round(avg_risk_bps, 1),
+            "median_risk_bps": round(median_risk_bps, 2),
+            "trades_per_day": round(trades_per_day, 2),
             "best_n_raw": best_n_raw,
             "best_ev_raw": round(best_ev_raw, 4),
             "best_n_fee": best_n_fee,
             "best_ev_fee": round(best_ev_fee, 4),
-            "fee_loss_ratio": round(fee_loss_ratio(avg_risk_bps), 4),
+            "fee_loss_ratio": round(avg_fee_loss_ratio, 4),
             "rr_raw": rr_raw,
             "rr_fee": rr_fee,
             "trades": group,
@@ -225,6 +312,7 @@ def main():
     RISK_PCT = 0.01
 
     results = []
+    export_specs = {}
 
     for min_ev in ev_thresholds:
         for min_samp in min_samples_list:
@@ -320,6 +408,13 @@ def main():
                     "trades_per_day": round(total / trading_days, 1),
                     "avg_ev_fee": round(avg_ev, 4),
                 })
+                export_specs[f"ev{min_ev:.2f}_s{min_samp}_{setup_label}"] = {
+                    "label": f"ev{min_ev:.2f}_s{min_samp}_{setup_label}",
+                    "min_ev": min_ev,
+                    "min_samples": min_samp,
+                    "setups": setups,
+                    "qual": dict(qual),
+                }
 
     # Print results
     results.sort(key=lambda r: r["net_pnl"], reverse=True)
@@ -347,6 +442,28 @@ def main():
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
     print(f"\nSaved to {out_path}")
+
+    if args.export_label:
+        export_spec = export_specs.get(args.export_label)
+        if export_spec is None:
+            raise ValueError(f"Unknown export label: {args.export_label}")
+
+        export_id = args.export_strategy_id or f"btc-5min-locked-{args.export_label.replace('.', '').replace('_', '-')}"
+        export_name = args.export_name or export_id
+        result = next(r for r in results if r["label"] == args.export_label)
+        export_description = (
+            f"Locked fee-aware exact EV strategy: EV>={result['min_ev']:.2f}, "
+            f"{result['min_samples']}+ samples, {result['setups']}, "
+            f"{result['cells']} cells, ~{result['trades_per_day']} trades/day, "
+            f"2025 replay DD {result['max_dd_pct']:.1f}%, Sharpe {result['sharpe']:.3f}."
+        )
+        strategy = build_strategy_export(export_id, export_name, export_description, export_spec)
+        strategy_dir = os.path.join(_ROOT, "logic", "strategies")
+        strategy_id = save_strategy(strategy, strategy_dir)
+        print(f"Exported strategy to {os.path.join(strategy_dir, f'{strategy_id}.json')}")
+        if args.set_active:
+            set_active_strategy(strategy_id, strategy_dir)
+            print(f"Set active_strategy={strategy_id}")
 
 
 if __name__ == "__main__":

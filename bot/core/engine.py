@@ -38,6 +38,7 @@ from bot.execution.position_tracker import get_account_balance, get_ib_open_orde
 from bot.alerts.telegram import TelegramAlerter
 from bot.db import TradeDB
 from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
+from bot.backtest.us_holidays import is_trading_day, US_MARKET_HOLIDAYS
 
 NY_TZ = pytz.timezone("America/New_York")
 CME_TZ = pytz.timezone("America/Chicago")  # CME exchange timezone
@@ -144,6 +145,20 @@ class BotEngine:
 
     async def _startup(self):
         """Initialize all components and prepare for trading."""
+        # 0. Calendar gate — skip non-trading days (mirrors backtester behavior)
+        today_str = self.clock.now().strftime("%Y%m%d")
+        if not is_trading_day(today_str):
+            reason = US_MARKET_HOLIDAYS.get(today_str, "weekend")
+            self.logger.log("market_closed", date=today_str, reason=reason)
+            self._shutdown = True
+            return
+
+        if self.config.execution_backend != "ib":
+            raise NotImplementedError(
+                "execution_backend='binance_um' is scaffolded at the client/adapter layer "
+                "but not yet wired into BotEngine"
+            )
+
         self.logger.log("bot_start", mode="PAPER" if self.config.paper_mode else "LIVE",
                         dry_run=self.config.dry_run)
 
@@ -168,6 +183,13 @@ class BotEngine:
                             config_label=hfoiv_cfg.get("config_label", ""),
                             rolling=self.hfoiv_gate.config.rolling_bars,
                             lookback=self.hfoiv_gate.config.lookback_sessions)
+
+        # 1c. Witching gate — skip day if strategy hard_gates flag it (mirrors backtester)
+        allowed, cal_reason = self._calendar_gate_allows_entry()
+        if not allowed:
+            self.logger.log("market_closed", date=today_str, reason=cal_reason)
+            self._shutdown = True
+            return
 
         # 2. Connect to IB
         if not self.config.dry_run:

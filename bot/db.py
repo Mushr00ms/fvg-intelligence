@@ -355,6 +355,25 @@ class TradeDB:
             [days]
         )
 
+    def get_period_pnl(self):
+        """Current-week and current-month PNL from closed trades."""
+        week = self.query(
+            "SELECT ROUND(SUM(net_pnl), 2) as pnl, COUNT(*) as trades "
+            "FROM trades WHERE exit_reason IS NOT NULL "
+            "AND strftime('%Y-%W', trade_date) = strftime('%Y-%W', 'now')"
+        )
+        month = self.query(
+            "SELECT ROUND(SUM(net_pnl), 2) as pnl, COUNT(*) as trades "
+            "FROM trades WHERE exit_reason IS NOT NULL "
+            "AND strftime('%Y-%m', trade_date) = strftime('%Y-%m', 'now')"
+        )
+        return {
+            'week_pnl': (week[0]['pnl'] or 0) if week else 0,
+            'week_trades': (week[0]['trades'] or 0) if week else 0,
+            'month_pnl': (month[0]['pnl'] or 0) if month else 0,
+            'month_trades': (month[0]['trades'] or 0) if month else 0,
+        }
+
     def get_overall_stats(self, days=None):
         """Get aggregate stats across all trades."""
         sql = '''

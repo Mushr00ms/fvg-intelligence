@@ -16,6 +16,9 @@ bot/logs/
 bot/backtest/results/
 bot/replay/results*/
 bot/bot_config.json
+crypto_bot/crypto_bot_config.json
+crypto_bot/logs/
+crypto_bot/state/
 *.db
 
 # Heatmap data (generated)
@@ -27,6 +30,8 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv
+.venv-codex/
 *.egg-info/
 
 # OS
@@ -48,6 +53,15 @@ Thumbs.db
 .envrc
 CLAUDE.template.md
 snapshot.md
+
+# Local research scratch
+docs/tmp_*.txt
+
+# BTC strategy research outputs (generated)
+scripts/btc_sweep_results/leverage_sweep*.json
+scripts/btc_sweep_results/walkforward_btc_risk_tiers*.json
+scripts/btc_sweep_results/official_audit_trades_2026*.json
+scripts/btc_sweep_results/official_audit_trades_2020_2026ytd.json
 
 # Databento downloads
 GLBX-*.zip

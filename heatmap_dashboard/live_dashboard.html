@@ -71,6 +71,7 @@
 
   .nav-link { position: absolute; right: 16px; top: 10px; font-size: 10px; color: var(--blue); text-decoration: none; }
   .nav-link:hover { text-decoration: underline; }
+
 </style>
 </head>
 <body>
@@ -86,6 +87,8 @@
 <div class="kpi-bar">
   <div class="kpi"><div class="kpi-label">Balance</div><div class="kpi-value" id="kpi-balance">—</div></div>
   <div class="kpi"><div class="kpi-label">Daily P&L</div><div class="kpi-value" id="kpi-pnl">—</div></div>
+  <div class="kpi"><div class="kpi-label">Week P&L</div><div class="kpi-value" id="kpi-week-pnl">—</div></div>
+  <div class="kpi"><div class="kpi-label">Month P&L</div><div class="kpi-value" id="kpi-month-pnl">—</div></div>
   <div class="kpi"><div class="kpi-label">Trades</div><div class="kpi-value" id="kpi-trades">—</div></div>
   <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="kpi-wr">—</div></div>
   <div class="kpi"><div class="kpi-label">Open Positions</div><div class="kpi-value" id="kpi-open">—</div></div>
@@ -133,12 +136,6 @@
         <tbody id="tbl-closed"></tbody>
       </table>
       <div class="empty" id="closed-empty">No trades yet today</div>
-    </div>
-
-    <!-- Equity Curve -->
-    <div class="panel">
-      <div class="panel-title">Equity Curve <span class="badge" id="eq-count">—</span></div>
-      <div id="equity-chart" style="height:180px;padding:8px;"></div>
     </div>
 
     <!-- Cell Performance (30d) -->
@@ -446,30 +443,6 @@ async function refreshState() {
 // ANALYTICS PANELS
 // ═══════════════════════════════════════
 async function refreshAnalytics() {
-  // Equity curve
-  try {
-    const res = await fetch(`${API}/api/bot/equity-curve`);
-    const data = await res.json();
-    const eq = data.equity || [];
-    document.getElementById('eq-count').textContent = eq.length + ' trades';
-    if (eq.length > 1) {
-      const chart = document.getElementById('equity-chart');
-      const balances = eq.map(t => t.balance_after || 0);
-      const labels = eq.map(t => (t.exit_time || '').split('T')[1]?.slice(0,5) || '');
-      const colors = eq.map(t => (t.net_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)');
-      // Simple SVG line chart
-      const w = chart.clientWidth - 16, h = 160;
-      const minB = Math.min(...balances) * 0.9999, maxB = Math.max(...balances) * 1.0001;
-      const rangeB = maxB - minB || 1;
-      const pts = balances.map((b,i) => `${(i/(balances.length-1))*w},${h - ((b-minB)/rangeB)*h}`).join(' ');
-      chart.innerHTML = `<svg width="${w}" height="${h}" style="overflow:visible">
-        <polyline points="${pts}" fill="none" stroke="var(--green)" stroke-width="1.5" opacity="0.8"/>
-        <text x="0" y="12" fill="var(--text-dimmer)" font-size="9">$${Math.round(maxB).toLocaleString()}</text>
-        <text x="0" y="${h}" fill="var(--text-dimmer)" font-size="9">$${Math.round(minB).toLocaleString()}</text>
-      </svg>`;
-    }
-  } catch(e) {}
-
   // Cell performance
   try {
     const res = await fetch(`${API}/api/bot/cell-performance`);
@@ -489,6 +462,22 @@ async function refreshAnalytics() {
         <td>$${Math.round(c.avg_pnl||0)}</td>
         <td>${(c.avg_entry_slippage||0).toFixed(2)}pt</td></tr>`;
     }).join('');
+  } catch(e) {}
+
+  // Week / Month PNL
+  try {
+    const res = await fetch(`${API}/api/bot/period-pnl`);
+    const p = await res.json();
+    if (!p.error) {
+      const wPnl = p.week_pnl || 0;
+      const mPnl = p.month_pnl || 0;
+      const wEl = document.getElementById('kpi-week-pnl');
+      wEl.textContent = (wPnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(wPnl)).toLocaleString();
+      wEl.className = 'kpi-value ' + (wPnl >= 0 ? 'pos' : 'neg');
+      const mEl = document.getElementById('kpi-month-pnl');
+      mEl.textContent = (mPnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(mPnl)).toLocaleString();
+      mEl.className = 'kpi-value ' + (mPnl >= 0 ? 'pos' : 'neg');
+    }
   } catch(e) {}
 
   // Funnel

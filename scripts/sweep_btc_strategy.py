@@ -104,7 +104,7 @@ def replay_equity(
 ):
     """Replay trades chronologically through qualifying cells.
 
-    Each qualifying trade risks risk_pct of current balance.
+    Each qualifying trade risks a fixed risk_pct of starting balance.
     Win = +best_n * risk, Loss = -1 * risk.
     """
     # Select qualifying cells

@@ -708,7 +708,7 @@ def api_trade_fullday(
 
 _BOT_STATE_DIR = os.path.join(_REPO_ROOT, "bot", "bot_state")
 _BOT_LOG_DIR = os.path.join(_REPO_ROOT, "bot", "logs")
-_BOT_DB_PATH = os.path.join(_REPO_ROOT, "bot", "fvg_bot.db")
+_BOT_DB_PATH = os.path.join(_REPO_ROOT, "bot", "bot_state", "bot_trades.db")
 
 
 def _today_str():
@@ -881,14 +881,26 @@ def api_bot_cell_performance():
         return JSONResponse({"error": str(e)})
 
 
+@app.get("/api/bot/period-pnl")
+def api_bot_period_pnl():
+    """Current week and month PNL totals from closed trades."""
+    db = _get_bot_db()
+    if not db:
+        return JSONResponse({"week_pnl": 0, "week_trades": 0, "month_pnl": 0, "month_trades": 0})
+    try:
+        return JSONResponse(db.get_period_pnl())
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
+
 @app.get("/api/bot/daily-history")
-def api_bot_daily_history():
-    """Daily P&L history for the last 30 trading days."""
+def api_bot_daily_history(days: int = 30):
+    """Daily P&L history for the last N trading days (default 30)."""
     db = _get_bot_db()
     if not db:
         return JSONResponse({"error": "No bot database found"})
     try:
-        return JSONResponse({"daily": db.get_daily_summary(days=30)})
+        return JSONResponse({"daily": db.get_daily_summary(days=days)})
     except Exception as e:
         return JSONResponse({"error": str(e)})
 

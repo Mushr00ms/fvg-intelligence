@@ -61,6 +61,7 @@ def main():
     dry = " (DRY RUN)" if config.dry_run else ""
     print(f"\n{'='*50}")
     print(f"  FVG Intelligence Bot — {mode}{dry}")
+    print(f"  Backend: {config.execution_backend}")
     print(f"  IB: {config.ib_host}:{config.ib_port}")
     print(f"  Strategy dir: {config.strategy_dir}")
     print(f"{'='*50}\n")

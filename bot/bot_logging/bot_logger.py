@@ -125,7 +125,7 @@ class BotLogger:
         time_part = ts[11:19] if len(ts) > 19 else ts
 
         # Color coding by event severity
-        color = _EVENT_COLORS.get(event, "\033[0m")
+        color = self._console_color(record)
         reset = "\033[0m"
 
         # Build detail string from remaining keys
@@ -134,16 +134,33 @@ class BotLogger:
         if details:
             parts = []
             for k, v in details.items():
-                if isinstance(v, float):
-                    parts.append(f"{k}={v:.4f}")
-                else:
-                    parts.append(f"{k}={v}")
+                parts.append(f"{k}={self._format_console_value(record, k, v)}")
             detail_str = " " + " ".join(parts)
 
         print(
             f"{color}[{time_part}] {event.upper()}{reset}{detail_str}",
             file=self._console,
         )
+
+    def _console_color(self, record):
+        event = record.get("event", "")
+        if event == "crypto_fvg_detected":
+            fvg_type = str(record.get("fvg_type", "")).lower()
+            if fvg_type == "bullish":
+                return "\033[92m"
+            if fvg_type == "bearish":
+                return "\033[91m"
+        return _EVENT_COLORS.get(event, "\033[0m")
+
+    def _format_console_value(self, record, key, value):
+        if isinstance(value, float):
+            rendered = f"{value:.4f}"
+        else:
+            rendered = str(value)
+
+        if record.get("event") == "crypto_fvg_detected" and key == "formation_bars":
+            return f"\033[96m{rendered}\033[0m"
+        return rendered
 
     def close(self):
         """Close the log file."""
@@ -163,6 +180,7 @@ _EVENT_COLORS = {
     "strategy_reloaded": "\033[92m",
     # Yellow — informational
     "fvg_detected": "\033[93m",
+    "crypto_fvg_detected": "\033[93m",
     "fvg_skipped_strategy": "\033[90m",
     "mitigation": "\033[93m",
     "order_placed": "\033[93m",
