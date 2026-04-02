@@ -272,6 +272,16 @@ class DailyState:
         return len(self.pending_orders) + len(self.open_positions)
 
     @property
+    def filled_trade_count(self):
+        """Number of trades that actually filled (excludes unfilled cancels)."""
+        unfilled_cancels = sum(
+            1 for t in self.closed_trades
+            if t.close_reason in (CLOSE_CANCEL, CLOSE_EOD, CLOSE_REJECTED)
+            and t.filled_qty == 0
+        )
+        return len(self.closed_trades) - unfilled_cancels
+
+    @property
     def daily_pnl_pct(self):
         """Realized P&L as percentage of start balance."""
         if self.start_balance <= 0:

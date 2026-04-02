@@ -155,7 +155,7 @@ class TelegramAlerter:
         msg = (
             "<b>DAILY SUMMARY</b>\n\n"
             f"Date: {daily_state.date}\n"
-            f"Trades: {daily_state.trade_count}\n"
+            f"Trades: {daily_state.filled_trade_count}\n"
             f"P&L: {emoji}${pnl:,.0f} ({emoji}{pnl_pct:.1f}%)\n"
             f"Balance: ${daily_state.start_balance + pnl:,.0f}"
         )

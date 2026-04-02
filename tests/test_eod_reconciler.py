@@ -250,16 +250,19 @@ class TestMatchTrades:
         assert "2ct" in mis[0].backtest_detail
 
     def test_contract_mismatch_hfoiv_scaled(self):
-        """Contract scaled down by HFOIV gate is tagged inline."""
+        """Contract scaled down by HFOIV gate is expected, not severe."""
         live = [_live_trade(contracts=1)]
         bt = [FakeTrade(contracts=2)]
         result = match_trades(live, bt, hfoiv_active=True)
 
         assert result.matched_count == 1
-        mis = [d for d in result.divergences if d.severity == "EXIT_MISMATCH"]
-        assert len(mis) == 1
-        assert "HFOIV" in mis[0].live_detail
-        assert "1ct" in mis[0].live_detail
+        # HFOIV-caused contract reduction is not a real divergence
+        severe = [d for d in result.divergences if d.severity == "EXIT_MISMATCH"]
+        assert len(severe) == 0
+        hfoiv = [d for d in result.divergences if d.severity == "HFOIV_EXPECTED"]
+        assert len(hfoiv) == 1
+        assert "HFOIV" in hfoiv[0].live_detail
+        assert "1ct" in hfoiv[0].live_detail
 
     def test_contract_mismatch_no_hfoiv_tag_when_live_larger(self):
         """HFOIV tag only appears when live has FEWER contracts."""

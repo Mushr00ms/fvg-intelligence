@@ -53,6 +53,11 @@ class ReconciliationResult:
     kill_switch_active: bool = False
     hfoiv_active: bool = False
     error: Optional[str] = None
+    # Daily summary fields (set by engine before formatting)
+    daily_pnl: float = 0.0
+    daily_pnl_pct: float = 0.0
+    balance: float = 0.0
+    filled_trades: int = 0
 
 
 # ── Trade normalization ──────────────────────────────────────────────────
@@ -162,10 +167,15 @@ def _compare_matched(live, bt, cell_key, hfoiv_active=False):
     if live["contracts"] != bt["contracts"]:
         live_detail = f"{live['contracts']}ct"
         bt_detail = f"{bt['contracts']}ct"
+        # HFOIV reduces live sizing — backtester lacks volatility history,
+        # so fewer contracts on live side is expected, not a real divergence.
         if hfoiv_active and live["contracts"] < bt["contracts"]:
             live_detail += " ⬇ HFOIV"
+            severity = "HFOIV_EXPECTED"
+        else:
+            severity = "EXIT_MISMATCH"
         divs.append(Divergence(
-            severity="EXIT_MISMATCH",
+            severity=severity,
             cell_key=cell_key,
             live_detail=live_detail,
             backtest_detail=bt_detail,
@@ -274,10 +284,17 @@ def match_trades(live_trades, backtest_trades, hfoiv_active=False):
 
 def format_telegram_report(result, weekly_html=None, fills_garbage=False):
     """Format the reconciliation result as an HTML Telegram message."""
+    # Daily summary line — included in all report variants
+    pnl = result.daily_pnl
+    pnl_pct = result.daily_pnl_pct
+    sign = "+" if pnl >= 0 else ""
+    daily_line = f"💰 <b>{sign}${pnl:,.0f}</b> ({sign}{pnl_pct:.1f}%)  ·  {result.filled_trades} trades  ·  ${result.balance:,.0f}"
+
     if result.error:
         return (
             "🔴 <b>RECONCILIATION SKIPPED</b>\n\n"
             f"📅 {result.date}\n"
+            f"{daily_line}\n\n"
             f"Reason: {result.error}"
         )
 
@@ -285,6 +302,7 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
         msg = (
             "⚪ <b>RECONCILIATION</b>\n\n"
             f"📅 {result.date}\n"
+            f"{daily_line}\n\n"
             "No trades on either side."
         )
         if weekly_html:
@@ -294,6 +312,7 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
     # Divergence counts by type
     severe = [d for d in result.divergences if d.severity in ("MISSED_LIVE", "MISSED_BACKTEST", "EXIT_MISMATCH")]
     drifts = [d for d in result.divergences if d.severity == "PRICE_DRIFT"]
+    hfoiv = [d for d in result.divergences if d.severity == "HFOIV_EXPECTED"]
 
     # Header — color-coded by severity
     if not severe:
@@ -305,7 +324,8 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
 
     lines = [
         header,
-        f"📅 {result.date}\n",
+        f"📅 {result.date}",
+        f"{daily_line}\n",
         f"📊 Live {result.live_count}  ·  Backtest {result.backtest_count}  ·  Matched {result.matched_count}",
     ]
 
@@ -329,13 +349,18 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
     if drifts:
         lines.append(f"\n📐 {len(drifts)} price drift{'s' if len(drifts) != 1 else ''} (minor)")
 
+    if hfoiv:
+        for d in hfoiv:
+            lines.append(f"\n⬇ {d.cell_key}: {d.live_detail} (BT {d.backtest_detail})")
+
     # P&L bar
     if fills_garbage and result.matched_count > 0:
         # Paper fills unreliable — use backtest prices × live sizing
         true_pnl = result.corrected_net_pnl
         pnl_icon = "📈" if true_pnl >= 0 else "📉"
         lines.append(f"\n{pnl_icon} <b>P&L</b> (paper fills unreliable)")
-        lines.append(f"     Paper:     ${result.live_net_pnl:>+,.0f}  ⚠️")
+        pnl_warn = "  ⚠️" if round(result.live_net_pnl) != round(true_pnl) else ""
+        lines.append(f"     Paper:     ${result.live_net_pnl:>+,.0f}{pnl_warn}")
         lines.append(f"     Corrected: ${true_pnl:>+,.0f}")
     else:
         delta = result.live_net_pnl - result.backtest_net_pnl

@@ -23,7 +23,7 @@ from bot.bot_config import BotConfig
 from bot.clock import Clock
 from bot.bot_logging.bot_logger import BotLogger
 from bot.state.state_manager import StateManager
-from bot.state.trade_state import DailyState
+from bot.state.trade_state import DailyState, CLOSE_CANCEL, CLOSE_EOD, CLOSE_REJECTED
 from bot.strategy.strategy_loader import StrategyLoader
 from bot.strategy.fvg_detector import ActiveFVGManager
 from bot.strategy.mitigation_scanner import scan_active_fvgs
@@ -129,6 +129,7 @@ class BotEngine:
         self._eod_cancel_done = False
         self._eod_flatten_done = False
         self._eod_cleanup_done = False
+        self._session_seeded = False  # True after bars re-seeded at session open
 
     async def run(self):
         """Main entry point. Runs the bot until session end or kill switch."""
@@ -277,6 +278,11 @@ class BotEngine:
             # FVGs that formed before it came back online.
             await self._backfill_fvgs()
 
+            # If session is already active (mid-day launch), mark seeded so
+            # the event loop doesn't redundantly re-seed at the top.
+            if self.time_gates.is_session_active():
+                self._session_seeded = True
+
             # 6c. Register reconnect handler (re-subscribe bars if IB drops)
             self.ib_conn.on_reconnect(self._on_reconnect)
 
@@ -339,6 +345,18 @@ class BotEngine:
                 # After session end: actually stop
                 self.logger.log("bot_stop", reason="session_ended")
                 break
+
+            # On first loop iteration after session opens, re-seed bars.
+            # When the bot starts pre-market, _seed_recent_bars() finds 0
+            # today bars (they don't exist yet). By 9:30 IB has delivered
+            # the first bars, so re-seeding here populates _recent_bars
+            # and enables FVG detection from the very first bar close.
+            if not self._session_seeded:
+                self._session_seeded = True
+                self._seed_recent_bars()
+                await self._backfill_fvgs()
+                self.logger.log("session_open_reseed",
+                                bars=len(self.fvg_mgr._recent_bars) if self.fvg_mgr else 0)
 
             # Disconnect safety: flatten all if IB has been down too long
             await self._check_disconnect_timeout()
@@ -1420,8 +1438,13 @@ class BotEngine:
         if self._imbalance_accumulator is not None:
             self._imbalance_accumulator.reset()
 
-        # Compute comprehensive daily stats
-        closed = self.daily_state.closed_trades
+        # Compute comprehensive daily stats — exclude unfilled cancels
+        all_closed = self.daily_state.closed_trades
+        closed = [
+            t for t in all_closed
+            if not (t.close_reason in (CLOSE_CANCEL, CLOSE_EOD, CLOSE_REJECTED)
+                    and t.filled_qty == 0)
+        ]
         wins = [t for t in closed if t.close_reason == "TP"]
         losses = [t for t in closed if t.close_reason == "SL"]
         eod_exits = [t for t in closed if t.close_reason in ("EOD", "FLATTEN")]
@@ -1492,15 +1515,14 @@ class BotEngine:
             strategy_id=self.strategy.strategy_id,
         )
 
-        if self.telegram.enabled:
-            await self.telegram.alert_daily_summary(self.daily_state)
-
-        # Run EOD reconciliation (data download + backtest vs live comparison)
+        # Run EOD reconciliation (daily summary is merged into the recon message)
         try:
             await self._eod_reconcile()
         except Exception as e:
             self.logger.log("eod_reconcile_error", error=str(e), phase="orchestration")
-            # Never let reconciliation failure block shutdown
+            # Reconciliation failed — still send daily summary as fallback
+            if self.telegram.enabled:
+                await self.telegram.alert_daily_summary(self.daily_state)
 
         self._shutdown = True
 
@@ -1525,12 +1547,20 @@ class BotEngine:
         # 2. Download 1-second bars via Windows subprocess
         data_dir = self._download_data_dir()
         data_file = await self._download_today_data(today_fmt, data_dir)
+        def _stamp_daily(r):
+            """Attach daily summary fields to a ReconciliationResult."""
+            r.daily_pnl = self.daily_state.realized_pnl
+            r.daily_pnl_pct = self.daily_state.daily_pnl_pct * 100
+            r.balance = self.daily_state.start_balance + self.daily_state.realized_pnl
+            r.filled_trades = self.daily_state.filled_trade_count
+            return r
+
         if data_file is None:
             err = "1-second bar download failed after 3 attempts"
             self.logger.log("eod_reconcile_skip", reason=err)
-            result = ReconciliationResult(date=today, live_count=0,
-                                          backtest_count=0, matched_count=0,
-                                          error=err)
+            result = _stamp_daily(ReconciliationResult(
+                date=today, live_count=0, backtest_count=0,
+                matched_count=0, error=err))
             self.db.insert_reconciliation(**result_to_db_kwargs(result))
             if self.telegram.enabled:
                 await self.telegram.alert_reconciliation(
@@ -1544,9 +1574,9 @@ class BotEngine:
         except Exception as e:
             err = f"Backtest failed: {e}"
             self.logger.log("eod_reconcile_error", error=str(e), phase="backtest")
-            result = ReconciliationResult(date=today, live_count=0,
-                                          backtest_count=0, matched_count=0,
-                                          error=err)
+            result = _stamp_daily(ReconciliationResult(
+                date=today, live_count=0, backtest_count=0,
+                matched_count=0, error=err))
             self.db.insert_reconciliation(**result_to_db_kwargs(result))
             if self.telegram.enabled:
                 await self.telegram.alert_reconciliation(
@@ -1562,6 +1592,7 @@ class BotEngine:
         result = match_trades(live_trades, bt_trades, hfoiv_active=hfoiv_on)
         result.date = today
         result.kill_switch_active = self.daily_state.kill_switch_active
+        _stamp_daily(result)
 
         # 6. Tick-validate paper fills
         fills_garbage = False

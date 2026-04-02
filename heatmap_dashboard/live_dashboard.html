@@ -36,6 +36,11 @@
   .feed-area { grid-column: 2; grid-row: 1 / 3; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
 
   .panel { background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .panel.scrollable { display: flex; flex-direction: column; max-height: 50vh; }
+  .panel.scrollable table { display: block; overflow-y: auto; flex: 1; min-height: 0; scrollbar-width: none; }
+  .panel.scrollable table::-webkit-scrollbar { display: none; }
+  .panel.scrollable thead { position: sticky; top: 0; z-index: 1; background: var(--bg1); }
+  .panel.scrollable thead, .panel.scrollable tbody { display: table; width: 100%; table-layout: fixed; }
   .panel-title { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 8px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); color: var(--text-dim); display: flex; justify-content: space-between; align-items: center; }
   .panel-title .badge { font-size: 9px; background: var(--bg3); padding: 2px 6px; border-radius: 8px; color: var(--text-dimmer); }
 
@@ -47,7 +52,8 @@
   tr:hover td { background: rgba(88,166,255,0.06); }
 
   .feed-title { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 10px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); color: var(--text-dim); }
-  .feed { flex: 1; overflow-y: auto; padding: 0; }
+  .feed { flex: 1; overflow-y: auto; padding: 0; scrollbar-width: none; }
+  .feed::-webkit-scrollbar { display: none; }
   .feed-item { padding: 6px 12px; border-bottom: 1px solid rgba(48,54,61,0.3); font-size: 10px; line-height: 1.5; }
   .feed-item .ts { color: var(--text-dimmer); margin-right: 6px; }
   .feed-item .evt { font-weight: 600; margin-right: 4px; }
@@ -129,7 +135,7 @@
     </div>
 
     <!-- Closed Trades (Today) -->
-    <div class="panel">
+    <div class="panel scrollable">
       <div class="panel-title">Closed Trades <span class="badge" id="closed-count">0</span></div>
       <table>
         <thead><tr><th>Setup</th><th>Side</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Risk</th><th>R:R</th><th>Qty</th><th>P&L</th><th>Duration</th></tr></thead>
@@ -139,7 +145,7 @@
     </div>
 
     <!-- Cell Performance (30d) -->
-    <div class="panel">
+    <div class="panel scrollable">
       <div class="panel-title">Cell Performance (30d) <span class="badge" id="cell-count">0</span></div>
       <table>
         <thead><tr><th>Setup</th><th>Time</th><th>Risk</th><th>Trades</th><th>WR</th><th>P&L</th><th>Avg P&L</th><th>Slippage</th></tr></thead>
