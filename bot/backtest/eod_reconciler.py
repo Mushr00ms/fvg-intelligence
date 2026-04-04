@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
+from bot.backtest.us_holidays import US_MARKET_HOLIDAYS
+
 
 # ── Weekly expectations (from 115-week backtest, 2024-2026, $100k base) ──
 
@@ -379,11 +381,28 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
     return "\n".join(lines)
 
 
-# ── Weekly health check (Fridays only) ──────────────────────────────────
+# ── Weekly health check (Fridays, or Thursday before holiday Friday) ───
+
+def _is_weekly_summary_day(today):
+    """
+    Return True if the weekly summary should be sent today.
+
+    Triggers on Friday, OR on Thursday if Friday is a market holiday.
+    """
+    if today.weekday() == 4:  # Friday
+        return True
+    if today.weekday() == 3:  # Thursday — check if Friday is a holiday
+        friday = today + timedelta(days=1)
+        friday_key = friday.strftime("%Y%m%d")
+        return friday_key in US_MARKET_HOLIDAYS
+    return False
+
 
 def build_weekly_summary(db, today_str, account_balance):
     """
-    Build Friday weekly health check HTML.
+    Build weekly health check HTML.
+
+    Sent on Friday, or on Thursday if Friday is a market holiday.
 
     Args:
         db: TradeDB instance
@@ -391,27 +410,28 @@ def build_weekly_summary(db, today_str, account_balance):
         account_balance: Current account balance for scaling expectations
 
     Returns:
-        HTML string or None if not Friday.
+        HTML string or None if not a weekly summary day.
     """
     today = datetime.strptime(today_str, "%Y-%m-%d")
-    if today.weekday() != 4:  # 0=Mon ... 4=Fri
+    if not _is_weekly_summary_day(today):
         return None
 
     # Find Monday of this week
     monday = today - timedelta(days=today.weekday())
     monday_str = monday.strftime("%Y-%m-%d")
-    friday_str = today_str
+    end_str = today_str
+    end_day = today.strftime("%a")  # "Thu" or "Fri"
 
     # Query daily_stats for the week
     rows = db.query(
         "SELECT * FROM daily_stats WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date",
-        [monday_str, friday_str],
+        [monday_str, end_str],
     )
 
     if not rows:
         return (
             "<b>WEEKLY HEALTH CHECK</b>\n"
-            f"Mon {monday_str} - Fri {friday_str}\n"
+            f"Mon {monday_str} - {end_day} {end_str}\n"
             "No daily stats recorded this week."
         )
 
@@ -429,7 +449,7 @@ def build_weekly_summary(db, today_str, account_balance):
 
     lines = [
         "<b>WEEKLY HEALTH CHECK</b>",
-        f"Mon {monday_str} - Fri {friday_str}\n",
+        f"Mon {monday_str} - {end_day} {end_str}\n",
     ]
 
     # Trades

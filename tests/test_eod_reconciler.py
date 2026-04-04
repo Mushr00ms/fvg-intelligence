@@ -455,6 +455,43 @@ class TestWeeklySummary:
         finally:
             os.unlink(path)
 
+    def test_thursday_before_holiday_friday(self):
+        """2026-04-02 is Thursday, 2026-04-03 is Good Friday (holiday)."""
+        db, path = self._make_db()
+        try:
+            thursday = "2026-04-02"
+            d = datetime.strptime(thursday, "%Y-%m-%d")
+            assert d.weekday() == 3, f"Expected Thursday, got weekday={d.weekday()}"
+
+            db.insert_daily_stats(
+                trade_date="2026-03-30",
+                start_balance=100000,
+                end_balance=100200,
+                net_pnl=200,
+                pnl_pct=0.2,
+                total_trades=3,
+                wins=2,
+                losses=1,
+            )
+
+            result = build_weekly_summary(db, thursday, 100000)
+            assert result is not None
+            assert "WEEKLY HEALTH CHECK" in result
+            # Header should show Thu, not Fri
+            assert "Thu 2026-04-02" in result
+        finally:
+            os.unlink(path)
+
+    def test_thursday_normal_friday_returns_none(self):
+        """Thursday with a normal (non-holiday) Friday should return None."""
+        db, path = self._make_db()
+        try:
+            # 2026-03-26 is a Thursday, 2026-03-27 (Friday) is not a holiday
+            result = build_weekly_summary(db, "2026-03-26", 100000)
+            assert result is None
+        finally:
+            os.unlink(path)
+
 
 class TestResultToDbKwargs:
     """Test serialization for DB storage."""
