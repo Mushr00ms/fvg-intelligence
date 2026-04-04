@@ -6,6 +6,7 @@ Usage:
     python -m bot.main --live                   # Live (port 7496)
     python -m bot.main --no-dry-run             # Paper, real orders
     python -m bot.main --config bot_config.json # Custom config file
+    python -m bot.main --live --test-connection  # Test live IB connection (no trading)
 """
 
 import argparse
@@ -39,6 +40,10 @@ def parse_args():
         "--balance", type=float, default=None,
         help="Override starting balance (default: query from IB or $76,000)"
     )
+    parser.add_argument(
+        "--test-connection", action="store_true",
+        help="Connect to IB, print account info, then exit. Bypasses market-closed check."
+    )
     return parser.parse_args()
 
 
@@ -55,6 +60,9 @@ def main():
         config.ib_port = 7496
     if args.no_dry_run:
         config.dry_run = False
+    if args.test_connection:
+        config.test_connection = True
+        config.dry_run = False  # must connect to actually test
 
     # Safety banner
     mode = "LIVE" if not config.paper_mode else "PAPER"
@@ -83,6 +91,8 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, signal_handler)
 
     try:
         loop.run_until_complete(engine.run())

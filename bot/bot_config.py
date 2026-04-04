@@ -86,6 +86,9 @@ class BotConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_enabled: bool = False
+    telegram_manager_poll_seconds: int = 5
+    telegram_manager_stop_timeout: int = 15
+    telegram_manager_log_lines: int = 20
 
     # State & Logging
     state_dir: str = ""             # Auto-detected: bot/bot_state/
@@ -120,6 +123,9 @@ class BotConfig:
     # Connection Recovery
     max_disconnect_minutes: int = 5  # Flatten if disconnected longer than this
     reconnect_interval: int = 10     # Seconds between reconnect attempts
+
+    # Diagnostics
+    test_connection: bool = False    # Connect to IB, print account info, then exit (bypasses calendar gate)
 
     def __post_init__(self):
         """Apply defaults for auto-detected paths."""
@@ -223,6 +229,9 @@ _ENV_MAP = {
     "BOT_MARGIN_BUFFER_PCT": ("margin_buffer_pct", float),
     "BOT_MARGIN_REFRESH": ("margin_refresh_interval", int),
     "BOT_MARGIN_ENABLED": ("margin_management_enabled", lambda x: x.lower() in ("1", "true", "yes")),
+    "BOT_TG_MANAGER_POLL": ("telegram_manager_poll_seconds", int),
+    "BOT_TG_MANAGER_STOP_TIMEOUT": ("telegram_manager_stop_timeout", int),
+    "BOT_TG_MANAGER_LOG_LINES": ("telegram_manager_log_lines", int),
 }
 
 

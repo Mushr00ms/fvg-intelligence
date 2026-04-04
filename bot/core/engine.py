@@ -148,9 +148,15 @@ class BotEngine:
         """Initialize all components and prepare for trading."""
         # 0. Calendar gate — skip non-trading days (mirrors backtester behavior)
         today_str = self.clock.now().strftime("%Y%m%d")
-        if not is_trading_day(today_str):
+        if not self.config.test_connection and not is_trading_day(today_str):
             reason = US_MARKET_HOLIDAYS.get(today_str, "weekend")
             self.logger.log("market_closed", date=today_str, reason=reason)
+            self._shutdown = True
+            return
+
+        # 0a. Test-connection mode — connect, print account info, exit
+        if self.config.test_connection:
+            await self._run_connection_test()
             self._shutdown = True
             return
 
@@ -414,6 +420,45 @@ class BotEngine:
         if self._bars_5min and len(self._bars_5min) > 0:
             return self._bars_5min[-1].close
         return 0.0
+
+    async def _run_connection_test(self):
+        """Connect to IB and print account/position info, then disconnect."""
+        print(f"\nConnecting to IB at {self.config.ib_host}:{self.config.ib_port} ...")
+        try:
+            await self.ib_conn.connect()
+        except Exception as e:
+            print(f"CONNECTION FAILED: {e}")
+            return
+
+        ib = self.ib_conn.ib
+        print("Connected.\n")
+
+        # Account summary
+        try:
+            account_values = await ib.accountSummaryAsync()
+            want = {"NetLiquidation", "AvailableFunds", "TotalCashValue", "UnrealizedPnL"}
+            print("--- Account Summary ---")
+            for av in account_values:
+                if av.tag in want:
+                    print(f"  {av.tag}: {av.value} {av.currency}")
+        except Exception as e:
+            print(f"  (Could not fetch account summary: {e})")
+
+        # Open positions
+        try:
+            positions = await ib.reqPositionsAsync()
+            print("\n--- Open Positions ---")
+            if positions:
+                for p in positions:
+                    print(f"  {p.contract.symbol} {p.contract.lastTradeDateOrContractMonth}"
+                          f"  qty={p.position}  avgCost={p.avgCost}")
+            else:
+                print("  (none)")
+        except Exception as e:
+            print(f"  (Could not fetch positions: {e})")
+
+        print("\nConnection test complete.")
+        await self.ib_conn.disconnect()
 
     def _calendar_gate_allows_entry(self):
         """Check strategy hard calendar gates (e.g., witching filters)."""

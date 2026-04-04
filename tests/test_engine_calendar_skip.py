@@ -55,6 +55,7 @@ def _make_engine(dt, strategy=None):
         paper_mode=True,
         dry_run=True,
         min_fvg_size=4.0,
+        test_connection=False,
     )
     if strategy is not None:
         engine.strategy = strategy
