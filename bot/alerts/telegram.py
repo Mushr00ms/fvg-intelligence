@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 
-TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 
 
 class TelegramAlerter:
@@ -36,29 +36,92 @@ class TelegramAlerter:
     def enabled(self):
         return self._enabled
 
-    def send_sync(self, message):
+    def _api_call(self, method, payload, timeout=10):
+        """Call the Telegram Bot API and return the decoded result payload."""
+        if not self._enabled:
+            return None
+        url = TELEGRAM_API.format(token=self._token, method=method)
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            req = Request(url, data=body, headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=timeout) as resp:
+                raw = json.loads(resp.read().decode("utf-8"))
+            if not raw.get("ok"):
+                description = raw.get("description", "telegram api call failed")
+                if "message is not modified" in description.lower():
+                    return {"ok": True, "unchanged": True}
+                raise RuntimeError(description)
+            return raw.get("result")
+        except (URLError, OSError) as e:
+            if self._logger:
+                self._logger.log("telegram_error", error=str(e))
+            return None
+        except Exception as e:
+            if self._logger:
+                self._logger.log("telegram_error", error=str(e))
+            return None
+
+    def send_sync(self, message, reply_markup=None, disable_notification=False):
         """
         Send a message synchronously. Use for critical alerts where
         delivery confirmation matters (e.g., kill switch).
         """
-        if not self._enabled:
-            return False
-
-        url = TELEGRAM_API.format(token=self._token)
-        payload = json.dumps({
+        payload = {
             "chat_id": self._chat_id,
             "text": message,
             "parse_mode": "HTML",
-        }).encode("utf-8")
+            "disable_notification": disable_notification,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        result = self._api_call("sendMessage", payload)
+        return bool(result)
 
-        try:
-            req = Request(url, data=payload, headers={"Content-Type": "application/json"})
-            with urlopen(req, timeout=10) as resp:
-                return resp.status == 200
-        except (URLError, OSError) as e:
-            if self._logger:
-                self._logger.log("telegram_error", error=str(e))
-            return False
+    def send_message_sync(self, chat_id, message, reply_markup=None, disable_notification=False):
+        """Send a message to an explicit Telegram chat."""
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_notification": disable_notification,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._api_call("sendMessage", payload)
+
+    def edit_message_text_sync(self, chat_id, message_id, message, reply_markup=None):
+        """Edit an existing bot-authored message."""
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": message,
+            "parse_mode": "HTML",
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._api_call("editMessageText", payload)
+
+    def answer_callback_query_sync(self, callback_query_id, text=None, show_alert=False):
+        """Acknowledge an inline keyboard callback."""
+        payload = {
+            "callback_query_id": callback_query_id,
+            "show_alert": show_alert,
+        }
+        if text:
+            payload["text"] = text
+        return self._api_call("answerCallbackQuery", payload)
+
+    def get_updates_sync(self, offset=None, timeout=0, allowed_updates=None):
+        """Poll Telegram updates synchronously for manager command handling."""
+        payload = {
+            "timeout": timeout,
+        }
+        if offset is not None:
+            payload["offset"] = offset
+        if allowed_updates:
+            payload["allowed_updates"] = allowed_updates
+        result = self._api_call("getUpdates", payload, timeout=max(timeout + 5, 10))
+        return result or []
 
     async def send(self, message):
         """
