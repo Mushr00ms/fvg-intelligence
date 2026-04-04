@@ -1,0 +1,16 @@
+[Unit]
+Description=NQ IB bot Telegram manager (WSL)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/fvg-intelligence/nq-bot-manager.env
+ExecStart=/bin/bash -lc '"$REPO_DIR/scripts/run_nq_manager_wsl.sh"'
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
