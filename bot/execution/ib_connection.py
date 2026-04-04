@@ -34,6 +34,7 @@ class IBConnection:
         self._reconnect_interval = 10  # seconds
         self._reconnect_callbacks = []
         self._initial_connect_done = False
+        self._shutting_down = False
 
     def _now(self):
         if self._clock is not None:
@@ -68,6 +69,9 @@ class IBConnection:
 
     async def disconnect(self):
         """Graceful disconnect from TWS."""
+        # Set flag before disconnecting so _on_disconnected doesn't spawn a new reconnect task
+        self._shutting_down = True
+
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
             try:
@@ -77,12 +81,27 @@ class IBConnection:
 
         if self._ib and self._ib.isConnected():
             self._ib.disconnect()
+
+        # _on_disconnected may have been called synchronously by ib.disconnect(),
+        # spawning a new reconnect task — cancel it if so.
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+
         self._connected = False
+        self._shutting_down = False
 
     def _on_disconnected(self):
         """Called by ib_async on unexpected disconnect."""
         self._connected = False
         self._disconnect_time = self._now()
+
+        # Don't start a reconnect loop during intentional shutdown
+        if self._shutting_down:
+            return
 
         if self._logger:
             self._logger.log("connection_lost", time=self._disconnect_time.isoformat())
