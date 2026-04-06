@@ -30,16 +30,16 @@
   .kpi-value.neg { color: var(--red); }
   .kpi-value.warn { color: var(--yellow); }
   .kpi-sub { font-size: 10px; margin-top: 2px; color: var(--text-dim); }
-  .pctl-bar { position: relative; height: 6px; background: var(--bg1); border-radius: 3px; margin-top: 4px; overflow: visible; }
-  .pctl-bar .pctl-zone { position: absolute; top: 0; height: 100%; border-radius: 3px; }
-  .pctl-bar .pctl-p10 { background: rgba(239,68,68,0.25); }
-  .pctl-bar .pctl-p25 { background: rgba(239,68,68,0.12); }
-  .pctl-bar .pctl-p50 { background: rgba(100,100,100,0.15); }
-  .pctl-bar .pctl-p75 { background: rgba(34,197,94,0.12); }
-  .pctl-bar .pctl-p90 { background: rgba(34,197,94,0.25); }
-  .pctl-bar .pctl-cursor { position: absolute; top: -2px; width: 3px; height: 10px; background: #fff; border-radius: 1px; transform: translateX(-1px); z-index: 2; }
-  .pctl-bar .pctl-mid { position: absolute; top: 0; height: 100%; width: 1px; background: rgba(255,255,255,0.3); }
-  .pctl-bar .pctl-labels { display: flex; justify-content: space-between; font-size: 7px; color: var(--text-dimmer); margin-top: 1px; }
+  .pctl-bar { position: relative; height: 8px; background: rgba(255,255,255,0.06); border-radius: 4px; margin-top: 5px; overflow: visible; border: 1px solid rgba(255,255,255,0.08); }
+  .pctl-bar .pctl-zone { position: absolute; top: 0; height: 100%; }
+  .pctl-bar .pctl-p10 { background: rgba(239,68,68,0.45); }
+  .pctl-bar .pctl-p25 { background: rgba(239,68,68,0.22); }
+  .pctl-bar .pctl-p50 { background: rgba(255,255,255,0.08); }
+  .pctl-bar .pctl-p75 { background: rgba(34,197,94,0.22); }
+  .pctl-bar .pctl-p90 { background: rgba(34,197,94,0.45); }
+  .pctl-bar .pctl-cursor { position: absolute; top: -3px; width: 3px; height: 14px; background: #fff; border-radius: 2px; transform: translateX(-1px); z-index: 2; box-shadow: 0 0 4px rgba(255,255,255,0.5); }
+  .pctl-bar .pctl-mid { position: absolute; top: 0; height: 100%; width: 1px; background: rgba(255,255,255,0.4); }
+  .pctl-bar .pctl-labels { display: flex; justify-content: space-between; font-size: 7px; color: rgba(255,255,255,0.35); margin-top: 2px; }
 
   .main { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr; height: calc(100vh - 95px); }
 
