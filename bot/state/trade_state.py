@@ -139,6 +139,7 @@ class OrderGroup:
     actual_entry_price: float = 0.0
     actual_exit_price: float = 0.0
     entry_slippage_pts: float = 0.0
+    entry_commission: float = 0.0
     suspended_at: Optional[str] = None
     suspend_reason: str = ""
 
@@ -170,6 +171,7 @@ class OrderGroup:
             "actual_exit_price": self.actual_exit_price,
             "close_price": self.actual_exit_price or None,
             "entry_slippage_pts": self.entry_slippage_pts,
+            "entry_commission": self.entry_commission,
             "suspended_at": self.suspended_at,
             "suspend_reason": self.suspend_reason,
         }
@@ -202,6 +204,7 @@ class OrderGroup:
             actual_entry_price=d.get("actual_entry_price", 0.0),
             actual_exit_price=d.get("actual_exit_price", 0.0) or d.get("close_price", 0.0),
             entry_slippage_pts=d.get("entry_slippage_pts", 0.0),
+            entry_commission=d.get("entry_commission", 0.0),
             suspended_at=d.get("suspended_at"),
             suspend_reason=d.get("suspend_reason", ""),
         )

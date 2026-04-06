@@ -305,6 +305,7 @@ class OrderManager:
             slippage = round(abs(avg_fill - og.entry_price), 2)
             og.actual_entry_price = avg_fill
             og.entry_slippage_pts = slippage
+            og.entry_commission = self._get_commission(trade)
             daily_state.move_to_open(og.group_id)
             self._state_mgr.save(daily_state)
             self._logger.log(
@@ -645,7 +646,7 @@ class OrderManager:
         """Handle the market order fill from EOD flatten — compute actual P&L."""
         fill_price = trade.orderStatus.avgFillPrice
         qty = og.filled_qty or og.target_qty
-        commission = self._get_commission(trade)
+        commission = self._get_commission(trade) + og.entry_commission
 
         if og.side == "BUY":
             pnl_pts = fill_price - og.entry_price
@@ -699,7 +700,7 @@ class OrderManager:
 
         fill_price = trade.orderStatus.avgFillPrice
         qty = og.filled_qty or og.target_qty
-        commission = self._get_commission(trade)
+        commission = self._get_commission(trade) + og.entry_commission
 
         if og.side == "BUY":
             pnl_pts = fill_price - og.entry_price
@@ -789,7 +790,7 @@ class OrderManager:
 
         fill_price = trade.orderStatus.avgFillPrice
         qty = og.filled_qty or og.target_qty
-        commission = self._get_commission(trade)
+        commission = self._get_commission(trade) + og.entry_commission
         stop_slippage = round(abs(fill_price - og.stop_price), 2)
 
         if og.side == "BUY":
