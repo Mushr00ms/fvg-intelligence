@@ -479,22 +479,21 @@ async function refreshAnalytics() {
     if (!p.error) {
       // PnL values
       const periods = [
-        { pnl: p.today_pnl||0, epnl: p.today_expected_pnl||0, wr: p.today_wr, bwr: p.today_baseline_wr, trades: p.today_trades||0, pnlEl: 'kpi-pnl', wrEl: 'kpi-daily-wr' },
-        { pnl: p.week_pnl||0,  epnl: p.week_expected_pnl||0,  wr: p.week_wr,  bwr: p.week_baseline_wr,  trades: p.week_trades||0,  pnlEl: 'kpi-week-pnl', wrEl: 'kpi-week-wr' },
-        { pnl: p.month_pnl||0, epnl: p.month_expected_pnl||0, wr: p.month_wr,  bwr: p.month_baseline_wr, trades: p.month_trades||0, pnlEl: 'kpi-month-pnl', wrEl: 'kpi-month-wr' },
+        { pnl: p.today_pnl||0, wr: p.today_wr, bwr: p.today_baseline_wr, trades: p.today_trades||0, pnlEl: 'kpi-pnl', wrEl: 'kpi-daily-wr' },
+        { pnl: p.week_pnl||0,  wr: p.week_wr,  bwr: p.week_baseline_wr,  trades: p.week_trades||0,  pnlEl: 'kpi-week-pnl', wrEl: 'kpi-week-wr' },
+        { pnl: p.month_pnl||0, wr: p.month_wr,  bwr: p.month_baseline_wr, trades: p.month_trades||0, pnlEl: 'kpi-month-pnl', wrEl: 'kpi-month-wr' },
       ];
       for (const pd of periods) {
         const el = document.getElementById(pd.pnlEl);
         el.textContent = (pd.pnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(pd.pnl)).toLocaleString();
         el.className = 'kpi-value ' + (pd.pnl >= 0 ? 'pos' : 'neg');
-        // WR vs baseline + expected PnL sub-label
+        // WR vs baseline sub-label
         const wrEl = document.getElementById(pd.wrEl);
         if (wrEl && pd.trades > 0 && pd.wr != null) {
           const bwrStr = pd.bwr != null ? ` (${pd.bwr}%)` : '';
-          const wrDelta = pd.bwr != null ? pd.wr - pd.bwr : 0;
-          const wrColor = pd.bwr == null ? 'inherit' : wrDelta >= 0 ? 'var(--green)' : 'var(--red)';
-          const epStr = pd.epnl ? ` · EV ${pd.epnl >= 0 ? '+' : ''}$${Math.round(pd.epnl)}` : '';
-          wrEl.innerHTML = `<span style="color:${wrColor}">${pd.wr}%</span><span style="opacity:0.5">${bwrStr}</span> · ${pd.trades}t<span style="opacity:0.5">${epStr}</span>`;
+          const delta = pd.bwr != null ? pd.wr - pd.bwr : 0;
+          const color = pd.bwr == null ? 'inherit' : delta >= 0 ? 'var(--green)' : 'var(--red)';
+          wrEl.innerHTML = `<span style="color:${color}">${pd.wr}%</span><span style="opacity:0.5">${bwrStr}</span> · ${pd.trades}t`;
         } else if (wrEl) {
           wrEl.textContent = '';
         }
