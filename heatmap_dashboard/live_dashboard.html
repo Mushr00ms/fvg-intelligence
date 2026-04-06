@@ -696,26 +696,25 @@ async function refreshEquityChart() {
 // INIT
 // ═══════════════════════════════════════
 async function init() {
-  // Load event history first
-  try {
-    const res = await fetch(`${API}/api/bot/events/history`);
-    const data = await res.json();
-    // Show last 100 events
-    (data.events || []).slice(-100).forEach(evt => addFeedEvent(evt));
-  } catch(e) {}
-
-  // Start SSE
-  connectSSE();
-
-  // Initial state + poll every 5s
+  // Render data first — don't block on SSE/history
   refreshState();
-  setInterval(refreshState, 5000);
-
-  // Analytics panels + equity chart (less frequent — every 30s)
   refreshAnalytics();
   refreshEquityChart();
+
+  // Start polling
+  setInterval(refreshState, 5000);
   setInterval(refreshAnalytics, 30000);
   setInterval(refreshEquityChart, 30000);
+
+  // Defer SSE + history load so page renders immediately
+  setTimeout(async () => {
+    try {
+      const res = await fetch(`${API}/api/bot/events/history`);
+      const data = await res.json();
+      (data.events || []).slice(-100).forEach(evt => addFeedEvent(evt));
+    } catch(e) {}
+    connectSSE();
+  }, 100);
 }
 
 init();
