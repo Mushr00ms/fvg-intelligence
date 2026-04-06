@@ -1000,6 +1000,36 @@ def api_bot_period_pnl():
         return JSONResponse({"error": str(e)})
 
 
+@app.get("/api/bot/slippage")
+def api_bot_slippage():
+    """Cumulative slippage stats since live start."""
+    db = _get_bot_db()
+    if not db:
+        return JSONResponse({"error": "No bot database found"})
+    try:
+        rows = db.query("""
+            SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN exit_reason = 'SL' THEN 1 ELSE 0 END) as total_sl,
+                SUM(CASE WHEN exit_reason = 'SL' AND stop_slippage_pts > 0 THEN 1 ELSE 0 END) as slipped_sl,
+                ROUND(AVG(CASE WHEN exit_reason = 'SL' AND stop_slippage_pts > 0 THEN stop_slippage_pts END), 2) as avg_slip_pts,
+                ROUND(MAX(stop_slippage_pts), 2) as max_slip_pts,
+                ROUND(SUM(stop_slippage_pts * contracts * 20), 2) as total_slip_cost,
+                ROUND(SUM(CASE WHEN net_pnl < 0 THEN ABS(net_pnl) ELSE 0 END), 2) as gross_loss,
+                ROUND(SUM(commission), 2) as total_commission
+            FROM trades WHERE exit_reason IS NOT NULL
+        """)
+        r = rows[0] if rows else {}
+        slip_cost = r.get("total_slip_cost") or 0
+        gross_loss = r.get("gross_loss") or 0
+        r["slip_pct_of_gross_loss"] = round(slip_cost / gross_loss * 100, 1) if gross_loss > 0 else 0
+        # Backtest baseline: 0.61pt avg slippage (2025 enrichment)
+        r["baseline_avg_slip_pts"] = 0.61
+        return JSONResponse(r)
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
+
 @app.get("/api/bot/daily-history")
 def api_bot_daily_history(days: int = 30):
     """Daily P&L history for the last N trading days (default 30)."""

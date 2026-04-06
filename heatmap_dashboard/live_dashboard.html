@@ -175,6 +175,19 @@
         <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Won</div><div class="kpi-value pos" id="fn-won">0</div></div>
       </div>
     </div>
+
+    <!-- Slippage Impact -->
+    <div class="panel">
+      <div class="panel-title">Slippage Impact <span style="font-weight:400;color:var(--text-dimmer)">— cumulative</span></div>
+      <div id="slip-data" style="padding:10px;display:flex;gap:16px;flex-wrap:wrap;">
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Cost</div><div class="kpi-value" id="slip-cost">—</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Avg Slip</div><div class="kpi-value" id="slip-avg">—</div><div class="kpi-sub" id="slip-baseline"></div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Max Slip</div><div class="kpi-value" id="slip-max">—</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">% Gross Loss</div><div class="kpi-value" id="slip-pct">—</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Slipped</div><div class="kpi-value" id="slip-count">—</div></div>
+        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Commission</div><div class="kpi-value" id="slip-comm">—</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- Event Feed -->
@@ -562,6 +575,25 @@ async function refreshAnalytics() {
       document.getElementById('fn-placed').textContent = fn.trades_placed || 0;
       document.getElementById('fn-filled').textContent = fn.trades_filled || 0;
       document.getElementById('fn-won').textContent = fn.trades_won || 0;
+    }
+  } catch(e) {}
+
+  // Slippage impact
+  try {
+    const res = await fetch(`${API}/api/bot/slippage`);
+    const s = await res.json();
+    if (!s.error) {
+      document.getElementById('slip-cost').textContent = '$' + Math.round(s.total_slip_cost || 0).toLocaleString();
+      const avgEl = document.getElementById('slip-avg');
+      const avg = s.avg_slip_pts || 0;
+      const base = s.baseline_avg_slip_pts || 0;
+      const avgColor = base > 0 && avg > base * 1.5 ? 'var(--red)' : avg > base ? 'var(--yellow)' : 'var(--green)';
+      avgEl.innerHTML = `<span style="color:${avgColor}">${avg}pt</span>`;
+      document.getElementById('slip-baseline').innerHTML = `<span style="opacity:0.5">base ${base}pt</span>`;
+      document.getElementById('slip-max').textContent = (s.max_slip_pts || 0) + 'pt';
+      document.getElementById('slip-pct').textContent = (s.slip_pct_of_gross_loss || 0) + '%';
+      document.getElementById('slip-count').textContent = `${s.slipped_sl || 0} / ${s.total_sl || 0} SL`;
+      document.getElementById('slip-comm').textContent = '$' + Math.round(s.total_commission || 0).toLocaleString();
     }
   } catch(e) {}
 }
