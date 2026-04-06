@@ -931,12 +931,47 @@ def api_bot_cell_performance():
 
 @app.get("/api/bot/period-pnl")
 def api_bot_period_pnl():
-    """Current week and month PNL totals from closed trades."""
+    """Current day/week/month PNL + WR with cell-weighted baseline WR."""
     db = _get_bot_db()
     if not db:
         return JSONResponse({"week_pnl": 0, "week_trades": 0, "month_pnl": 0, "month_trades": 0})
     try:
-        return JSONResponse(db.get_period_pnl())
+        result = db.get_period_pnl()
+        # Compute cell-weighted baseline WR for each period
+        try:
+            strat_path = os.path.join(
+                _REPO_ROOT, "logic", "strategies", "manifest.json")
+            with open(strat_path) as f:
+                manifest = json.load(f)
+                active_id = manifest.get("active_strategy") or manifest.get("active")
+            if active_id:
+                with open(os.path.join(
+                        _REPO_ROOT, "logic", "strategies", f"{active_id}.json")) as f:
+                    strat = json.load(f)
+                baseline = {
+                    (c["time_period"], c["risk_range"], c["setup"]): c["win_rate"]
+                    for c in strat.get("cells", [])
+                }
+                for period in ("today", "week", "month"):
+                    cells = result.pop(f"{period}_cells", [])
+                    if not cells:
+                        result[f"{period}_baseline_wr"] = None
+                        continue
+                    # Weighted avg: sum(cell_baseline_wr × cell_trades) / total_trades
+                    weighted_sum = 0.0
+                    total_n = 0
+                    for c in cells:
+                        key = (c["time_period"], c["risk_range"], c["setup"])
+                        bwr = baseline.get(key)
+                        if bwr is not None:
+                            weighted_sum += bwr * c["n"]
+                            total_n += c["n"]
+                    result[f"{period}_baseline_wr"] = round(weighted_sum / total_n, 1) if total_n > 0 else None
+        except Exception:
+            # Clean up cell data even on error
+            for period in ("today", "week", "month"):
+                result.pop(f"{period}_cells", None)
+        return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)})
 

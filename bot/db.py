@@ -356,22 +356,51 @@ class TradeDB:
         )
 
     def get_period_pnl(self):
-        """Current-week and current-month PNL from closed trades."""
-        week = self.query(
-            "SELECT ROUND(SUM(net_pnl), 2) as pnl, COUNT(*) as trades "
-            "FROM trades WHERE exit_reason IS NOT NULL "
-            "AND strftime('%Y-%W', trade_date) = strftime('%Y-%W', 'now')"
-        )
-        month = self.query(
-            "SELECT ROUND(SUM(net_pnl), 2) as pnl, COUNT(*) as trades "
-            "FROM trades WHERE exit_reason IS NOT NULL "
-            "AND strftime('%Y-%m', trade_date) = strftime('%Y-%m', 'now')"
-        )
+        """Current-week and current-month PNL + WR from closed trades."""
+        sql_tpl = """
+            SELECT ROUND(SUM(net_pnl), 2) as pnl,
+                   COUNT(*) as trades,
+                   SUM(CASE WHEN exit_reason = 'TP' THEN 1 ELSE 0 END) as wins
+            FROM trades WHERE exit_reason IS NOT NULL AND {filter}
+        """
+        # Per-cell trade counts for baseline WR computation
+        cell_sql_tpl = """
+            SELECT time_period, risk_range, setup, COUNT(*) as n,
+                   SUM(CASE WHEN exit_reason = 'TP' THEN 1 ELSE 0 END) as wins
+            FROM trades WHERE exit_reason IS NOT NULL AND {filter}
+            GROUP BY time_period, risk_range, setup
+        """
+        today = self.query(sql_tpl.format(
+            filter="trade_date = date('now')"))
+        week = self.query(sql_tpl.format(
+            filter="strftime('%Y-%W', trade_date) = strftime('%Y-%W', 'now')"))
+        month = self.query(sql_tpl.format(
+            filter="strftime('%Y-%m', trade_date) = strftime('%Y-%m', 'now')"))
+        today_cells = self.query(cell_sql_tpl.format(
+            filter="trade_date = date('now')"))
+        week_cells = self.query(cell_sql_tpl.format(
+            filter="strftime('%Y-%W', trade_date) = strftime('%Y-%W', 'now')"))
+        month_cells = self.query(cell_sql_tpl.format(
+            filter="strftime('%Y-%m', trade_date) = strftime('%Y-%m', 'now')"))
+
+        def _wr(row):
+            t = (row[0]['trades'] or 0) if row else 0
+            w = (row[0]['wins'] or 0) if row else 0
+            return round(w / t * 100, 1) if t > 0 else None
+
         return {
+            'today_pnl': (today[0]['pnl'] or 0) if today else 0,
+            'today_trades': (today[0]['trades'] or 0) if today else 0,
+            'today_wr': _wr(today),
+            'today_cells': today_cells,
             'week_pnl': (week[0]['pnl'] or 0) if week else 0,
             'week_trades': (week[0]['trades'] or 0) if week else 0,
+            'week_wr': _wr(week),
+            'week_cells': week_cells,
             'month_pnl': (month[0]['pnl'] or 0) if month else 0,
             'month_trades': (month[0]['trades'] or 0) if month else 0,
+            'month_wr': _wr(month),
+            'month_cells': month_cells,
         }
 
     def get_overall_stats(self, days=None):

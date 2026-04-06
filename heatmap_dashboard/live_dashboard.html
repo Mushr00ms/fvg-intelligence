@@ -29,6 +29,7 @@
   .kpi-value.pos { color: var(--green); }
   .kpi-value.neg { color: var(--red); }
   .kpi-value.warn { color: var(--yellow); }
+  .kpi-sub { font-size: 10px; margin-top: 2px; color: var(--text-dim); }
 
   .main { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr; height: calc(100vh - 95px); }
 
@@ -92,11 +93,10 @@
 
 <div class="kpi-bar">
   <div class="kpi"><div class="kpi-label">Balance</div><div class="kpi-value" id="kpi-balance">—</div></div>
-  <div class="kpi"><div class="kpi-label">Daily P&L</div><div class="kpi-value" id="kpi-pnl">—</div></div>
-  <div class="kpi"><div class="kpi-label">Week P&L</div><div class="kpi-value" id="kpi-week-pnl">—</div></div>
-  <div class="kpi"><div class="kpi-label">Month P&L</div><div class="kpi-value" id="kpi-month-pnl">—</div></div>
+  <div class="kpi"><div class="kpi-label">Daily P&L</div><div class="kpi-value" id="kpi-pnl">—</div><div class="kpi-sub" id="kpi-daily-wr"></div></div>
+  <div class="kpi"><div class="kpi-label">Week P&L</div><div class="kpi-value" id="kpi-week-pnl">—</div><div class="kpi-sub" id="kpi-week-wr"></div></div>
+  <div class="kpi"><div class="kpi-label">Month P&L</div><div class="kpi-value" id="kpi-month-pnl">—</div><div class="kpi-sub" id="kpi-month-wr"></div></div>
   <div class="kpi"><div class="kpi-label">Trades</div><div class="kpi-value" id="kpi-trades">—</div></div>
-  <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="kpi-wr">—</div></div>
   <div class="kpi"><div class="kpi-label">Open Positions</div><div class="kpi-value" id="kpi-open">—</div></div>
   <div class="kpi"><div class="kpi-label">Active FVGs</div><div class="kpi-value" id="kpi-fvgs">—</div></div>
   <div class="kpi"><div class="kpi-label">Kill Switch</div><div class="kpi-value" id="kpi-kill">OFF</div></div>
@@ -199,7 +199,6 @@ function updateKPIs(state) {
   pnlEl.className = 'kpi-value ' + (pnl >= 0 ? 'pos' : 'neg');
 
   document.getElementById('kpi-trades').textContent = trades;
-  document.getElementById('kpi-wr').textContent = trades > 0 ? wr.toFixed(0) + '%' : '—';
   document.getElementById('kpi-open').textContent = (state.open_positions || []).length;
   document.getElementById('kpi-fvgs').textContent = (state.active_fvgs || []).length;
 
@@ -473,19 +472,32 @@ async function refreshAnalytics() {
     }).join('');
   } catch(e) {}
 
-  // Week / Month PNL
+  // Day / Week / Month PNL + WR vs baseline
   try {
     const res = await fetch(`${API}/api/bot/period-pnl`);
     const p = await res.json();
     if (!p.error) {
-      const wPnl = p.week_pnl || 0;
-      const mPnl = p.month_pnl || 0;
-      const wEl = document.getElementById('kpi-week-pnl');
-      wEl.textContent = (wPnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(wPnl)).toLocaleString();
-      wEl.className = 'kpi-value ' + (wPnl >= 0 ? 'pos' : 'neg');
-      const mEl = document.getElementById('kpi-month-pnl');
-      mEl.textContent = (mPnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(mPnl)).toLocaleString();
-      mEl.className = 'kpi-value ' + (mPnl >= 0 ? 'pos' : 'neg');
+      // PnL values
+      const periods = [
+        { pnl: p.today_pnl||0, wr: p.today_wr, bwr: p.today_baseline_wr, trades: p.today_trades||0, pnlEl: 'kpi-pnl', wrEl: 'kpi-daily-wr' },
+        { pnl: p.week_pnl||0,  wr: p.week_wr,  bwr: p.week_baseline_wr,  trades: p.week_trades||0,  pnlEl: 'kpi-week-pnl', wrEl: 'kpi-week-wr' },
+        { pnl: p.month_pnl||0, wr: p.month_wr,  bwr: p.month_baseline_wr, trades: p.month_trades||0, pnlEl: 'kpi-month-pnl', wrEl: 'kpi-month-wr' },
+      ];
+      for (const pd of periods) {
+        const el = document.getElementById(pd.pnlEl);
+        el.textContent = (pd.pnl >= 0 ? '+$' : '-$') + Math.abs(Math.round(pd.pnl)).toLocaleString();
+        el.className = 'kpi-value ' + (pd.pnl >= 0 ? 'pos' : 'neg');
+        // WR vs baseline sub-label
+        const wrEl = document.getElementById(pd.wrEl);
+        if (wrEl && pd.trades > 0 && pd.wr != null) {
+          const bwrStr = pd.bwr != null ? ` (${pd.bwr}%)` : '';
+          const delta = pd.bwr != null ? pd.wr - pd.bwr : 0;
+          const color = pd.bwr == null ? 'inherit' : delta >= 0 ? 'var(--green)' : 'var(--red)';
+          wrEl.innerHTML = `<span style="color:${color}">${pd.wr}%</span><span style="opacity:0.5">${bwrStr}</span> · ${pd.trades}t`;
+        } else if (wrEl) {
+          wrEl.textContent = '';
+        }
+      }
     }
   } catch(e) {}
 
