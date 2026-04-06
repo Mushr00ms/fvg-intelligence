@@ -30,6 +30,16 @@
   .kpi-value.neg { color: var(--red); }
   .kpi-value.warn { color: var(--yellow); }
   .kpi-sub { font-size: 10px; margin-top: 2px; color: var(--text-dim); }
+  .pctl-bar { position: relative; height: 6px; background: var(--bg1); border-radius: 3px; margin-top: 4px; overflow: visible; }
+  .pctl-bar .pctl-zone { position: absolute; top: 0; height: 100%; border-radius: 3px; }
+  .pctl-bar .pctl-p10 { background: rgba(239,68,68,0.25); }
+  .pctl-bar .pctl-p25 { background: rgba(239,68,68,0.12); }
+  .pctl-bar .pctl-p50 { background: rgba(100,100,100,0.15); }
+  .pctl-bar .pctl-p75 { background: rgba(34,197,94,0.12); }
+  .pctl-bar .pctl-p90 { background: rgba(34,197,94,0.25); }
+  .pctl-bar .pctl-cursor { position: absolute; top: -2px; width: 3px; height: 10px; background: #fff; border-radius: 1px; transform: translateX(-1px); z-index: 2; }
+  .pctl-bar .pctl-mid { position: absolute; top: 0; height: 100%; width: 1px; background: rgba(255,255,255,0.3); }
+  .pctl-bar .pctl-labels { display: flex; justify-content: space-between; font-size: 7px; color: var(--text-dimmer); margin-top: 1px; }
 
   .main { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr; height: calc(100vh - 95px); }
 
@@ -94,8 +104,8 @@
 <div class="kpi-bar">
   <div class="kpi"><div class="kpi-label">Balance</div><div class="kpi-value" id="kpi-balance">—</div></div>
   <div class="kpi"><div class="kpi-label">Daily P&L</div><div class="kpi-value" id="kpi-pnl">—</div><div class="kpi-sub" id="kpi-daily-wr"></div></div>
-  <div class="kpi"><div class="kpi-label">Week P&L</div><div class="kpi-value" id="kpi-week-pnl">—</div><div class="kpi-sub" id="kpi-week-wr"></div></div>
-  <div class="kpi"><div class="kpi-label">Month P&L</div><div class="kpi-value" id="kpi-month-pnl">—</div><div class="kpi-sub" id="kpi-month-wr"></div></div>
+  <div class="kpi"><div class="kpi-label">Week P&L</div><div class="kpi-value" id="kpi-week-pnl">—</div><div class="kpi-sub" id="kpi-week-wr"></div><div class="pctl-bar" id="pctl-week"></div></div>
+  <div class="kpi"><div class="kpi-label">Month P&L</div><div class="kpi-value" id="kpi-month-pnl">—</div><div class="kpi-sub" id="kpi-month-wr"></div><div class="pctl-bar" id="pctl-month"></div></div>
   <div class="kpi"><div class="kpi-label">Trades</div><div class="kpi-value" id="kpi-trades">—</div></div>
   <div class="kpi"><div class="kpi-label">Open Positions</div><div class="kpi-value" id="kpi-open">—</div></div>
   <div class="kpi"><div class="kpi-label">Active FVGs</div><div class="kpi-value" id="kpi-fvgs">—</div></div>
@@ -228,6 +238,34 @@ function updateKPIs(state) {
 // ═══════════════════════════════════════
 // TABLE RENDERERS
 // ═══════════════════════════════════════
+function renderPctlBar(elId, actual, pctls) {
+  const el = document.getElementById(elId);
+  if (!el || !pctls) return;
+  const p5 = pctls.p5, p95 = pctls.p95;
+  const range = p95 - p5 || 1;
+  const pct = v => Math.max(0, Math.min(100, (v - p5) / range * 100));
+  // Clamp actual cursor
+  const cursorPct = pct(actual);
+  // Zone colors: p5-p10 red, p10-p25 light red, p25-p75 neutral, p75-p90 light green, p90-p95 green
+  const zones = [
+    { left: pct(p5), width: pct(pctls.p10) - pct(p5), cls: 'pctl-p10' },
+    { left: pct(pctls.p10), width: pct(pctls.p25) - pct(pctls.p10), cls: 'pctl-p25' },
+    { left: pct(pctls.p25), width: pct(pctls.p75) - pct(pctls.p25), cls: 'pctl-p50' },
+    { left: pct(pctls.p75), width: pct(pctls.p90) - pct(pctls.p75), cls: 'pctl-p75' },
+    { left: pct(pctls.p90), width: pct(p95) - pct(pctls.p90), cls: 'pctl-p90' },
+  ];
+  let html = zones.map(z =>
+    `<div class="pctl-zone ${z.cls}" style="left:${z.left}%;width:${z.width}%"></div>`
+  ).join('');
+  // Median marker
+  html += `<div class="pctl-mid" style="left:${pct(pctls.p50)}%"></div>`;
+  // Actual cursor
+  html += `<div class="pctl-cursor" style="left:${cursorPct}%"></div>`;
+  // Labels
+  html += `<div class="pctl-labels"><span>p5</span><span>p25</span><span>p50</span><span>p75</span><span>p95</span></div>`;
+  el.innerHTML = html;
+}
+
 function renderFVGs(fvgs) {
   const tbody = document.getElementById('tbl-fvgs');
   const empty = document.getElementById('fvg-empty');
@@ -508,6 +546,9 @@ async function refreshAnalytics() {
           else wrEl.textContent = '';
         }
       }
+      // Percentile distribution bars
+      renderPctlBar('pctl-week', p.week_pnl || 0, p.week_pctls);
+      renderPctlBar('pctl-month', p.month_pnl || 0, p.month_pctls);
     }
   } catch(e) {}
 
