@@ -34,6 +34,7 @@ from bot.backtest.us_holidays import is_trading_day
 from bot.strategy.fvg_detector import check_fvg_3bars, SESSION_INTERVALS, _assign_time_period
 from bot.strategy.trade_calculator import round_to_tick, TICK_SIZE, POINT_VALUE
 from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
+from bot.risk.macro_gate import MacroGateConfig, get_blackout_windows
 from bot.risk.hfoiv_gate import HFOIVGate, HFOIVConfig
 
 
@@ -792,6 +793,11 @@ def run_backtest(df_1s, strategy, config=None):
         no_trade_witching_day=bool(hard_gates.get("no_trade_witching_day", False)),
         no_trade_witching_day_minus_1=bool(hard_gates.get("no_trade_witching_day_minus_1", False)),
     )
+    macro_gate_cfg = MacroGateConfig(
+        skip_nfp=bool(hard_gates.get("skip_nfp", True)),
+        skip_cpi=bool(hard_gates.get("skip_cpi", True)),
+        skip_fomc=bool(hard_gates.get("skip_fomc", True)),
+    )
 
     for day in trading_days:
         if no_trade_after_dec and day.month == 12 and day.day >= (no_trade_after_dec + 1):
@@ -799,6 +805,13 @@ def run_backtest(df_1s, strategy, config=None):
         blocked, _reason = is_blocked_by_witching_gate(day, witching_gate_cfg)
         if blocked:
             continue
+        # Precompute macro blackout windows for this day (empty list on normal days)
+        macro_blackouts = get_blackout_windows(day, macro_gate_cfg)
+        # Convert time objects to minutes-since-midnight for fast comparison
+        macro_blackout_mins = [
+            (s.hour * 60 + s.minute, e.hour * 60 + e.minute)
+            for s, e, _ in macro_blackouts
+        ]
 
         day_df = _day_groups[day]
         if day_df.empty:
@@ -933,6 +946,16 @@ def run_backtest(df_1s, strategy, config=None):
             mit_minutes_et = day_arrays['minutes'][mit_idx]
             if mit_minutes_et >= 15 * 60 + 45:
                 continue
+
+            # Macro event blackout window check
+            if macro_blackout_mins:
+                in_blackout = False
+                for bl_start, bl_end in macro_blackout_mins:
+                    if bl_start <= mit_minutes_et < bl_end:
+                        in_blackout = True
+                        break
+                if in_blackout:
+                    continue
 
             # Consecutive FVG filter: skip near FVG, take far FVG only
             if id(fvg) in consecutive_skip:
