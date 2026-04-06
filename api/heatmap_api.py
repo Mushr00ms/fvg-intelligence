@@ -971,6 +971,17 @@ def api_bot_period_pnl():
             # Clean up cell data even on error
             for period in ("today", "week", "month"):
                 result.pop(f"{period}_cells", None)
+        # Balance-scaled expected PnL from backtest median return %
+        # Median weekly: +1.29%, median monthly: +5.61% (from 319 weeks / 75 months of backtest)
+        try:
+            state_file = os.path.join(_BOT_STATE_DIR, "bot_state.json")
+            with open(state_file) as f:
+                state = json.load(f)
+            bal = (state.get("start_balance") or 80000) + (state.get("realized_pnl") or 0)
+            result["week_expected_pnl"] = round(bal * 0.0129, 0)
+            result["month_expected_pnl"] = round(bal * 0.0561, 0)
+        except Exception:
+            pass
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)})
