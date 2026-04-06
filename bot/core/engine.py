@@ -1640,9 +1640,9 @@ class BotEngine:
         result.kill_switch_active = self.daily_state.kill_switch_active
         _stamp_daily(result)
 
-        # 6. Tick-validate paper fills
+        # 6. Tick-validate paper fills (skip in live mode — IB fills are real)
         fills_garbage = False
-        if live_trades:
+        if live_trades and self.config.paper_mode:
             try:
                 ticks_by_window = await self._fetch_fill_ticks(
                     today_fmt, live_trades)
