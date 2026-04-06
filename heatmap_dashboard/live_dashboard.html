@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FVG Bot — Live Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   :root {
     --bg0: #0d1117; --bg1: #161b22; --bg2: #21262d; --bg3: #30363d;
@@ -30,6 +31,8 @@
   .kpi-value.neg { color: var(--red); }
   .kpi-value.warn { color: var(--yellow); }
   .kpi-sub { font-size: 10px; margin-top: 2px; color: var(--text-dim); }
+  .equity-chart { background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin: 8px 12px; }
+  .equity-chart canvas { width: 100% !important; height: 220px !important; }
   .pctl-bar { position: relative; height: 8px; background: rgba(255,255,255,0.06); border-radius: 4px; margin-top: 5px; overflow: visible; border: 1px solid rgba(255,255,255,0.08); }
   .pctl-bar .pctl-zone { position: absolute; top: 0; height: 100%; }
   .pctl-bar .pctl-p10 { background: rgba(239,68,68,0.45); }
@@ -112,6 +115,10 @@
   <div class="kpi"><div class="kpi-label">Kill Switch</div><div class="kpi-value" id="kpi-kill">OFF</div></div>
 </div>
 
+<div class="equity-chart">
+  <canvas id="equity-chart"></canvas>
+</div>
+
 <div class="main">
   <div class="tables-area">
     <!-- Active FVGs -->
@@ -164,17 +171,6 @@
       <div class="empty" id="cell-empty">No cell data</div>
     </div>
 
-    <!-- Funnel -->
-    <div class="panel">
-      <div class="panel-title">Today's Funnel</div>
-      <div id="funnel-data" style="padding:10px;display:flex;gap:16px;flex-wrap:wrap;">
-        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">FVGs</div><div class="kpi-value" id="fn-fvgs">0</div></div>
-        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Mitigated</div><div class="kpi-value" id="fn-mit">0</div></div>
-        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Placed</div><div class="kpi-value" id="fn-placed">0</div></div>
-        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Filled</div><div class="kpi-value" id="fn-filled">0</div></div>
-        <div class="kpi" style="flex:1;min-width:80px"><div class="kpi-label">Won</div><div class="kpi-value pos" id="fn-won">0</div></div>
-      </div>
-    </div>
 
     <!-- Slippage Impact -->
     <div class="panel">
@@ -565,18 +561,6 @@ async function refreshAnalytics() {
     }
   } catch(e) {}
 
-  // Funnel
-  try {
-    const res = await fetch(`${API}/api/bot/funnel`);
-    const fn = await res.json();
-    if (!fn.error) {
-      document.getElementById('fn-fvgs').textContent = fn.fvgs_detected || 0;
-      document.getElementById('fn-mit').textContent = fn.fvgs_mitigated || 0;
-      document.getElementById('fn-placed').textContent = fn.trades_placed || 0;
-      document.getElementById('fn-filled').textContent = fn.trades_filled || 0;
-      document.getElementById('fn-won').textContent = fn.trades_won || 0;
-    }
-  } catch(e) {}
 
   // Slippage impact
   try {
@@ -599,6 +583,116 @@ async function refreshAnalytics() {
 }
 
 // ═══════════════════════════════════════
+// ═══════════════════════════════════════
+// EQUITY CHART
+// ═══════════════════════════════════════
+let equityChart = null;
+
+async function refreshEquityChart() {
+  try {
+    const res = await fetch(`${API}/api/bot/stats`);
+    const data = await res.json();
+    const eq = data.equity || [];
+    if (!eq.length) return;
+
+    // Build data: start balance + each trade exit
+    const startBal = eq[0].balance_after - eq[0].net_pnl;
+    const labels = ['Start'];
+    const balData = [startBal];
+    const colors = [];
+
+    eq.forEach(t => {
+      const dt = t.exit_time ? t.exit_time.split('T')[0] : t.trade_date;
+      const time = t.exit_time ? t.exit_time.split('T')[1]?.substring(0,5) : '';
+      labels.push(`#${labels.length} ${time}`);
+      balData.push(t.balance_after);
+    });
+
+    const ctx = document.getElementById('equity-chart');
+    if (equityChart) {
+      equityChart.data.labels = labels;
+      equityChart.data.datasets[0].data = balData;
+      equityChart.update('none');
+      return;
+    }
+
+    const grad = ctx.getContext('2d').createLinearGradient(0, 0, 0, 220);
+    const lastBal = balData[balData.length - 1];
+    const isUp = lastBal >= startBal;
+    const lineColor = isUp ? 'rgba(0, 229, 160, 0.9)' : 'rgba(239, 68, 68, 0.9)';
+    grad.addColorStop(0, isUp ? 'rgba(0, 229, 160, 0.15)' : 'rgba(239, 68, 68, 0.15)');
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+    equityChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Balance',
+          data: balData,
+          borderColor: lineColor,
+          backgroundColor: grad,
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: 4,
+          pointHoverRadius: 7,
+          pointBackgroundColor: balData.map((v, i) =>
+            i === 0 ? 'rgba(140,140,140,0.8)' :
+            v >= balData[i-1] ? 'rgba(0,229,160,1)' : 'rgba(239,68,68,1)'
+          ),
+          pointBorderColor: '#0d1117',
+          pointBorderWidth: 2,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1a1f2e',
+            borderColor: '#2a3042',
+            borderWidth: 1,
+            padding: 10,
+            titleColor: '#e8eaed',
+            bodyColor: '#8b95a5',
+            titleFont: { family: 'monospace', size: 11, weight: 'bold' },
+            bodyFont: { family: 'monospace', size: 11 },
+            callbacks: {
+              label: ctx => 'Balance: $' + ctx.parsed.y.toLocaleString('en-US', { minimumFractionDigits: 0 }),
+              afterLabel: ctx => {
+                if (ctx.dataIndex === 0) return '';
+                const diff = ctx.parsed.y - balData[ctx.dataIndex - 1];
+                return 'Trade: ' + (diff >= 0 ? '+' : '') + '$' + Math.round(diff).toLocaleString();
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            display: true,
+            grid: { display: false },
+            ticks: { color: '#5a6577', font: { family: 'monospace', size: 9 }, maxRotation: 0 }
+          },
+          y: {
+            display: true,
+            position: 'right',
+            grid: { color: 'rgba(42, 48, 66, 0.4)' },
+            ticks: {
+              color: '#8b949e',
+              font: { family: 'monospace', size: 10 },
+              callback: v => '$' + v.toLocaleString()
+            }
+          }
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════
 async function init() {
@@ -617,9 +711,11 @@ async function init() {
   refreshState();
   setInterval(refreshState, 5000);
 
-  // Analytics panels (less frequent — every 30s)
+  // Analytics panels + equity chart (less frequent — every 30s)
   refreshAnalytics();
+  refreshEquityChart();
   setInterval(refreshAnalytics, 30000);
+  setInterval(refreshEquityChart, 30000);
 }
 
 init();
