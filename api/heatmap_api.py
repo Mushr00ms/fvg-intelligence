@@ -903,7 +903,28 @@ def api_bot_cell_performance():
     if not db:
         return JSONResponse({"error": "No bot database found"})
     try:
-        return JSONResponse({"cells": db.get_cell_performance(days=30)})
+        cells = db.get_cell_performance(days=30)
+        # Enrich with strategy baseline win rate
+        try:
+            strat_path = os.path.join(
+                _REPO_ROOT, "logic", "strategies", "manifest.json")
+            with open(strat_path) as f:
+                manifest = json.load(f)
+                active_id = manifest.get("active_strategy") or manifest.get("active")
+            if active_id:
+                with open(os.path.join(
+                        _REPO_ROOT, "logic", "strategies", f"{active_id}.json")) as f:
+                    strat = json.load(f)
+                baseline = {
+                    (c["time_period"], c["risk_range"], c["setup"]): c["win_rate"]
+                    for c in strat.get("cells", [])
+                }
+                for c in cells:
+                    key = (c.get("time_period"), c.get("risk_range"), c.get("setup"))
+                    c["baseline_wr"] = baseline.get(key)
+        except Exception:
+            pass
+        return JSONResponse({"cells": cells})
     except Exception as e:
         return JSONResponse({"error": str(e)})
 

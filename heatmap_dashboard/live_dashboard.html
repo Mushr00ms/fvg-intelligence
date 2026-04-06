@@ -148,7 +148,7 @@
     <div class="panel scrollable">
       <div class="panel-title">Cell Performance (30d) <span class="badge" id="cell-count">0</span></div>
       <table>
-        <thead><tr><th>Setup</th><th>Time</th><th>Risk</th><th>Trades</th><th>WR</th><th>P&L</th><th>Avg P&L</th><th>Slippage</th></tr></thead>
+        <thead><tr><th>Setup</th><th>Time</th><th>Risk</th><th>Trades</th><th>WR</th><th>Base WR</th><th>P&L</th><th>Avg P&L</th><th>Slippage</th></tr></thead>
         <tbody id="tbl-cells"></tbody>
       </table>
       <div class="empty" id="cell-empty">No cell data</div>
@@ -462,8 +462,11 @@ async function refreshAnalytics() {
     tbody.innerHTML = cells.slice(0, 20).map(c => {
       const pnl = c.total_pnl || 0;
       const setup = (c.setup || '').replace('mit_', 'MIT+').replace('mid_', 'MID+').toUpperCase();
+      const bwr = c.baseline_wr != null ? c.baseline_wr + '%' : '—';
+      const wrDelta = c.baseline_wr != null ? c.win_rate - c.baseline_wr : null;
+      const wrColor = wrDelta == null ? '' : wrDelta >= 0 ? 'var(--green)' : 'var(--red)';
       return `<tr><td>${setup}</td><td>${c.time_period}</td><td>${c.risk_range}</td>
-        <td>${c.trades}</td><td>${c.win_rate}%</td>
+        <td>${c.trades}</td><td style="color:${wrColor}">${c.win_rate}%</td><td style="opacity:0.6">${bwr}</td>
         <td style="color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${Math.round(pnl)}</td>
         <td>$${Math.round(c.avg_pnl||0)}</td>
         <td>${(c.avg_entry_slippage||0).toFixed(2)}pt</td></tr>`;
