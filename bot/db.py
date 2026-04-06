@@ -360,7 +360,8 @@ class TradeDB:
         sql_tpl = """
             SELECT ROUND(SUM(net_pnl), 2) as pnl,
                    COUNT(*) as trades,
-                   SUM(CASE WHEN exit_reason = 'TP' THEN 1 ELSE 0 END) as wins
+                   SUM(CASE WHEN exit_reason = 'TP' THEN 1 ELSE 0 END) as wins,
+                   ROUND(SUM(cell_ev * risk_pts * contracts * 20), 2) as expected_pnl
             FROM trades WHERE exit_reason IS NOT NULL AND {filter}
         """
         # Per-cell trade counts for baseline WR computation
@@ -383,24 +384,26 @@ class TradeDB:
         month_cells = self.query(cell_sql_tpl.format(
             filter="strftime('%Y-%m', trade_date) = strftime('%Y-%m', 'now')"))
 
-        def _wr(row):
-            t = (row[0]['trades'] or 0) if row else 0
-            w = (row[0]['wins'] or 0) if row else 0
-            return round(w / t * 100, 1) if t > 0 else None
+        def _extract(row):
+            if not row:
+                return 0, 0, None, 0
+            r = row[0]
+            t = r['trades'] or 0
+            w = r['wins'] or 0
+            wr = round(w / t * 100, 1) if t > 0 else None
+            return r['pnl'] or 0, t, wr, r['expected_pnl'] or 0
+
+        tp, tt, twr, tep = _extract(today)
+        wp, wt, wwr, wep = _extract(week)
+        mp, mt, mwr, mep = _extract(month)
 
         return {
-            'today_pnl': (today[0]['pnl'] or 0) if today else 0,
-            'today_trades': (today[0]['trades'] or 0) if today else 0,
-            'today_wr': _wr(today),
-            'today_cells': today_cells,
-            'week_pnl': (week[0]['pnl'] or 0) if week else 0,
-            'week_trades': (week[0]['trades'] or 0) if week else 0,
-            'week_wr': _wr(week),
-            'week_cells': week_cells,
-            'month_pnl': (month[0]['pnl'] or 0) if month else 0,
-            'month_trades': (month[0]['trades'] or 0) if month else 0,
-            'month_wr': _wr(month),
-            'month_cells': month_cells,
+            'today_pnl': tp, 'today_trades': tt, 'today_wr': twr,
+            'today_expected_pnl': tep, 'today_cells': today_cells,
+            'week_pnl': wp, 'week_trades': wt, 'week_wr': wwr,
+            'week_expected_pnl': wep, 'week_cells': week_cells,
+            'month_pnl': mp, 'month_trades': mt, 'month_wr': mwr,
+            'month_expected_pnl': mep, 'month_cells': month_cells,
         }
 
     def get_overall_stats(self, days=None):
