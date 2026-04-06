@@ -759,6 +759,33 @@ def api_bot_state():
             state["state_age_seconds"] = round(age, 1)
         except Exception:
             pass
+        # Enrich closed trades with DB commission data (state file has gross PnL only)
+        try:
+            if os.path.exists(_BOT_DB_PATH) and state.get("closed_trades"):
+                import sqlite3
+                conn = sqlite3.connect(_BOT_DB_PATH)
+                conn.row_factory = sqlite3.Row
+                db_trades = {
+                    r["group_id"]: dict(r) for r in conn.execute(
+                        "SELECT group_id, commission, net_pnl FROM trades "
+                        "WHERE trade_date = ? AND exit_reason IS NOT NULL",
+                        [state.get("date", "")],
+                    ).fetchall()
+                }
+                conn.close()
+                total_comm = 0.0
+                for t in state["closed_trades"]:
+                    db_row = db_trades.get(t.get("group_id"))
+                    if db_row and db_row["commission"]:
+                        t["realized_pnl"] = db_row["net_pnl"]
+                        t["commission"] = db_row["commission"]
+                        total_comm += db_row["commission"]
+                if total_comm > 0:
+                    state["realized_pnl"] = round(
+                        sum(t.get("realized_pnl", 0) for t in state["closed_trades"]), 2
+                    )
+        except Exception:
+            pass  # Non-critical — fall back to state file values
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"error": str(e), "running": False})
