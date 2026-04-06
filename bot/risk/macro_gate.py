@@ -35,19 +35,9 @@ _MACRO_EVENTS_PATH = os.path.join(
 # Blackout windows per event type (entry ET times that are blocked).
 # Each tuple is (start_inclusive, end_exclusive).
 _BLACKOUT_WINDOWS: dict[str, list[tuple[time, time]]] = {
-    "nfp": [
-        (time(9, 30), time(11, 0)),   # post-release volatility
-        (time(15, 30), time(16, 0)),   # EOD noise
-    ],
-    "cpi": [
-        (time(9, 30), time(10, 30)),   # post-release volatility
-        (time(12, 0), time(12, 30)),   # midday reversal
-    ],
-    "fomc": [
-        (time(9, 30), time(10, 0)),    # morning uncertainty
-        (time(12, 0), time(13, 30)),   # pre-release positioning
-        (time(14, 30), time(15, 0)),   # post-release whipsaw
-    ],
+    "nfp": [],
+    "cpi": [],
+    "fomc": [],
 }
 
 

@@ -38,7 +38,6 @@ from bot.execution.position_tracker import get_account_balance, get_ib_open_orde
 from bot.alerts.telegram import TelegramAlerter
 from bot.db import TradeDB
 from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
-from bot.risk.macro_gate import MacroGateConfig, is_blocked_by_macro_gate
 from bot.backtest.us_holidays import is_trading_day, US_MARKET_HOLIDAYS
 
 NY_TZ = pytz.timezone("America/New_York")
@@ -471,21 +470,6 @@ class BotEngine:
         )
         today = self.clock.now().date()
         blocked, reason = is_blocked_by_witching_gate(today, cfg)
-        if blocked:
-            return False, reason
-        return True, ""
-
-    def _macro_gate_allows_entry(self):
-        """Check if current time falls in a macro event blackout window."""
-        strategy_meta = self.strategy.strategy.get("meta", {}) if self.strategy and self.strategy.strategy else {}
-        hard_gates = strategy_meta.get("hard_gates", {})
-        macro_cfg = MacroGateConfig(
-            skip_nfp=bool(hard_gates.get("skip_nfp", True)),
-            skip_cpi=bool(hard_gates.get("skip_cpi", True)),
-            skip_fomc=bool(hard_gates.get("skip_fomc", True)),
-        )
-        now = self.clock.now()
-        blocked, reason = is_blocked_by_macro_gate(now.date(), now.time(), macro_cfg)
         if blocked:
             return False, reason
         return True, ""
@@ -1119,11 +1103,6 @@ class BotEngine:
             self.logger.log("setup_rejected", fvg_id=fvg.fvg_id, gate="calendar", reason=reason)
             self.fvg_mgr.remove(fvg.fvg_id)
             self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
-            return
-
-        allowed, reason = self._macro_gate_allows_entry()
-        if not allowed:
-            self.logger.log("setup_rejected", fvg_id=fvg.fvg_id, gate="macro", reason=reason)
             return
 
         # Time gate check outside lock — pure clock check, no DailyState reads

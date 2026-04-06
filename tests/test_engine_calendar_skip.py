@@ -146,58 +146,29 @@ class TestWitchingSkip:
         assert len(closed) == 0
 
 
-class TestMacroEventSkip:
-    """Macro gate is per-entry (time-based), not per-day. Engine starts normally
-    on macro days; individual entries in blackout windows are rejected."""
+class TestMacroEventDaysPassStartup:
+    """Macro event days (NFP/CPI/FOMC) do not block engine startup."""
 
-    def test_nfp_day_does_not_block_startup(self):
-        """2025-01-03 is NFP — engine starts up normally (gate is per-entry)."""
-        engine = _make_engine(datetime(2025, 1, 3, 9, 0), strategy=_MockStrategyLoaderMacroSkip())
+    def test_nfp_day_starts_normally(self):
+        engine = _make_engine(datetime(2025, 1, 3, 9, 0), strategy=_MockStrategyLoaderNoWitching())
         try:
             asyncio.run(engine._startup())
         except (AttributeError, Exception):
             pass
         assert engine._shutdown is False
 
-    def test_cpi_day_does_not_block_startup(self):
-        """2025-01-15 is CPI — engine starts up normally."""
-        engine = _make_engine(datetime(2025, 1, 15, 9, 0), strategy=_MockStrategyLoaderMacroSkip())
+    def test_cpi_day_starts_normally(self):
+        engine = _make_engine(datetime(2025, 1, 15, 9, 0), strategy=_MockStrategyLoaderNoWitching())
         try:
             asyncio.run(engine._startup())
         except (AttributeError, Exception):
             pass
         assert engine._shutdown is False
 
-    def test_fomc_day_does_not_block_startup(self):
-        """2025-01-29 is FOMC — engine starts up normally."""
-        engine = _make_engine(datetime(2025, 1, 29, 9, 0), strategy=_MockStrategyLoaderMacroSkip())
+    def test_fomc_day_starts_normally(self):
+        engine = _make_engine(datetime(2025, 1, 29, 9, 0), strategy=_MockStrategyLoaderNoWitching())
         try:
             asyncio.run(engine._startup())
         except (AttributeError, Exception):
             pass
         assert engine._shutdown is False
-
-    def test_macro_gate_blocks_in_blackout_window(self):
-        """NFP day at 09:45 ET — _macro_gate_allows_entry returns blocked."""
-        engine = _make_engine(datetime(2025, 1, 3, 9, 45), strategy=_MockStrategyLoaderMacroSkip())
-        allowed, reason = engine._macro_gate_allows_entry()
-        assert allowed is False
-        assert reason == "macro_nfp_blackout"
-
-    def test_macro_gate_allows_outside_blackout(self):
-        """NFP day at 11:00 ET — outside blackout, entry allowed."""
-        engine = _make_engine(datetime(2025, 1, 3, 11, 0), strategy=_MockStrategyLoaderMacroSkip())
-        allowed, reason = engine._macro_gate_allows_entry()
-        assert allowed is True
-
-    def test_macro_gate_allows_when_disabled(self):
-        """NFP day at 09:45 ET — but skip_nfp=False, entry allowed."""
-        engine = _make_engine(datetime(2025, 1, 3, 9, 45), strategy=_MockStrategyLoaderMacroAllow())
-        allowed, reason = engine._macro_gate_allows_entry()
-        assert allowed is True
-
-    def test_normal_day_always_allowed(self):
-        """Regular day — macro gate never blocks."""
-        engine = _make_engine(datetime(2025, 1, 6, 9, 45), strategy=_MockStrategyLoaderMacroSkip())
-        allowed, reason = engine._macro_gate_allows_entry()
-        assert allowed is True
