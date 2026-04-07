@@ -37,6 +37,7 @@ class MarginTracker:
         self._last_fetch_time: Optional[datetime] = None
         self._initialized = False
         self._reserved_margin: float = 0.0  # locally reserved for pending orders
+        self._primary_account: Optional[str] = None  # set by initialize()
 
         # Parse intraday window from config (ET times)
         self._intraday_start = _parse_time(config.margin_intraday_start)
@@ -69,22 +70,60 @@ class MarginTracker:
         margin = await self._fetch_margin_per_contract()
         self._initialized = True
 
-        # Log account segment state so we can see the real margin capacity
+        # Log account segment state so we can see the real margin capacity.
+        # IB returns one row per (account, tag, currency) tuple. With multiple
+        # managed accounts or model/master separation, naïvely doing
+        # `vals[tag] = float(av.value)` overwrites with whichever row IB
+        # iterated last — frequently a near-zero subaccount. We pick the
+        # account with the largest NetLiquidation as the "primary" and read
+        # all tags from that account only.
         if not self._config.dry_run and self._conn.is_connected:
             try:
                 avs = self._conn.ib.accountValues()
-                vals = {}
+                wanted_tags = {
+                    "NetLiquidation", "NetLiquidation-C",
+                    "AvailableFunds-C", "InitMarginReq-C",
+                }
+
+                # Build per-account view: {account: {tag: value}}
+                per_account: dict = {}
                 for av in avs:
-                    if av.currency == "USD" and av.tag in (
-                        "NetLiquidation", "NetLiquidation-C",
-                        "AvailableFunds-C", "InitMarginReq-C",
-                    ):
-                        vals[av.tag] = float(av.value)
+                    if av.currency != "USD" or av.tag not in wanted_tags:
+                        continue
+                    try:
+                        v = float(av.value)
+                    except (TypeError, ValueError):
+                        continue
+                    per_account.setdefault(av.account, {})[av.tag] = v
+
+                # Pick the account with the largest NetLiquidation as primary.
+                # Falls back to NetLiquidation-C, then any account, then empty.
+                def _nlv(acc_vals):
+                    return acc_vals.get("NetLiquidation", 0) or acc_vals.get("NetLiquidation-C", 0)
+
+                primary_account = None
+                vals: dict = {}
+                if per_account:
+                    primary_account = max(per_account, key=lambda a: _nlv(per_account[a]))
+                    vals = per_account[primary_account]
+                    self._primary_account = primary_account
+
+                # If multiple accounts exist, surface that — single biggest cause
+                # of the "nlv=0.63" symptom.
+                if len(per_account) > 1:
+                    self._logger.log(
+                        "margin_account_multi",
+                        accounts=sorted(per_account.keys()),
+                        primary=primary_account,
+                        nlvs={a: round(_nlv(v), 2) for a, v in per_account.items()},
+                    )
+
                 nlv_c = vals.get("NetLiquidation-C", 0)
                 avail_c = vals.get("AvailableFunds-C", 0)
                 max_contracts = int(avail_c / (margin * (1 + self._config.margin_buffer_pct))) if margin > 0 else 0
                 self._logger.log(
                     "margin_account_state",
+                    account=primary_account,
                     nlv=round(vals.get("NetLiquidation", 0), 2),
                     nlv_c=round(nlv_c, 2),
                     avail_c=round(avail_c, 2),
@@ -92,8 +131,8 @@ class MarginTracker:
                     per_contract=round(margin, 2),
                     max_new_contracts=max_contracts,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self._logger.log("margin_account_state_error", error=str(e))
 
         return margin
 
@@ -341,9 +380,18 @@ class MarginTracker:
             account_values = self._conn.ib.accountValues()
             for tag in ("AvailableFunds-C", "AvailableFunds"):
                 for av in account_values:
-                    if av.tag == tag and av.currency == "USD":
+                    if av.tag != tag or av.currency != "USD":
+                        continue
+                    # Pin to the primary account discovered at init. Without
+                    # this, IB's row order can hand us a near-zero subaccount
+                    # and silently block all trades.
+                    if self._primary_account and av.account != self._primary_account:
+                        continue
+                    try:
                         raw_available = float(av.value)
-                        break
+                    except (TypeError, ValueError):
+                        continue
+                    break
                 if raw_available > 0:
                     break
         except Exception:
