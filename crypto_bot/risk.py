@@ -124,6 +124,17 @@ class CryptoRiskManager:
         if state.active_order_count >= self._config.max_concurrent:
             return f"max_concurrent reached ({state.active_order_count}/{self._config.max_concurrent})"
 
+        # Capital-cap notional check: open notional must fit within equity * leverage.
+        # Backtest enforces this strictly; without it the bot will take more positions
+        # than the backtest and the realized P&L distribution will diverge.
+        open_notional = sum(i.notional for i in state.pending_entries + state.open_positions)
+        notional_cap = available_balance * self._config.leverage
+        if open_notional + intent.notional > notional_cap:
+            return (
+                f"capital-cap reject: open_notional={open_notional:.2f} + new={intent.notional:.2f} "
+                f"exceeds cap {notional_cap:.2f} (equity={available_balance:.2f} × lev={self._config.leverage})"
+            )
+
         open_risk = sum(i.expected_loss for i in state.pending_entries + state.open_positions)
         max_open_risk = available_balance * self._config.max_cumulative_risk_pct
         if open_risk + intent.expected_loss > max_open_risk * 1.01:

@@ -70,3 +70,8 @@ GLBX-*.zip
 .tools-venv/
 vendor/
 security/sbom.json
+
+# Large SOL sweep artifacts — regenerable from scripts
+scripts/sol_sweep_results/sweep_trades.json
+scripts/sol_sweep_results/per_config/
+scripts/sol_sweep_results/2026/sweep_trades.json
