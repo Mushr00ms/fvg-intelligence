@@ -248,6 +248,29 @@ class BotEngine:
                     self.daily_state, ib_orders, ib_positions
                 )
 
+                # Reseed margin tracker for orders that survived reconciliation.
+                # _reserved_margin starts at 0 on every boot; without this, the
+                # local "release on suspend" path is a no-op for any order
+                # restored from disk, and a mid-session restart undercounts
+                # reserved margin (oversizing the next entry).
+                if self.margin_tracker:
+                    reseeded_qty = 0
+                    for og in self.daily_state.pending_orders:
+                        qty = og.target_qty - (og.filled_qty or 0)
+                        if qty > 0:
+                            self.margin_tracker.reserve(qty)
+                            reseeded_qty += qty
+                    for og in self.daily_state.open_positions:
+                        qty = og.filled_qty or og.target_qty
+                        if qty > 0:
+                            self.margin_tracker.reserve(qty)
+                            reseeded_qty += qty
+                    if reseeded_qty > 0:
+                        self.logger.log(
+                            "margin_reseeded_after_reconcile",
+                            total_qty=reseeded_qty,
+                        )
+
             # Restore active FVGs
             self.fvg_mgr.restore(self.daily_state.active_fvgs)
 
@@ -308,6 +331,12 @@ class BotEngine:
         # Process detection for backfilled FVGs that don't yet have orders
         # (must run AFTER _reconciliation_complete = True so time/risk gates allow it)
         await self._process_backfilled_fvgs()
+
+        # Kick the suspended-order queue. On a mid-session restart, suspended
+        # orders persisted from the previous run would otherwise sit forever
+        # because try_reactivate_suspended is only called on order resolution.
+        if self.daily_state and self.daily_state.suspended_orders and self.margin_priority:
+            await self._on_order_resolved(released_qty=0)
 
         self.logger.log(
             "startup_complete",

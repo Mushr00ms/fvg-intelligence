@@ -6,8 +6,6 @@ furthest from current price to free margin for closer, more actionable setups.
 Suspended orders are re-placed when margin becomes available (e.g., after a TP/SL).
 """
 
-import asyncio
-import math
 from typing import Optional
 
 
@@ -96,20 +94,29 @@ class MarginPriorityManager:
 
         # Execute suspensions
         for og in to_suspend:
+            suspended_qty = og.target_qty
             await self._order_mgr.suspend_order(
                 og, daily_state,
                 reason=f"margin_priority: {proposed_order.group_id} closer "
                        f"({new_dist:.1f} vs {abs(og.entry_price - current_price):.1f} pts)",
             )
+            # Release locally reserved margin so the re-check below sees it freed.
+            # OrderManager.suspend_order cancels the IB entry but does not touch
+            # the margin tracker; without this release, _reserved_margin stays
+            # inflated and the new order trips margin_not_freed_after_suspend.
+            self._margin.release(suspended_qty)
 
-        # Brief pause for IB to process cancellations and update margin
-        await asyncio.sleep(0.5)
-
-        # Re-check margin after suspensions
-        available = self._margin.get_available_margin()
-        max_qty = self._margin.max_contracts_by_margin(available)
+        # Trust local accounting: we just released `freed` worth of margin
+        # locally and issued IB cancels. IB's accountValues snapshot lags the
+        # cancel by several seconds, so re-querying get_available_margin()
+        # would read a stale-low raw_available and falsely trip
+        # "margin_not_freed_after_suspend". total_available was computed from
+        # available (pre-suspend IB read) + freed (locally released), which
+        # is the correct post-suspend figure.
+        max_qty = self._margin.max_contracts_by_margin(total_available)
         if max_qty < 1:
-            # Race condition: margin still not freed
+            # Should be unreachable: we already verified total_available above
+            # before issuing the cancels. Defensive fallback.
             self._add_to_suspended(proposed_order, daily_state, fvg,
                                     "margin_not_freed_after_suspend")
             return "SUSPENDED"
@@ -185,6 +192,8 @@ class MarginPriorityManager:
             # Re-place
             result = await self._order_mgr.reactivate_order(og, daily_state)
             if result:
+                # Re-reserve margin (released when the order was suspended)
+                self._margin.reserve(og.target_qty)
                 reactivated += 1
 
         return reactivated
