@@ -910,6 +910,19 @@ class OrderManager:
         """Handle entry order status changes (cancelled, rejected, etc.)."""
         status = trade.orderStatus.status
         if status in ("Cancelled", "Inactive"):
+            # If we intentionally suspended this order, the IB Cancelled
+            # callback is the expected echo of our own cancelOrder() call.
+            # Do NOT move it to closed_trades — it must stay in
+            # suspended_orders so try_reactivate_suspended can re-place it
+            # when margin frees up (or on bot restart).
+            if og.state == "SUSPENDED":
+                self._logger.log(
+                    "suspend_cancel_echo",
+                    group_id=og.group_id,
+                    ib_status=status,
+                )
+                return
+
             # Update filled qty from IB (our tracker may lag)
             ib_filled = trade.orderStatus.filled
             if ib_filled > 0 and ib_filled > og.filled_qty:
