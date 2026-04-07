@@ -168,6 +168,13 @@ class MarginPriorityManager:
             # Check time gate
             allowed, reason = self._time_gates.can_enter()
             if not allowed:
+                self._logger.log(
+                    "reactivate_blocked",
+                    group_id=og.group_id,
+                    fvg_id=og.fvg_id,
+                    gate="time",
+                    reason=reason,
+                )
                 continue  # Past entry window, leave for EOD cleanup
 
             # Check risk gates (daily limits may have changed)
@@ -184,6 +191,13 @@ class MarginPriorityManager:
             # Check margin
             available = self._margin.get_available_margin()
             if not self._margin.can_afford(1, available):
+                self._logger.log(
+                    "reactivate_blocked",
+                    group_id=og.group_id,
+                    fvg_id=og.fvg_id,
+                    gate="margin",
+                    available=round(available, 2),
+                )
                 break  # No margin left, stop trying
 
             max_qty = self._margin.max_contracts_by_margin(available)

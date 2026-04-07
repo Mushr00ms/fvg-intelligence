@@ -974,6 +974,11 @@ class BotEngine:
         ordered_fvg_ids = set()
         for og in self.daily_state.pending_orders + self.daily_state.open_positions:
             ordered_fvg_ids.add(og.fvg_id)
+        # Suspended orders also "own" their FVG — backfill must NOT create a
+        # duplicate OrderGroup for the same zone. The suspended-queue kick at
+        # startup is responsible for reactivating these via margin_priority.
+        for og in self.daily_state.suspended_orders:
+            ordered_fvg_ids.add(og.fvg_id)
         for og in self.daily_state.closed_trades:
             if og.close_reason not in _skip_reasons:
                 ordered_fvg_ids.add(og.fvg_id)
