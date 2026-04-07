@@ -27,7 +27,6 @@ from bot.state.trade_state import DailyState, CLOSE_CANCEL, CLOSE_EOD, CLOSE_REJ
 from bot.strategy.strategy_loader import StrategyLoader
 from bot.strategy.fvg_detector import ActiveFVGManager
 from bot.strategy.mitigation_scanner import scan_active_fvgs
-from bot.strategy.tick_bar_builder import TickBarBuilder
 from bot.strategy.tick_imbalance_accumulator import TickImbalanceAccumulator
 from bot.strategy.trade_calculator import calculate_setup
 from bot.risk.risk_gates import RiskGates
@@ -116,9 +115,7 @@ class BotEngine:
         self._contract = None
         self._bars_5min = None
         self._bars_1min = None
-        self._tick_bar_builder = TickBarBuilder()
         self._tick_subscription = None
-        self._tick_detected_bars = set()  # window_start datetimes already tick-detected
         self.hfoiv_gate = None              # Initialized in _startup if enabled
         self._imbalance_accumulator = None  # TickImbalanceAccumulator for live HFOIV
         self._shutdown = False
@@ -730,7 +727,6 @@ class BotEngine:
                 numberOfTicks=0, ignoreSize=True,
             )
             self._tick_subscription.updateEvent += self._on_tick_update
-            self._tick_bar_builder.reset()
             self.logger.log("ticks_subscribed")
         except Exception as e:
             self.logger.log("ticks_subscribe_failed", error=str(e))
@@ -759,10 +755,6 @@ class BotEngine:
                     if imb_bar is not None and self.hfoiv_gate is not None:
                         self.hfoiv_gate.update(
                             imb_bar["bar_minutes"], imb_bar["imbalance"])
-
-            completed = self._tick_bar_builder.on_tick(tick.price, tick_time_et)
-            if completed is not None:
-                self._on_tick_bar_complete(completed)
 
         # Clear processed ticks to prevent unbounded memory growth
         ticks.clear()
@@ -798,56 +790,6 @@ class BotEngine:
         if mitigated:
             self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
             self.state_mgr.save(self.daily_state)
-
-    def _on_tick_bar_complete(self, tick_ohlc):
-        """Merge tick OHLC with IB's keepUpToDate bar for conservative FVG detection.
-
-        ALWAYS appends bar3 to _recent_bars so subsequent tick detections
-        have correct bar1/bar2 — cannot rely on keepUpToDate if it's broken.
-        """
-        if self.fvg_mgr is None:
-            return
-
-        # Read IB's keepUpToDate incomplete bar (continuously updated ~every 5 sec)
-        ib_bar = self._bars_5min[-1] if self._bars_5min and len(self._bars_5min) > 0 else None
-
-        if ib_bar is not None:
-            # Hybrid merge: most conservative extremes from both sources
-            bar3 = {
-                "open":  ib_bar.open,
-                "high":  max(ib_bar.high, tick_ohlc["high"]),
-                "low":   min(ib_bar.low, tick_ohlc["low"]),
-                "close": tick_ohlc["close"],
-                "date":  _bar_date_to_et(ib_bar.date),
-            }
-        else:
-            bar3 = tick_ohlc
-
-        # Always append bar3 to _recent_bars so next tick detection has correct bar1/bar2.
-        # detect_from_tick_bar uses [-2] and [-1] BEFORE this append.
-        if len(self.fvg_mgr._recent_bars) >= 2:
-            fvg = self.fvg_mgr.detect_from_tick_bar(bar3)
-        else:
-            fvg = None
-
-        # Append AFTER detection (so [-2] and [-1] were the correct bar1/bar2)
-        self.fvg_mgr.append_bar(bar3)
-        self._tick_detected_bars.add(tick_ohlc["date"])
-
-        if fvg:
-            self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
-            self.state_mgr.save(self.daily_state)
-            self.db.insert_fvg(
-                fvg_id=fvg.fvg_id, trade_date=fvg.formation_date,
-                fvg_type=fvg.fvg_type, zone_low=fvg.zone_low,
-                zone_high=fvg.zone_high, fvg_size=round(fvg.zone_high - fvg.zone_low, 2),
-                time_period=fvg.time_period, formation_time=fvg.time_candle3,
-            )
-            self.logger.log(
-                "fvg_detected_tick", fvg_id=fvg.fvg_id, type=fvg.fvg_type,
-                zone=[fvg.zone_low, fvg.zone_high], source="tick",
-            )
-            asyncio.ensure_future(self._guarded_process_detection(fvg))
 
     async def _backfill_fvgs(self):
         """
@@ -1012,7 +954,6 @@ class BotEngine:
             await self._subscribe_bars()
             self._seed_recent_bars()
             self._subscribe_ticks()
-            self._tick_detected_bars.clear()
             # Reset imbalance accumulator (tick rule state stale after disconnect)
             if self._imbalance_accumulator is not None:
                 self._imbalance_accumulator.reset()
@@ -1033,8 +974,9 @@ class BotEngine:
         bars[-1] is the new incomplete bar, bars[-2] is the just-completed bar.
         We detect FVGs on the COMPLETED bar (bars[-2]), never on the incomplete one.
 
-        If the tick path already detected an FVG for this bar window,
-        we still append the authoritative bar to _recent_bars but skip re-detection.
+        This is the SOLE source of FVG detection — the tick path was removed
+        because it could produce OHLC values that diverged from the canonical
+        post-close bar, breaking live/backtest parity.
         """
         if not hasNewBar or len(bars) < 2:
             return
@@ -1049,18 +991,6 @@ class BotEngine:
             "date": _bar_date_to_et(bar.date),
         }
 
-        # Check if tick path already handled this bar window
-        bar_window = _bar_date_to_et(bar.date)
-        if bar_window in self._tick_detected_bars:
-            # Tick path already appended bar3 and ran detection.
-            # Replace the tick-built bar with IB's authoritative version
-            # so future bar1/bar2 references are exact.
-            if len(self.fvg_mgr._recent_bars) > 0:
-                self.fvg_mgr._recent_bars[-1] = bar_dict
-            self._tick_detected_bars.discard(bar_window)
-            return
-
-        # Normal path: detect FVG from keepUpToDate (fallback for non-tick path)
         fvg = self.fvg_mgr.on_5min_bar(bar_dict)
         if fvg:
             self.daily_state.active_fvgs = self.fvg_mgr.active_fvgs
@@ -1508,7 +1438,6 @@ class BotEngine:
         """16:00 — Expire FVGs, daily summary, final state save."""
         expired = self.fvg_mgr.expire_all()
         self.daily_state.active_fvgs = []
-        self._tick_detected_bars.clear()
 
         # Flush today's HFOIV values to history + reset for next session
         if self.hfoiv_gate is not None:
