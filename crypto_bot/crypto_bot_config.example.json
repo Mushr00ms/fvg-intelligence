@@ -31,7 +31,7 @@
   "starting_balance": 50000.0,
   "save_interval_seconds": 15,
   "daily_reset_timezone": "America/New_York",
-  "market_timezone": "America/New_York",
+  "market_timezone": "UTC",
   "telegram_enabled": false,
   "telegram_bot_token": "",
   "telegram_chat_id": ""
