@@ -261,13 +261,35 @@ class MarginTracker:
                 self._logger.log("margin_price_snapshot_error", error=str(e))
 
         # ── Step 2: whatIfOrder probes ──────────────────────────────────────
+        # IMPORTANT: set tif="DAY" explicitly. If left blank, the TWS "order
+        # preset" silently rewrites TIF to DAY and emits warning 10349. That
+        # rewrite confuses the ib_async whatIf future-resolution path and
+        # whatIfOrderAsync returns [] (the "UNSET_DOUBLE" symptom). Setting
+        # the field up-front prevents the rewrite entirely. We also pin the
+        # account when known so multi-account TWS sessions don't route the
+        # probe through a model account with no margin info.
+        def _make_limit():
+            o = LimitOrder(action="BUY", totalQuantity=1, lmtPrice=current_price)
+            o.tif = "DAY"
+            o.outsideRth = False
+            o.transmit = True
+            if self._primary_account:
+                o.account = self._primary_account
+            return o
+
+        def _make_market():
+            o = MarketOrder(action="BUY", totalQuantity=1)
+            o.tif = "DAY"
+            o.outsideRth = False
+            o.transmit = True
+            if self._primary_account:
+                o.account = self._primary_account
+            return o
+
         probes = []
         if current_price:
-            probes.append((
-                "LimitOrder",
-                LimitOrder(action="BUY", totalQuantity=1, lmtPrice=current_price),
-            ))
-        probes.append(("MarketOrder", MarketOrder(action="BUY", totalQuantity=1)))
+            probes.append(("LimitOrder", _make_limit()))
+        probes.append(("MarketOrder", _make_market()))
 
         for probe_name, probe_order in probes:
             for attempt in range(2):

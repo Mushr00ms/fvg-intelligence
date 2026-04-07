@@ -307,6 +307,10 @@ class OrderManager:
             og.entry_slippage_pts = slippage
             og.entry_commission = self._get_commission(trade)
             daily_state.move_to_open(og.group_id)
+            # Release locally-reserved margin: IB now reflects the real
+            # position margin in accountValues, so keeping our reservation
+            # would double-count and starve subsequent sizing decisions.
+            self._notify_order_resolved(released_qty=og.target_qty)
             self._state_mgr.save(daily_state)
             self._logger.log(
                 "order_filled",
@@ -332,9 +336,17 @@ class OrderManager:
         1. Adjust TP/SL qty to match filled qty
         2. Start 5-minute timer for unfilled remainder
         """
+        prior_filled = og.filled_qty or 0
         og.filled_qty = filled_qty
         og.state = "PARTIAL"
         og.partial_fill_timer_start = self._now_iso()
+
+        # Release the newly-filled increment locally — IB has booked real
+        # margin for those contracts. The unfilled remainder stays reserved
+        # until the 5-min timer cancels it (released in _partial_fill_timeout).
+        new_increment = filled_qty - prior_filled
+        if new_increment > 0:
+            self._notify_order_resolved(released_qty=new_increment)
 
         self._logger.log(
             "partial_fill",
@@ -406,7 +418,11 @@ class OrderManager:
 
             if og.filled_qty > 0 and og.filled_qty < og.target_qty:
                 # Cancel unfilled remainder
+                unfilled = og.target_qty - og.filled_qty
                 await self._cancel_entry_remainder(og)
+                # Release the unfilled remainder's reservation (filled portion
+                # was released in _handle_partial_fill at fill-time).
+                self._notify_order_resolved(released_qty=unfilled)
                 og.target_qty = og.filled_qty
                 og.state = "FILLED"
                 og.filled_at = self._now_iso()
@@ -417,7 +433,7 @@ class OrderManager:
                     "partial_fill_timeout",
                     group_id=group_id,
                     kept=og.filled_qty,
-                    cancelled=og.target_qty - og.filled_qty,
+                    cancelled=unfilled,
                 )
         except asyncio.CancelledError:
             pass
@@ -554,13 +570,17 @@ class OrderManager:
         if timer and not timer.done():
             timer.cancel()
 
+        # Compute reservation that's still locally held: full target for
+        # un-filled orders, only the unfilled remainder for PARTIAL orders
+        # (the filled portion was released in _handle_partial_fill).
+        unreleased = max(0, og.target_qty - (og.filled_qty or 0))
         daily_state.move_to_closed(og.group_id, reason)
         self._logger.log(
             "order_cancelled",
             group_id=og.group_id,
             reason=reason,
         )
-        self._notify_order_resolved(released_qty=og.target_qty)
+        self._notify_order_resolved(released_qty=unreleased)
 
     async def cancel_all_pending(self, daily_state, reason=CLOSE_EOD):
         """Cancel all unfilled entry orders (EOD cleanup)."""
@@ -778,7 +798,10 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
-        self._notify_order_resolved(released_qty=og.filled_qty)
+        # Margin reservation was already released at entry-fill time. Pass 0
+        # to avoid double-release; the callback still runs to re-evaluate
+        # suspended orders for reactivation.
+        self._notify_order_resolved(released_qty=0)
 
     def _on_sl_fill(self, trade, og, daily_state):
         """Stop loss filled — log P&L, slippage, commissions."""
@@ -869,7 +892,8 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
         self._state_mgr.save(daily_state)
-        self._notify_order_resolved(released_qty=og.filled_qty)
+        # Margin already released at entry-fill time — see _on_tp_fill comment.
+        self._notify_order_resolved(released_qty=0)
 
     def _cleanup_entry_remainder(self, og):
         """Cancel unfilled entry contracts and kill partial fill timer on TP/SL fill.

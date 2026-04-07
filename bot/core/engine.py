@@ -253,15 +253,15 @@ class BotEngine:
                 # local "release on suspend" path is a no-op for any order
                 # restored from disk, and a mid-session restart undercounts
                 # reserved margin (oversizing the next entry).
+                #
+                # Reseed ONLY the unfilled remainder of pending/PARTIAL orders.
+                # Open (fully filled) positions consume real IB margin already
+                # visible in AvailableFunds — re-reserving them locally would
+                # double-count and starve the next entry's sizing.
                 if self.margin_tracker:
                     reseeded_qty = 0
                     for og in self.daily_state.pending_orders:
                         qty = og.target_qty - (og.filled_qty or 0)
-                        if qty > 0:
-                            self.margin_tracker.reserve(qty)
-                            reseeded_qty += qty
-                    for og in self.daily_state.open_positions:
-                        qty = og.filled_qty or og.target_qty
                         if qty > 0:
                             self.margin_tracker.reserve(qty)
                             reseeded_qty += qty
