@@ -73,11 +73,21 @@ The trading bot connects to Interactive Brokers TWS via `ib_async`. It runs in *
 - Flatten all positions: 15:55
 
 **Risk gates** (`bot/risk/risk_gates.py`) — checked in order, first failure blocks trade:
-1. Kill switch active? (-3% daily loss → flatten all + halt)
+1. Kill switch active? (-10% daily loss → flatten all + halt; matches `bot/backtest/backtester.py:1213`)
 2. Daily trade count ≤ 15
 3. Concurrent positions ≤ 3
-4. Per-trade risk ≤ 1% of balance
-5. Max trade loss ≤ 1.5% (with slippage buffer)
+4. Cumulative open risk ≤ 5% of balance
+5. Per-trade risk ≤ 1% of balance
+6. Max trade loss ≤ 1.5% (with slippage buffer)
+
+**Drawdown size scaling** (`drawdown_multiplier`) — never blocks, only reduces size:
+- daily PnL ≤ -2% → 0.5× position size
+- daily PnL ≤ -4% → 0.25× position size
+
+The kill switch threshold and DD scaling are intentionally identical between
+the live bot and the backtester. **Do not diverge them** — any rule the
+backtest doesn't enforce must not be enforced live (and vice versa), or the
+validated EV stops applying to the live system.
 
 **Crash recovery**: Atomic state persistence to `bot/bot_state.json` via `.tmp` + `os.replace()`, debounced to max 1 save/sec. On startup, loads state if date matches and reconciles with IB positions. FVGs backfilled from 5min bars.
 
@@ -224,7 +234,7 @@ Before marking any task as done, run these mechanical checks. Do not skip them e
 - [ ] **Dependency pipeline intact**: If `requirements.in` was changed, `requirements.lock` must be regenerated and `bash scripts/check_deps.sh` must pass
 - [ ] **No deleted tests**: Never delete a test without explicit user approval and a documented reason
 - [ ] **No skipped tests**: Never mark a test as `@pytest.mark.skip` to make the suite pass
-- [ ] **Bot safety invariants**: If `bot/` was changed — verify risk gate defaults unchanged (`max_concurrent=3`, `max_daily_trades=15`, `kill_switch_pct=-0.03`), time gate constants unchanged (cancel 15:50, flatten 15:55), and bracket order/OCA logic intact
+- [ ] **Bot safety invariants**: If `bot/` was changed — verify risk gate defaults unchanged (`max_concurrent=3`, `max_daily_trades=15`, `kill_switch_pct=-0.10`), time gate constants unchanged (cancel 15:50, flatten 15:55), and bracket order/OCA logic intact. Live thresholds must match `bot/backtest/backtester.py` — diverging them invalidates the validated strategy EV.
 - [ ] **No time gate modifications**: Never change EOD schedule constants (15:50 cancel, 15:55 flatten, 16:00 session end) without explicit approval
 - [ ] **Price calculation parity**: If order/execution/RR code changed, compare numerical outputs before and after
 
