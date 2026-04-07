@@ -82,7 +82,11 @@ class MarginTracker:
                 avs = self._conn.ib.accountValues()
                 wanted_tags = {
                     "NetLiquidation", "NetLiquidation-C",
-                    "AvailableFunds-C", "InitMarginReq-C",
+                    "AvailableFunds", "AvailableFunds-C",
+                    "ExcessLiquidity", "ExcessLiquidity-C",
+                    "BuyingPower",
+                    "TotalCashValue", "TotalCashValue-C",
+                    "InitMarginReq-C", "FullInitMarginReq-C",
                 }
 
                 # Build per-account view: {account: {tag: value}}
@@ -120,13 +124,24 @@ class MarginTracker:
 
                 nlv_c = vals.get("NetLiquidation-C", 0)
                 avail_c = vals.get("AvailableFunds-C", 0)
-                max_contracts = int(avail_c / (margin * (1 + self._config.margin_buffer_pct))) if margin > 0 else 0
+                # Use universal AvailableFunds, not the pre-sweep C-segment
+                # value. IB auto-sweeps cash from securities into commodities
+                # as needed for futures margin, so the universal number is
+                # what's actually available for new futures positions.
+                avail = vals.get("AvailableFunds", 0) or avail_c
+                max_contracts = int(avail / (margin * (1 + self._config.margin_buffer_pct))) if margin > 0 else 0
                 self._logger.log(
                     "margin_account_state",
                     account=primary_account,
                     nlv=round(vals.get("NetLiquidation", 0), 2),
                     nlv_c=round(nlv_c, 2),
+                    avail=round(vals.get("AvailableFunds", 0), 2),
                     avail_c=round(avail_c, 2),
+                    excess=round(vals.get("ExcessLiquidity", 0), 2),
+                    excess_c=round(vals.get("ExcessLiquidity-C", 0), 2),
+                    buying_power=round(vals.get("BuyingPower", 0), 2),
+                    cash=round(vals.get("TotalCashValue", 0), 2),
+                    cash_c=round(vals.get("TotalCashValue-C", 0), 2),
                     init_margin_c=round(vals.get("InitMarginReq-C", 0), 2),
                     per_contract=round(margin, 2),
                     max_new_contracts=max_contracts,
@@ -370,7 +385,9 @@ class MarginTracker:
         Subtracts _reserved_margin to account for pending orders that have been
         placed but not yet reflected in IB's accountValues snapshot.
 
-        Priority: AvailableFunds-C → AvailableFunds → 0.0
+        Priority: AvailableFunds (universal, post-sweep) → AvailableFunds-C → 0.0
+        IB auto-sweeps cash from securities into the C-segment as needed for
+        futures margin, so the universal value is what's actually usable.
         """
         if self._config.dry_run or not self._conn.is_connected:
             return self._time_aware_fallback() * 3  # Assume 3-contract capacity in dry_run
@@ -378,7 +395,7 @@ class MarginTracker:
         raw_available = 0.0
         try:
             account_values = self._conn.ib.accountValues()
-            for tag in ("AvailableFunds-C", "AvailableFunds"):
+            for tag in ("AvailableFunds", "AvailableFunds-C"):
                 for av in account_values:
                     if av.tag != tag or av.currency != "USD":
                         continue
