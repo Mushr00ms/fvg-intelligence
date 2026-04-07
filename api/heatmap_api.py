@@ -709,6 +709,18 @@ def api_trade_fullday(
 _BOT_STATE_DIR = os.path.join(_REPO_ROOT, "bot", "bot_state")
 _BOT_LOG_DIR = os.path.join(_REPO_ROOT, "bot", "logs")
 _BOT_DB_PATH = os.path.join(_REPO_ROOT, "bot", "bot_state", "bot_trades.db")
+_BOT_DEPOSITS_PATH = os.path.join(_REPO_ROOT, "bot", "bot_state", "deposits.json")
+
+
+def _load_deposits():
+    """Load deposit/withdrawal ledger. Each entry: {ts, amount_usd, note}.
+    ts is ISO-8601. amount_usd positive for deposits, negative for withdrawals."""
+    try:
+        with open(_BOT_DEPOSITS_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
 
 
 def _today_str():
@@ -736,7 +748,7 @@ def api_bot_state():
     if not os.path.exists(state_file):
         # Try any .json in the dir
         for f in sorted(os.listdir(_BOT_STATE_DIR), reverse=True):
-            if f.endswith(".json"):
+            if f.endswith(".json") and f != "deposits.json":
                 state_file = os.path.join(_BOT_STATE_DIR, f)
                 break
     if not os.path.exists(state_file):
@@ -868,6 +880,7 @@ def api_bot_stats():
             "equity": db.get_equity_curve(limit=500),
             "hourly": db.get_hourly_performance(),
             "funnel": db.get_funnel(_today_str()),
+            "deposits": _load_deposits(),
         })
     except Exception as e:
         return JSONResponse({"error": str(e)})
@@ -891,7 +904,7 @@ def api_bot_equity_curve():
     if not db:
         return JSONResponse({"error": "No bot database found"})
     try:
-        return JSONResponse({"equity": db.get_equity_curve(limit=200)})
+        return JSONResponse({"equity": db.get_equity_curve(limit=200), "deposits": _load_deposits()})
     except Exception as e:
         return JSONResponse({"error": str(e)})
 

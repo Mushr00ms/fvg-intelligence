@@ -594,19 +594,45 @@ async function refreshEquityChart() {
     const res = await fetch(`${API}/api/bot/stats`);
     const data = await res.json();
     const eq = data.equity || [];
+    const deposits = data.deposits || [];
     if (!eq.length) return;
 
-    // Build data: start balance + each trade exit
+    // Build merged timeline of trade exits and deposit events.
+    // Trades' balance_after is computed from a frozen daily start_balance and
+    // does NOT include deposits, so we add cumulative deposits at render time.
     const startBal = eq[0].balance_after - eq[0].net_pnl;
+    const events = [];
+    eq.forEach(t => {
+      const ts = t.exit_time || t.trade_date;
+      events.push({ kind: 'trade', ts, raw: t });
+    });
+    deposits.forEach(d => {
+      events.push({ kind: 'deposit', ts: d.ts, raw: d });
+    });
+    events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+
     const labels = ['Start'];
     const balData = [startBal];
-    const colors = [];
+    const pointKinds = ['start'];
+    let cumDeposits = 0;
+    let lastTradeBal = startBal;
+    let tradeIdx = 0;
 
-    eq.forEach(t => {
-      const dt = t.exit_time ? t.exit_time.split('T')[0] : t.trade_date;
-      const time = t.exit_time ? t.exit_time.split('T')[1]?.substring(0,5) : '';
-      labels.push(`#${labels.length} ${time}`);
-      balData.push(t.balance_after);
+    events.forEach(ev => {
+      if (ev.kind === 'trade') {
+        tradeIdx += 1;
+        lastTradeBal = ev.raw.balance_after;
+        const time = ev.raw.exit_time ? ev.raw.exit_time.split('T')[1]?.substring(0,5) : '';
+        labels.push(`#${tradeIdx} ${time}`);
+        balData.push(lastTradeBal + cumDeposits);
+        pointKinds.push('trade');
+      } else {
+        cumDeposits += Number(ev.raw.amount_usd) || 0;
+        const dt = (ev.ts || '').split('T');
+        labels.push(`+ ${dt[0] || ''} ${(dt[1] || '').substring(0,5)}`);
+        balData.push(lastTradeBal + cumDeposits);
+        pointKinds.push('deposit');
+      }
     });
 
     const ctx = document.getElementById('equity-chart');
@@ -639,7 +665,8 @@ async function refreshEquityChart() {
           pointRadius: 4,
           pointHoverRadius: 7,
           pointBackgroundColor: balData.map((v, i) =>
-            i === 0 ? 'rgba(140,140,140,0.8)' :
+            pointKinds[i] === 'start' ? 'rgba(140,140,140,0.8)' :
+            pointKinds[i] === 'deposit' ? 'rgba(96,165,250,1)' :
             v >= balData[i-1] ? 'rgba(0,229,160,1)' : 'rgba(239,68,68,1)'
           ),
           pointBorderColor: '#0d1117',
@@ -666,7 +693,9 @@ async function refreshEquityChart() {
               afterLabel: ctx => {
                 if (ctx.dataIndex === 0) return '';
                 const diff = ctx.parsed.y - balData[ctx.dataIndex - 1];
-                return 'Trade: ' + (diff >= 0 ? '+' : '') + '$' + Math.round(diff).toLocaleString();
+                const kind = pointKinds[ctx.dataIndex];
+                const tag = kind === 'deposit' ? 'Deposit' : 'Trade';
+                return tag + ': ' + (diff >= 0 ? '+' : '') + '$' + Math.round(diff).toLocaleString();
               }
             }
           }
