@@ -25,7 +25,7 @@ class CryptoBotConfig:
     base_url: str = "https://fapi.binance.com"
     ws_base_url: str = "wss://fstream.binance.com"
     recv_window: int = 5000
-    leverage: int = 10
+    leverage: int = 4
     margin_type: str = "CROSSED"
     position_mode: str = "HEDGE"
     user_stream_keepalive: int = 1800
@@ -36,20 +36,20 @@ class CryptoBotConfig:
     # Strategy / execution
     min_fvg_bps: float = 5.0
     mitigation_window_5m: int = 90
-    risk_per_trade: float = 0.01
+    risk_per_trade: float = 0.006
     maker_fee: float = 0.0
     tp_fee: float = 0.0
     stop_fee: float = 0.0004
     max_concurrent: int = 4
     max_cumulative_risk_pct: float = 0.05
     max_daily_loss_pct: float = 0.10
-    max_margin_usage_pct: float = 0.70
+    max_margin_usage_pct: float = 1.0
     min_liquidation_buffer_pct: float = 0.05
     allow_start_with_open_positions: bool = False
     resume_managed_positions: bool = True
 
     # Ops
-    starting_balance: float = 10000.0
+    starting_balance: float = 50000.0
     save_interval_seconds: int = 15
     daily_reset_timezone: str = "America/New_York"
     market_timezone: str = "America/New_York"

@@ -1,20 +1,6 @@
 {
   "strategies": [
     {
-      "id": "mixed-best-ev-v3-touch-moderate",
-      "name": "Mixed Best EV v3 +touch moderate",
-      "description": "v4: split 40-80 bucket into 40-50 and 50-200. touch=fill model. Kelly 3% on 40-50/50-200pt. Dec 20 hard gate.",
-      "source_dataset": "rr_nq_5min_5y_30min",
-      "ticker": "NQ",
-      "timeframe": "5min",
-      "cell_count": 35,
-      "enabled_count": 35,
-      "weighted_ev": 0.177,
-      "expected_trades_per_day": 4.9031,
-      "created_at": "2026-03-23T22:07:25.076857+00:00",
-      "updated_at": "2026-03-31T00:00:00.000000+00:00"
-    },
-    {
       "id": "btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15",
       "name": "btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15",
       "description": "Walk-forward BTC strategy: train<= 2024, prune on 2025, EV>=0.07, samples>=200, setups=mit_only, prune>=15.",
@@ -29,20 +15,20 @@
       "updated_at": "2026-04-01T23:49:20.072679"
     },
     {
-      "id": "btc-5min-locked-ev007-s30-both",
-      "name": "btc-5min-locked-ev007-s30-both",
-      "description": "Locked fee-aware exact EV strategy: EV>=0.07, 30+ samples, both, 165 cells, ~18.0 trades/day, 2025 replay DD 7.8%, Sharpe 8.078.",
-      "source_dataset": "rr_btcusdt_5min_5y_60min",
-      "ticker": "BTCUSDT",
+      "id": "mixed-best-ev-wf-2020-2025-slotbl-non3",
+      "name": "Mixed Best EV WF Train 2020-2025 + slot blackout 12-13:30 + drop n=3.0",
+      "description": "LIVE candidate (locked 2026-04-08). Walk-forward NQ 5min: cells fit on 2020-01-01..2025-12-31, unbounded selector + drop negative-train-PnL cells, then drop entire 12:00-12:30 and 13:00-13:30 time slots, then drop all rr=3.0 cells. Full Kelly tiers (0.5%/1.5%/3.0%). Discovered via WF time-slot analysis: 12:00-12:30 lost in 4/6 years (-$6k 6y sum), 13:00-13:30 lost in 4/6 years (-$12k 6y sum, biggest negative slot). Full 6-year WF series: 2021 +90.1% / 2022 +48.2% / 2023 +23.9% / 2024 -11.2% / 2025 +68.3% / 2026 YTD +21.1%. 5y sum +219.3 (vs combo +192.7). Worst max DD 31.0% (2024). 2026 YTD: +21.1% / PF 1.12 / DD 21.2%.",
+      "source_dataset": "rr_nq_5min_2020_2025_30min",
+      "ticker": "NQ",
       "timeframe": "5min",
-      "cell_count": 165,
-      "enabled_count": 165,
-      "weighted_ev": 0.1372,
-      "expected_trades_per_day": 17.96,
-      "created_at": "2026-04-07T13:19:37.791818+00:00",
-      "updated_at": "2026-04-07T13:19:37.791818+00:00"
+      "cell_count": 40,
+      "enabled_count": 40,
+      "weighted_ev": 0.1563,
+      "expected_trades_per_day": 4.402,
+      "created_at": "2026-04-08T16:30:00.000000+00:00",
+      "updated_at": "2026-04-08T16:30:00.000000+00:00"
     }
   ],
-  "active_strategy": "mixed-best-ev-v3-touch-moderate",
-  "last_updated": "2026-04-07T13:19:37.791818+00:00"
+  "active_strategy": "mixed-best-ev-wf-2020-2025-slotbl-non3",
+  "last_updated": "2026-04-09T00:00:00.000000+00:00"
 }

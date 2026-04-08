@@ -33,6 +33,15 @@ class BinanceMarketData:
             "interval": k["i"],
         }
 
+    def _parse_agg_trade(self, payload: dict) -> dict:
+        return {
+            "trade_time": self._ms_to_iso(int(payload["T"])),
+            "event_time": self._ms_to_iso(int(payload["E"])),
+            "price": float(payload["p"]),
+            "quantity": float(payload["q"]),
+            "symbol": payload["s"],
+        }
+
     async def start(self):
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
@@ -87,3 +96,25 @@ class BinanceMarketData:
                 if not k.get("x"):
                     continue
                 yield self._parse_kline(k)
+
+    async def stream_market_events(self, symbol: str, intervals: list[str], *, include_agg_trade: bool = False):
+        if self._session is None:
+            await self.start()
+        streams = [f"{symbol.lower()}@kline_{interval}" for interval in intervals]
+        if include_agg_trade:
+            streams.append(f"{symbol.lower()}@aggTrade")
+        url = f"{self._ws_base_url}/stream?streams={'/'.join(streams)}"
+        async with self._session.ws_connect(url, heartbeat=20) as ws:
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(msg.data)
+                data = payload.get("data", {})
+                event_type = data.get("e")
+                if event_type == "kline":
+                    kline = data.get("k", {})
+                    if not kline.get("x"):
+                        continue
+                    yield {"type": "kline", "bar": self._parse_kline(kline)}
+                elif include_agg_trade and event_type == "aggTrade":
+                    yield {"type": "agg_trade", "tick": self._parse_agg_trade(data)}

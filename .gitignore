@@ -62,6 +62,15 @@ scripts/btc_sweep_results/leverage_sweep*.json
 scripts/btc_sweep_results/walkforward_btc_risk_tiers*.json
 scripts/btc_sweep_results/official_audit_trades_2026*.json
 scripts/btc_sweep_results/official_audit_trades_2020_2026ytd.json
+scripts/btc_sweep_results/15min_results/*.json
+scripts/btc_sweep_results/btc_*.json
+scripts/btc_sweep_results/btcusdc_*.json
+scripts/btc_sweep_results/marginal_*.json
+scripts/btc_sweep_results/official_audit_trades_BTCUSDC_*.json
+scripts/btc_sweep_results/tmp_*.json
+
+# Repo-local Binance downloads
+data/
 
 # Databento downloads
 GLBX-*.zip
@@ -75,3 +84,4 @@ security/sbom.json
 scripts/sol_sweep_results/sweep_trades.json
 scripts/sol_sweep_results/per_config/
 scripts/sol_sweep_results/2026/sweep_trades.json
+scripts/sol_sweep_results/2026/

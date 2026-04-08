@@ -119,8 +119,8 @@ def get_stats_filename_prefix():
 
 # --- Data Analysis Configuration ---
 period = os.environ.get("FVG_PERIOD", "5 years")  # overrideable via env var
-custom_start = None
-custom_end = None
+custom_start = os.environ.get("FVG_START") or None
+custom_end = os.environ.get("FVG_END") or None
 
 # Load market-specific configuration
 MARKET_CONFIG = load_market_config(PRIMARY_MARKET)

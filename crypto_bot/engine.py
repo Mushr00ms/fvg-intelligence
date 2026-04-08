@@ -19,6 +19,7 @@ from crypto_bot.execution import BinanceExecutionManager
 from crypto_bot.fvg import ActiveFVGManager, parse_ts
 from crypto_bot.market_data import BinanceMarketData
 from crypto_bot.models import OrderIntent, new_runtime_state
+from crypto_bot.daily_report import build_daily_reconciliation_report
 from crypto_bot.reconciliation import reconcile_runtime_state
 from crypto_bot.risk import CryptoRiskManager
 from crypto_bot.state_store import StateStore
@@ -80,6 +81,13 @@ class CryptoBotEngine:
     async def _startup(self):
         self.clock.sync()
         self.strategy.load()
+        strategy_ticker = (self.strategy.strategy or {}).get("meta", {}).get("ticker")
+        if strategy_ticker and strategy_ticker != self.config.symbol:
+            self.logger.log(
+                "crypto_strategy_ticker_mismatch",
+                strategy_ticker=strategy_ticker,
+                execution_symbol=self.config.symbol,
+            )
         await self.market_data.start()
         await self.client.start()
         self.rules = await self.client.get_symbol_rules(self.config.symbol)
@@ -154,6 +162,17 @@ class CryptoBotEngine:
         if state is None:
             self.state = new_runtime_state(self.config.symbol, self.strategy.strategy_id, today, balance)
         else:
+            if state.symbol != self.config.symbol or state.strategy_id != self.strategy.strategy_id:
+                self.logger.log(
+                    "crypto_state_reset",
+                    reason="strategy_or_symbol_mismatch",
+                    previous_symbol=state.symbol,
+                    previous_strategy_id=state.strategy_id,
+                    new_symbol=self.config.symbol,
+                    new_strategy_id=self.strategy.strategy_id,
+                )
+                self.state = new_runtime_state(self.config.symbol, self.strategy.strategy_id, today, balance)
+                return
             self.state = state
             if self.state.day != today:
                 self.state.reset_for_new_day(today)
@@ -270,17 +289,38 @@ class CryptoBotEngine:
     async def _run_forever(self):
         while not self._shutdown:
             try:
-                async for bar in self.market_data.stream_closed_klines(self.config.symbol, ["1m", "5m"]):
-                    if self._shutdown:
-                        break
-                    self._roll_day_if_needed()
-                    if bar["interval"] == "5m":
-                        self.fvg_mgr.on_5m_close(bar)
-                        self.state.active_fvgs = self.fvg_mgr.active
-                    else:
-                        mitigated = self.fvg_mgr.scan_1m_close(bar)
-                        self.state.active_fvgs = self.fvg_mgr.active
-                        await self._process_mitigations(mitigated)
+                if self.config.dry_run:
+                    async for event in self.market_data.stream_market_events(
+                        self.config.symbol,
+                        ["1m", "5m"],
+                        include_agg_trade=True,
+                    ):
+                        if self._shutdown:
+                            break
+                        await self._roll_day_if_needed()
+                        if event["type"] == "agg_trade":
+                            self._process_dry_run_tick(event["tick"])
+                            continue
+                        bar = event["bar"]
+                        if bar["interval"] == "5m":
+                            self.fvg_mgr.on_5m_close(bar)
+                            self.state.active_fvgs = self.fvg_mgr.active
+                        else:
+                            mitigated = self.fvg_mgr.scan_1m_close(bar)
+                            self.state.active_fvgs = self.fvg_mgr.active
+                            await self._process_mitigations(mitigated)
+                else:
+                    async for bar in self.market_data.stream_closed_klines(self.config.symbol, ["1m", "5m"]):
+                        if self._shutdown:
+                            break
+                        await self._roll_day_if_needed()
+                        if bar["interval"] == "5m":
+                            self.fvg_mgr.on_5m_close(bar)
+                            self.state.active_fvgs = self.fvg_mgr.active
+                        else:
+                            mitigated = self.fvg_mgr.scan_1m_close(bar)
+                            self.state.active_fvgs = self.fvg_mgr.active
+                            await self._process_mitigations(mitigated)
                 if not self._shutdown:
                     raise RuntimeError("market data stream closed")
             except asyncio.CancelledError:
@@ -303,6 +343,14 @@ class CryptoBotEngine:
 
         candidates = []
         for fvg in mitigated:
+            self.logger.log(
+                "crypto_fvg_mitigated",
+                symbol=self.config.symbol,
+                fvg_id=fvg.fvg_id,
+                fvg_type=fvg.fvg_type,
+                time_period=fvg.time_period,
+                mitigation_time=fvg.mitigation_time,
+            )
             for setup in ("mit_extreme", "mid_extreme"):
                 intent = self.risk_mgr.build_intent(fvg, setup, balance=available_balance)
                 if intent is not None:
@@ -342,11 +390,11 @@ class CryptoBotEngine:
 
             fvg.orders_placed.append(setup)
             if self.config.dry_run:
-                intent.status = "DRY_RUN"
-                self.state.closed_trades.append(intent)
+                intent.status = "PAPER_PENDING"
+                self.state.pending_entries.append(intent)
                 self.state.trade_count += 1
                 self.logger.log(
-                    "crypto_dry_run_intent",
+                    "crypto_paper_entry_submitted",
                     group_id=intent.group_id,
                     fvg_id=fvg.fvg_id,
                     setup=setup,
@@ -411,11 +459,11 @@ class CryptoBotEngine:
 
             fvg.orders_placed.append(setup)
             if self.config.dry_run:
-                intent.status = "DRY_RUN"
-                self.state.closed_trades.append(intent)
+                intent.status = "PAPER_PENDING"
+                self.state.pending_entries.append(intent)
                 self.state.trade_count += 1
                 self.logger.log(
-                    "crypto_dry_run_intent",
+                    "crypto_paper_entry_submitted",
                     group_id=intent.group_id,
                     fvg_id=fvg.fvg_id,
                     setup=setup,
@@ -442,6 +490,86 @@ class CryptoBotEngine:
                 )
 
             self.state_store.save(self.state)
+
+    def _process_dry_run_tick(self, tick: dict):
+        price = float(tick["price"])
+        tick_time = tick["trade_time"]
+
+        pending_fills = []
+        for intent in list(self.state.pending_entries):
+            if intent.side == "BUY":
+                filled = price <= intent.entry_price
+            else:
+                filled = price >= intent.entry_price
+            if not filled:
+                continue
+            pending_fills.append(intent)
+
+        for intent in pending_fills:
+            intent.status = "OPEN"
+            intent.filled_qty = intent.quantity
+            intent.avg_entry_price = intent.entry_price
+            intent.opened_at = tick_time
+            self._move_pending_to_open(intent)
+            self.logger.log(
+                "crypto_paper_entry_filled",
+                group_id=intent.group_id,
+                side=intent.side,
+                position_side=intent.position_side,
+                filled_qty=intent.filled_qty,
+                entry_price=intent.avg_entry_price,
+                fill_time=tick_time,
+            )
+
+        closings = []
+        for intent in list(self.state.open_positions):
+            if intent.opened_at and parse_ts(tick_time) <= parse_ts(intent.opened_at):
+                continue
+
+            exit_reason = None
+            exit_price = 0.0
+            if intent.side == "BUY":
+                if price <= intent.stop_price:
+                    exit_reason = "SL"
+                    exit_price = intent.stop_price
+                elif price >= intent.target_price:
+                    exit_reason = "TP"
+                    exit_price = intent.target_price
+            else:
+                if price >= intent.stop_price:
+                    exit_reason = "SL"
+                    exit_price = intent.stop_price
+                elif price <= intent.target_price:
+                    exit_reason = "TP"
+                    exit_price = intent.target_price
+
+            if exit_reason:
+                closings.append((intent, exit_reason, exit_price))
+
+        for intent, exit_reason, exit_price in closings:
+            qty = intent.filled_qty or intent.quantity
+            entry_price = intent.avg_entry_price or intent.entry_price
+            price_delta = (exit_price - entry_price) if intent.side == "BUY" else (entry_price - exit_price)
+            intent.exit_reason = exit_reason
+            intent.exit_price = exit_price
+            intent.closed_at = tick_time
+            intent.realized_pnl = round(
+                (price_delta * qty) - self._exit_fees(intent, qty, exit_price, exit_reason),
+                8,
+            )
+            intent.status = "CLOSED"
+            self.state.realized_pnl += intent.realized_pnl
+            self.state.current_balance += intent.realized_pnl
+            self._move_open_to_closed(intent)
+            self.logger.log(
+                "crypto_paper_position_closed",
+                group_id=intent.group_id,
+                exit_reason=exit_reason,
+                exit_price=exit_price,
+                exit_time=tick_time,
+                realized_pnl=intent.realized_pnl,
+                current_balance=self.state.current_balance,
+            )
 
     def _mitigation_priority(self, intent: OrderIntent):
         if intent.side == "BUY":
@@ -635,9 +763,33 @@ class CryptoBotEngine:
     def _current_day(self) -> str:
         return self.clock.now_utc().astimezone(self._reset_tz).strftime("%Y-%m-%d")
 
-    def _roll_day_if_needed(self):
+    async def _roll_day_if_needed(self):
         today = self._current_day()
         if self.state.day != today:
+            report_day = self.state.day
+            report = build_daily_reconciliation_report(
+                self.state,
+                mode=self.config.execution_mode,
+                report_tz=self.config.daily_reset_timezone,
+            )
+            self.logger.log(
+                "crypto_daily_reconciliation",
+                date=report_day,
+                start_balance=self.state.start_balance,
+                end_balance=self.state.current_balance,
+                realized_pnl=self.state.realized_pnl,
+                trade_count=self.state.trade_count,
+                closed_trades=len([
+                    trade for trade in self.state.closed_trades
+                    if trade.closed_at
+                    and trade.exit_reason
+                    and parse_ts(trade.closed_at).astimezone(self._reset_tz).strftime("%Y-%m-%d") == report_day
+                ]),
+                open_positions=len(self.state.open_positions),
+                pending_entries=len(self.state.pending_entries),
+            )
+            if self.telegram.enabled:
+                await self.telegram.alert_reconciliation(report)
             self.logger.log(
                 "crypto_new_day",
                 old_day=self.state.day,

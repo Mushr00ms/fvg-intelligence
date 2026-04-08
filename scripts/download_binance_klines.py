@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Download Binance official OHLCV klines for BTCUSDT (1m + 5m) and audit against our resampled data."""
+"""Download Binance official USD-M futures klines (1m + 5m)."""
 
+from __future__ import annotations
+
+import argparse
 import hashlib
 import os
-import sys
 import zipfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -12,8 +14,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-BASE = "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT"
-OUT_DIR = Path("/home/cr0wn/binance_data/official_klines")
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUT_DIR = ROOT / "data" / "binance_official"
 
 def get_session():
     s = requests.Session()
@@ -21,9 +23,10 @@ def get_session():
     s.mount("https://", HTTPAdapter(max_retries=retry))
     return s
 
-def download_klines(interval, start_year=2020, end_year=None):
+def download_klines(symbol: str, interval: str, out_dir: Path, start_year=2020, end_year=None):
     """Download monthly kline ZIPs for given interval."""
-    out = OUT_DIR / interval
+    base = f"https://data.binance.vision/data/futures/um/monthly/klines/{symbol}"
+    out = out_dir / symbol / interval
     out.mkdir(parents=True, exist_ok=True)
     session = get_session()
     last_complete_month = date.today().replace(day=1) - timedelta(days=1)
@@ -40,8 +43,8 @@ def download_klines(interval, start_year=2020, end_year=None):
             tag = f"{year}-{month:02d}"
             if tag > last_complete_tag:
                 break
-            fname = f"BTCUSDT-{interval}-{tag}.zip"
-            url = f"{BASE}/{interval}/{fname}"
+            fname = f"{symbol}-{interval}-{tag}.zip"
+            url = f"{base}/{interval}/{fname}"
             dest = out / fname
             csv_name = fname.replace(".zip", ".csv")
             csv_dest = out / csv_name
@@ -92,13 +95,25 @@ def download_klines(interval, start_year=2020, end_year=None):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--start-year", type=int, default=2020)
+    parser.add_argument("--end-year", type=int, default=None)
+    parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
+    parser.add_argument("--intervals", default="1m,5m", help="Comma-separated list, e.g. 1m,5m")
+    args = parser.parse_args()
+
+    out_dir = Path(args.out_dir)
+    intervals = [item.strip() for item in args.intervals.split(",") if item.strip()]
     for interval in ["1m", "5m"]:
+        if interval not in intervals:
+            continue
         print(f"\n=== Downloading {interval} klines ===")
-        d, s, f = download_klines(interval)
+        d, s, f = download_klines(args.symbol, interval, out_dir, start_year=args.start_year, end_year=args.end_year)
         print(f"  {d} downloaded, {s} skipped, {f} failed")
 
         # Count CSVs
-        csvs = list((OUT_DIR / interval).glob("*.csv"))
+        csvs = list((out_dir / args.symbol / interval).glob("*.csv"))
         print(f"  {len(csvs)} CSVs available")
 
 

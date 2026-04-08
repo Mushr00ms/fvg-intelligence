@@ -739,6 +739,23 @@ def run_backtest(df_1s, strategy, config=None):
     use_tier_reset = config.get("tier_reset", False) and use_risk_tiers
     _tier_reduced = False  # Persists across days
 
+    # Defensive loss-streak sizing — halve risk after each loss, reset on first win
+    # Streak counter persists across days (no daily reset).
+    use_loss_streak = config.get("loss_streak", False)
+    loss_streak_floor = config.get("loss_streak_floor", 0.0025)
+    _loss_streak = 0  # Number of consecutive losses since last win (persistent)
+
+    # Binary defensive switch — after N consecutive losses, halve tiers; first win restores
+    use_streak_defensive = config.get("streak_defensive", False)
+    streak_defensive_after = config.get("streak_defensive_after", 3)
+    _defensive_active = False  # Persistent across days, flips on streak threshold
+
+    # MNQ contract switching — use micro contracts when calculated NQ contracts < 1
+    use_mnq = config.get("use_mnq", False)
+    mnq_zero_policy = config.get("mnq_zero", "trade")  # "trade" or "skip"
+    POINT_VALUE_MNQ = 2.0
+    MARGIN_MNQ = 3300.0  # Intraday MNQ margin (~10% of NQ)
+
     strategy_lookup = build_strategy_lookup(strategy)
     sizing_label = "streak" if use_streak else ("tier_reset" if use_tier_reset else ("risk_tiers" if use_risk_tiers else "uniform"))
     print(f"Strategy: {strategy.get('meta', {}).get('name', '?')} ({len(strategy_lookup)} cells)")
@@ -1041,18 +1058,54 @@ def run_backtest(df_1s, strategy, config=None):
                 else:
                     _rpct = risk_pct
                     risk_budget = running_balance * _rpct
-                contracts = max(1, math.floor(risk_budget / (risk_pts * POINT_VALUE)))
+
+                # Loss-streak halving (defensive): _rpct = max(floor, base * 0.5^streak)
+                if use_loss_streak and _loss_streak > 0:
+                    _orig_pct = _rpct
+                    _rpct = max(loss_streak_floor, _rpct * (0.5 ** _loss_streak))
+                    risk_budget = running_balance * _rpct
+                    if _rpct != _orig_pct:
+                        _dd_notes.append(f"loss-streak {_loss_streak}: {_orig_pct:.3%}→{_rpct:.3%}")
+
+                # Binary defensive: if active (streak > N), halve tiers until first win
+                if use_streak_defensive and _defensive_active:
+                    _orig_pct = _rpct
+                    _rpct = _rpct * 0.5
+                    risk_budget = running_balance * _rpct
+                    _dd_notes.append(f"defensive ON ({_loss_streak}L): {_orig_pct:.3%}→{_rpct:.3%}")
+
+                # Choose contract type: prefer NQ when ≥1; else MNQ if enabled
+                _contract_type = "NQ"
+                _eff_point_value = POINT_VALUE
+                _eff_margin = margin_per_contract
+                contracts = math.floor(risk_budget / (risk_pts * POINT_VALUE))
+                if contracts < 1:
+                    if use_mnq:
+                        _mnq = math.floor(risk_budget / (risk_pts * POINT_VALUE_MNQ))
+                        if _mnq < 1:
+                            if mnq_zero_policy == "skip":
+                                _dd_notes.append("MNQ=0 skip")
+                                continue
+                            _mnq = 1
+                            _dd_notes.append("MNQ=0 floor→1")
+                        contracts = _mnq
+                        _contract_type = "MNQ"
+                        _eff_point_value = POINT_VALUE_MNQ
+                        _eff_margin = MARGIN_MNQ
+                        _dd_notes.append(f"MNQ x{contracts}")
+                    else:
+                        contracts = 1  # legacy: floor at 1 NQ
 
                 # Per-trade risk gate — use same rate that sized the position
-                _gate_pct = _rpct if (use_risk_tiers or use_streak) else risk_pct
-                if risk_pts * POINT_VALUE * contracts > running_balance * _gate_pct * 1.01:
-                    contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * POINT_VALUE)))
+                _gate_pct = _rpct if (use_risk_tiers or use_streak or use_loss_streak) else risk_pct
+                if risk_pts * _eff_point_value * contracts > running_balance * _gate_pct * 1.01:
+                    contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * _eff_point_value)))
 
                 # Margin cap — can't exceed what available margin supports
                 # Subtract day_margin_reserved to model concurrent bracket orders
                 # (matches live bot reservation tracking)
                 _pre_margin_contracts = contracts
-                buffered_margin = margin_per_contract * (1.0 + margin_buffer_pct)
+                buffered_margin = _eff_margin * (1.0 + margin_buffer_pct)
                 _available_for_margin = max(0.0, running_balance - day_margin_reserved)
                 max_by_margin = math.floor(_available_for_margin / buffered_margin)
                 if contracts > max_by_margin:
@@ -1104,7 +1157,7 @@ def run_backtest(df_1s, strategy, config=None):
                     continue
 
                 # Reserve margin for this position (matches live bot reservation)
-                _trade_margin = contracts * margin_per_contract
+                _trade_margin = contracts * _eff_margin
                 day_margin_reserved += _trade_margin
 
                 # Walk trade with fill price (slipped if MIT), limit TP (touch)
@@ -1140,7 +1193,9 @@ def run_backtest(df_1s, strategy, config=None):
                     ))
 
                 commission = _calc_commission(contracts, day)
-                pnl_dollars = round(pnl_pts * contracts * POINT_VALUE - commission, 2)
+                if _contract_type == "MNQ":
+                    commission *= 0.5  # MNQ commission roughly half of NQ
+                pnl_dollars = round(pnl_pts * contracts * _eff_point_value - commission, 2)
 
                 # Determine is_win
                 if resolved_tp_mode == "fixed":
@@ -1208,6 +1263,20 @@ def run_backtest(df_1s, strategy, config=None):
                         if _streak_risk != _streak_base:
                             _dd_notes.append(f"streak reset→{_streak_base:.2%}")
                         _streak_risk = _streak_base
+
+                # Defensive loss-streak: increment on loss, reset on win
+                # Persists across days (no daily reset)
+                if use_loss_streak or use_streak_defensive:
+                    if is_win:
+                        if use_streak_defensive and _defensive_active:
+                            _dd_notes.append(f"defensive OFF (win, was {_loss_streak}L)")
+                        _loss_streak = 0
+                        _defensive_active = False
+                    else:
+                        _loss_streak += 1
+                        if use_streak_defensive and not _defensive_active and _loss_streak >= streak_defensive_after:
+                            _defensive_active = True
+                            _dd_notes.append(f"defensive ON (loss #{_loss_streak} >= {streak_defensive_after})")
 
                 # Emergency halt: -10% of day-start balance → catastrophic protection
                 if not emergency_halt and day_start_balance > 0 and daily_pnl <= -(day_start_balance * 0.10):
@@ -1634,6 +1703,18 @@ def main():
                         help="Skip far FVG when near.stop == far.entry (mirrors live margin-priority behavior)")
     parser.add_argument("--output", help="Export trades to CSV")
     parser.add_argument("--json-output", help="Export full results as JSON (for dashboard)")
+    parser.add_argument("--loss-streak", action="store_true",
+                        help="Defensive anti-martingale: halve risk after each loss, reset on first win, persists across days")
+    parser.add_argument("--loss-streak-floor", type=float, default=0.0025,
+                        help="Floor pct after streak halving (default: 0.25%%)")
+    parser.add_argument("--mnq", action="store_true",
+                        help="Switch to MNQ contracts when calculated NQ contracts < 1 (10x finer granularity)")
+    parser.add_argument("--mnq-zero", choices=["trade","skip"], default="trade",
+                        help="When MNQ also rounds to 0: trade 1 MNQ (default) or skip the trade")
+    parser.add_argument("--streak-defensive", action="store_true",
+                        help="Binary defensive: halve Kelly tiers after N consecutive losses, restore on first win (persistent across days)")
+    parser.add_argument("--streak-defensive-after", type=int, default=3,
+                        help="Halve Kelly tiers AT this loss count (default: 3 = halve at the 3rd consecutive loss)")
     args = parser.parse_args()
 
     # Load strategy
@@ -1671,6 +1752,12 @@ def main():
         "imbalance_dir": args.imbalance_dir,
         "consecutive_filter": args.consecutive_filter,
         "consecutive_near_only": args.consecutive_near_only,
+        "loss_streak": args.loss_streak,
+        "loss_streak_floor": args.loss_streak_floor,
+        "use_mnq": args.mnq,
+        "mnq_zero": args.mnq_zero,
+        "streak_defensive": args.streak_defensive,
+        "streak_defensive_after": args.streak_defensive_after,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 

@@ -109,6 +109,7 @@ class OrderIntent:
     sl_client_order_id: str = ""
     filled_qty: float = 0.0
     avg_entry_price: float = 0.0
+    opened_at: str = ""
     exit_price: float = 0.0
     exit_reason: str = ""
     realized_pnl: float = 0.0

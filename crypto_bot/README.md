@@ -29,7 +29,7 @@ This codebase is intentionally separate from the `bot/` IB/NQ runtime. It reuses
 ## Important live behavior
 
 - Time basis is `America/New_York`, matching the NQ bot's operator view.
-- The runtime now defaults to `BTCUSDC` and derives the correct Binance margin asset from exchange metadata, so balance tracking follows the symbol's settlement asset instead of assuming `USDT`.
+- The runtime derives the correct Binance margin asset from exchange metadata, so balance tracking follows the symbol's settlement asset instead of assuming `USDT`.
 - Market-data timestamps, FVG formation/mitigation times, strategy hourly buckets, and daily resets all use New York time.
 - Startup history seeding never places historical trades. It only rebuilds active FVG context.
 - In live mode the bot refuses startup if Binance already has open positions or orders, unless `allow_start_with_open_positions=true`.
@@ -41,8 +41,8 @@ This codebase is intentionally separate from the `bot/` IB/NQ runtime. It reuses
 
 ## Strategy caveat
 
-- The execution runtime is configured for `BTCUSDC`, but the current strategy artifact was not freshly re-optimized for `BTCUSDC` specifically.
-- Treat this as an execution-market switch. Strategy parity still needs separate historical validation if you want quote-asset-specific confidence.
+- The execution runtime is configured for `BTCUSDC`, while the current strategy artifact was trained on `BTCUSDT`.
+- Treat this as an execution-market switch and revalidate on `BTCUSDC` specifically before meaningful capital.
 - The repo-local tuning workflow for future strategy changes is documented in [BTC_STRATEGY_TUNING.md](/abs/path/c:/Users/cr0wn/fvg-intelligence/docs/BTC_STRATEGY_TUNING.md).
 
 ## Not finished yet
