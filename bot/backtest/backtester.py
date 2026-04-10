@@ -737,6 +737,7 @@ def run_backtest(df_1s, strategy, config=None):
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
     mit_entry_ticks = config.get("mit_entry_ticks", 0)  # MIT entry slippage (0=limit, 1-4=MIT)
+    sl_slip_ticks = config.get("sl_slip_ticks", 0)    # SL slippage ticks (stop-market fill drift)
     skip_mid_if_mit = config.get("skip_mid_if_mit", False)  # skip mid_extreme if mit_extreme level already reached
     consecutive_filter = config.get("consecutive_filter", False)  # skip near, take far
     consecutive_near_only = config.get("consecutive_near_only", False)  # skip far, take near (live behavior)
@@ -873,10 +874,41 @@ def run_backtest(df_1s, strategy, config=None):
               f"lookback={hfoiv_gate.config.lookback_sessions} sessions)")
 
     # Group 1s bars by trading day (pre-group once, avoids O(N) scan per day)
+    # (need trading_days to determine warmup range, so group first)
     df_1s['trade_date'] = df_1s['date'].dt.date
     _day_groups = {day: grp for day, grp in df_1s.groupby('trade_date')}
     trading_days = sorted(_day_groups.keys())
     print(f"Trading days: {len(trading_days)} ({trading_days[0]} → {trading_days[-1]})")
+
+    # ── HFOIV warmup: pre-feed historical sessions before first trading day ──
+    # For short runs (e.g. single-day EOD reconciliation), the gate starts
+    # with zero history and returns 1.0 (no scaling).  Pre-feeding historical
+    # imbalance sessions mirrors what the live bot does in _load_hfoiv_history().
+    if hfoiv_enabled and _imbalance_by_date:
+        first_day_str = trading_days[0].strftime("%Y%m%d")
+        warmup_dates = sorted(d for d in _imbalance_by_date if d < first_day_str)
+        warmup_dates = warmup_dates[-hfoiv_gate.config.lookback_sessions:]
+        for dstr in warmup_dates:
+            try:
+                imb_df = pd.read_parquet(_imbalance_by_date[dstr])
+                if "date" not in imb_df.columns or "imbalance" not in imb_df.columns:
+                    continue
+                if imb_df.empty:
+                    continue
+                hfoiv_gate.reset_day()
+                imb_df["date"] = pd.to_datetime(imb_df["date"])
+                if imb_df["date"].dt.tz is None:
+                    imb_df["date"] = imb_df["date"].dt.tz_localize("America/New_York")
+                for _, row in imb_df.iterrows():
+                    bar_min = row["date"].hour * 60 + row["date"].minute
+                    hfoiv_gate.update(bar_min, float(row["imbalance"]))
+            except Exception:
+                continue
+        if warmup_dates:
+            # Final reset_day flushes the last warmup session into history
+            hfoiv_gate.reset_day()
+            print(f"HFOIV warmup: pre-fed {len(warmup_dates)} historical sessions "
+                  f"(gate has {hfoiv_gate._session_count} sessions)")
 
     all_trades = []
     trade_counter = 0
@@ -1294,6 +1326,16 @@ def run_backtest(df_1s, strategy, config=None):
                 tp_exit_contracts = exit_summary["tp_exit_contracts"]
                 runner_contracts = exit_summary["runner_contracts"]
                 excursion_pts = exit_summary["excursion_pts"]
+
+                # SL slippage: stop-market orders fill worse than the stop
+                # price in real markets.  Entry/TP are limit orders (no slip).
+                if exit_reason == "SL" and sl_slip_ticks > 0:
+                    _sl_slip_pts = round_to_tick(sl_slip_ticks * TICK_SIZE)
+                    pnl_pts = round_to_tick(pnl_pts - _sl_slip_pts)
+                    if side == "BUY":
+                        exit_price = round_to_tick(exit_price - _sl_slip_pts)
+                    else:
+                        exit_price = round_to_tick(exit_price + _sl_slip_pts)
 
                 # For fixed TP wins, measure how far price went past target
                 if resolved_tp_mode == "fixed" and exit_reason == "TP":
