@@ -152,6 +152,7 @@ class TelegramAlerter:
             unsent = self._db.get_unsent_alerts(limit=1)
             if unsent:
                 self._db.mark_alert_sent(unsent[0]['id'])
+        return success
 
     async def _try_send(self, message):
         """Attempt to send, return True on success."""
@@ -226,7 +227,7 @@ class TelegramAlerter:
 
     async def alert_reconciliation(self, report_html):
         """Send EOD reconciliation report (queued for guaranteed delivery)."""
-        await self.send_queued("reconciliation", report_html)
+        return await self.send_queued("reconciliation", report_html)
 
     async def alert_bot_start(self, config, strategy_id):
         """Send bot startup notification."""

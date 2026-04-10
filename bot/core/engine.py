@@ -1874,11 +1874,13 @@ class BotEngine:
         Returns list of backtester.Trade objects.
         """
         from bot.backtest.backtester import load_1s_bars, run_backtest
-        from bot.backtest.eod_reconciler import build_backtest_config
+        from bot.backtest.eod_reconciler import build_backtest_config, load_margin_schedule
 
         strategy_dict = self.strategy.strategy
+        margin_schedule = load_margin_schedule(self.config.log_dir, date_str)
         config = build_backtest_config(
-            self.config, strategy_dict, self.daily_state.start_balance)
+            self.config, strategy_dict, self.daily_state.start_balance,
+            margin_schedule=margin_schedule)
 
         loop = asyncio.get_event_loop()
 
