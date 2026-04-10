@@ -234,10 +234,10 @@ async def run_trade(side="BUY", risk_pts=3.0):
 
     # Replace callbacks with our wrapped versions
     for trade in ib.openTrades():
-        if trade.order.orderId == og.ib_tp_order_id:
+        if og.broker_tp_order_id and trade.order.orderId == int(og.broker_tp_order_id):
             trade.filledEvent.clear()
             trade.filledEvent += _on_tp
-        elif trade.order.orderId == og.ib_sl_order_id:
+        elif og.broker_sl_order_id and trade.order.orderId == int(og.broker_sl_order_id):
             trade.filledEvent.clear()
             trade.filledEvent += _on_sl
 
@@ -273,7 +273,7 @@ async def run_trade(side="BUY", risk_pts=3.0):
     else:
         print("  WARN: Entry not filled after 10s — cancelling...")
         for trade in ib.openTrades():
-            if trade.order.orderId == og.ib_entry_order_id:
+            if og.broker_entry_order_id and trade.order.orderId == int(og.broker_entry_order_id):
                 ib.cancelOrder(trade.order)
         await asyncio.sleep(2)
         ib.disconnect()
@@ -296,7 +296,7 @@ async def run_trade(side="BUY", risk_pts=3.0):
 
         # Cancel remaining bracket legs
         for trade in ib.openTrades():
-            if trade.order.orderId in (og.ib_tp_order_id, og.ib_sl_order_id):
+            if trade.order.orderId in (int(og.broker_tp_order_id or 0), int(og.broker_sl_order_id or 0)):
                 try:
                     ib.cancelOrder(trade.order)
                 except Exception:
@@ -351,7 +351,7 @@ async def run_trade(side="BUY", risk_pts=3.0):
     # ── Cleanup ──────────────────────────────────────────────
     # Cancel any remaining orders just in case
     for trade in ib.openTrades():
-        if trade.order.orderId in (og.ib_entry_order_id, og.ib_tp_order_id, og.ib_sl_order_id):
+        if trade.order.orderId in (int(og.broker_entry_order_id or 0), int(og.broker_tp_order_id or 0), int(og.broker_sl_order_id or 0)):
             try:
                 ib.cancelOrder(trade.order)
             except Exception:

@@ -105,10 +105,10 @@ class OrderManager:
             )
             return og
 
-        # Step 1: Pre-allocate IB order IDs
-        og.ib_entry_order_id = ib.client.getReqId()
-        og.ib_tp_order_id = ib.client.getReqId()
-        og.ib_sl_order_id = ib.client.getReqId()
+        # Step 1: Pre-allocate IB order IDs (stored as str for broker-agnostic state)
+        og.broker_entry_order_id = str(ib.client.getReqId())
+        og.broker_tp_order_id = str(ib.client.getReqId())
+        og.broker_sl_order_id = str(ib.client.getReqId())
 
         # Step 2: Save state with IDs BEFORE placing
         og.state = "SUBMITTED"
@@ -121,12 +121,16 @@ class OrderManager:
 
         reverse_side = "SELL" if og.side == "BUY" else "BUY"
 
-        # Parent: limit entry
+        # Parent: limit entry (IB orderId is int; broker_*_order_id is str)
+        entry_ib_id = int(og.broker_entry_order_id)
+        tp_ib_id = int(og.broker_tp_order_id)
+        sl_ib_id = int(og.broker_sl_order_id)
+
         parent = LimitOrder(
             action=og.side,
             totalQuantity=og.target_qty,
             lmtPrice=og.entry_price,
-            orderId=og.ib_entry_order_id,
+            orderId=entry_ib_id,
             tif='DAY',
             transmit=False,
         )
@@ -136,8 +140,8 @@ class OrderManager:
             action=reverse_side,
             totalQuantity=og.target_qty,
             lmtPrice=og.target_price,
-            orderId=og.ib_tp_order_id,
-            parentId=og.ib_entry_order_id,
+            orderId=tp_ib_id,
+            parentId=entry_ib_id,
             tif='DAY',
             transmit=False,
         )
@@ -147,8 +151,8 @@ class OrderManager:
             action=reverse_side,
             totalQuantity=og.target_qty,
             stopPrice=og.stop_price,
-            orderId=og.ib_sl_order_id,
-            parentId=og.ib_entry_order_id,
+            orderId=sl_ib_id,
+            parentId=entry_ib_id,
             tif='DAY',
             transmit=True,  # Transmit the whole bracket
         )
@@ -209,7 +213,7 @@ class OrderManager:
             risk_pts=og.risk_pts,
             n=og.n_value,
             contracts=og.target_qty,
-            ib_entry_id=og.ib_entry_order_id,
+            broker_entry_id=og.broker_entry_order_id,
         )
 
         return og
@@ -235,9 +239,10 @@ class OrderManager:
         # Cancel the entry order at IB (children auto-cancel via parentId)
         if not self._config.dry_run and self._conn.is_connected:
             ib = self._conn.ib
-            if og.ib_entry_order_id:
+            if og.broker_entry_order_id:
+                entry_ib_id = int(og.broker_entry_order_id)
                 for trade in ib.openTrades():
-                    if trade.order.orderId == og.ib_entry_order_id:
+                    if trade.order.orderId == entry_ib_id:
                         ib.cancelOrder(trade.order)
                         break
 
@@ -380,12 +385,14 @@ class OrderManager:
         """Modify TP and SL order quantities to match partial fill."""
         ib = self._conn.ib
         try:
-            # Find and modify TP order
+            # Find and modify TP/SL orders (IB orderId is int)
+            tp_ib_id = int(og.broker_tp_order_id) if og.broker_tp_order_id else None
+            sl_ib_id = int(og.broker_sl_order_id) if og.broker_sl_order_id else None
             for trade in ib.openTrades():
-                if trade.order.orderId == og.ib_tp_order_id:
+                if tp_ib_id and trade.order.orderId == tp_ib_id:
                     trade.order.totalQuantity = new_qty
                     ib.placeOrder(self._contract, trade.order)
-                elif trade.order.orderId == og.ib_sl_order_id:
+                elif sl_ib_id and trade.order.orderId == sl_ib_id:
                     trade.order.totalQuantity = new_qty
                     ib.placeOrder(self._contract, trade.order)
 
@@ -445,8 +452,9 @@ class OrderManager:
         if self._config.dry_run or not self._conn.is_connected:
             return
         ib = self._conn.ib
+        entry_ib_id = int(og.broker_entry_order_id) if og.broker_entry_order_id else None
         for trade in ib.openTrades():
-            if trade.order.orderId == og.ib_entry_order_id:
+            if entry_ib_id and trade.order.orderId == entry_ib_id:
                 ib.cancelOrder(trade.order)
                 break
 
@@ -516,14 +524,17 @@ class OrderManager:
 
         for og in daily_state.open_positions:
             expected_qty = og.filled_qty or og.target_qty
-            for ib_id in (og.ib_tp_order_id, og.ib_sl_order_id):
-                if ib_id and ib_id in open_trades:
+            for broker_id in (og.broker_tp_order_id, og.broker_sl_order_id):
+                if not broker_id:
+                    continue
+                ib_id = int(broker_id)
+                if ib_id in open_trades:
                     trade = open_trades[ib_id]
                     if trade.order.totalQuantity != expected_qty:
                         self._logger.log(
                             "child_qty_mismatch_fixed",
                             group_id=og.group_id,
-                            order_id=ib_id,
+                            order_id=broker_id,
                             was=trade.order.totalQuantity,
                             expected=expected_qty,
                         )
@@ -535,14 +546,17 @@ class OrderManager:
         for og in daily_state.pending_orders:
             if og.state != "PARTIAL" or og.filled_qty <= 0:
                 continue
-            for ib_id in (og.ib_tp_order_id, og.ib_sl_order_id):
-                if ib_id and ib_id in open_trades:
+            for broker_id in (og.broker_tp_order_id, og.broker_sl_order_id):
+                if not broker_id:
+                    continue
+                ib_id = int(broker_id)
+                if ib_id in open_trades:
                     trade = open_trades[ib_id]
                     if trade.order.totalQuantity != og.filled_qty:
                         self._logger.log(
                             "child_qty_mismatch_fixed",
                             group_id=og.group_id,
-                            order_id=ib_id,
+                            order_id=broker_id,
                             was=trade.order.totalQuantity,
                             expected=og.filled_qty,
                         )
@@ -558,10 +572,11 @@ class OrderManager:
         """Cancel all orders in an order group."""
         if not self._config.dry_run and self._conn.is_connected:
             ib = self._conn.ib
-            for order_id in (og.ib_entry_order_id, og.ib_tp_order_id, og.ib_sl_order_id):
-                if order_id:
+            for broker_id in (og.broker_entry_order_id, og.broker_tp_order_id, og.broker_sl_order_id):
+                if broker_id:
+                    ib_id = int(broker_id)
                     for trade in ib.openTrades():
-                        if trade.order.orderId == order_id:
+                        if trade.order.orderId == ib_id:
                             ib.cancelOrder(trade.order)
                             break
 

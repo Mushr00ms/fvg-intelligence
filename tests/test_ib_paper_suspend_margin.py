@@ -244,7 +244,7 @@ async def main():
 
     # ── Reactivate ──────────────────────────────────────────────────
     print("[8/9] Reactivating suspended order...")
-    old_entry_id = og.ib_entry_order_id
+    old_entry_id = og.broker_entry_order_id
     reactivated = await order_mgr.reactivate_order(og, state)
     if reactivated is None:
         print("  FAIL — reactivate returned None")
@@ -252,7 +252,7 @@ async def main():
     if reactivated.state != "SUBMITTED":
         print(f"  FAIL — reactivated state={reactivated.state}, expected SUBMITTED")
         ib.disconnect(); sys.exit(1)
-    if reactivated.ib_entry_order_id == old_entry_id:
+    if reactivated.broker_entry_order_id == old_entry_id:
         print(f"  FAIL — reactivate did not assign new IB IDs "
               f"(still {old_entry_id})")
         ib.disconnect(); sys.exit(1)
@@ -262,7 +262,7 @@ async def main():
     if reactivated in state.suspended_orders:
         print("  FAIL — reactivated order still in suspended_orders")
         ib.disconnect(); sys.exit(1)
-    print(f"  OK — new entry_id={reactivated.ib_entry_order_id} "
+    print(f"  OK — new entry_id={reactivated.broker_entry_order_id} "
           f"(was {old_entry_id}), state=SUBMITTED")
 
     await asyncio.sleep(2)

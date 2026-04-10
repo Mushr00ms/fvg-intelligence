@@ -168,13 +168,13 @@ class StateManager:
         ib_order_ids = set()
         for order in ib_orders:
             if hasattr(order, "orderId"):
-                ib_order_ids.add(order.orderId)
+                ib_order_ids.add(str(order.orderId))
 
         # Check pending orders against IB
         orphaned = []
         for og in daily_state.pending_orders:
             # If our entry order ID is set but not found in IB, it was never placed
-            if og.ib_entry_order_id and og.ib_entry_order_id not in ib_order_ids:
+            if og.broker_entry_order_id and og.broker_entry_order_id not in ib_order_ids:
                 orphaned.append(og.group_id)
 
         for gid in orphaned:
@@ -270,5 +270,21 @@ class StateManager:
             data["version"] = "1.1"
             if self._logger:
                 self._logger.log("state_migrated", from_version="1.0", to_version="1.1")
+
+        if data.get("version") == "1.1":
+            # v1.2: Rename ib_*_order_id to broker_*_order_id (int→str)
+            for key in ("pending_orders", "open_positions", "closed_trades", "suspended_orders"):
+                for og in data.get(key, []):
+                    for old, new in (
+                        ("ib_entry_order_id", "broker_entry_order_id"),
+                        ("ib_tp_order_id", "broker_tp_order_id"),
+                        ("ib_sl_order_id", "broker_sl_order_id"),
+                    ):
+                        if old in og and new not in og:
+                            val = og.pop(old)
+                            og[new] = str(val) if val is not None else None
+            data["version"] = "1.2"
+            if self._logger:
+                self._logger.log("state_migrated", from_version="1.1", to_version="1.2")
 
         return data

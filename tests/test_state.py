@@ -50,14 +50,14 @@ class TestOrderGroup:
             side="BUY", entry_price=19500, stop_price=19490,
             target_price=19530, risk_pts=10, n_value=2.0, target_qty=3,
             filled_qty=2, state="PARTIAL",
-            ib_entry_order_id=100, ib_tp_order_id=101, ib_sl_order_id=102,
+            broker_entry_order_id="100", broker_tp_order_id="101", broker_sl_order_id="102",
         )
         d = og.to_dict()
         loaded = OrderGroup.from_dict(d)
         assert loaded.group_id == "og1"
         assert loaded.filled_qty == 2
         assert loaded.state == "PARTIAL"
-        assert loaded.ib_entry_order_id == 100
+        assert loaded.broker_entry_order_id == "100"
 
     def test_is_active(self):
         og = OrderGroup(
@@ -137,25 +137,28 @@ class TestDailyState:
         assert state.realized_pnl == 600
         assert len(state.closed_trades) == 1
 
-    def test_find_order_by_ib_id(self):
+    def test_find_order_by_broker_id(self):
         state = self._make_state()
-        state.pending_orders[0].ib_entry_order_id = 42
-        state.pending_orders[0].ib_tp_order_id = 43
-        found = state.find_order_by_ib_id(42)
+        state.pending_orders[0].broker_entry_order_id = "42"
+        state.pending_orders[0].broker_tp_order_id = "43"
+        found = state.find_order_by_broker_id("42")
         assert found is not None
         assert found.group_id == "og1"
-        found2 = state.find_order_by_ib_id(43)
+        found2 = state.find_order_by_broker_id("43")
         assert found2 is not None
-        assert state.find_order_by_ib_id(999) is None
+        assert state.find_order_by_broker_id("999") is None
+        # Backward compat alias
+        assert state.find_order_by_ib_id(42) is not None
 
 
 class TestStateManager:
     """Tests for state persistence."""
 
     def test_save_and_load(self, tmp_dir):
+        from datetime import date as dt_date
         mgr = StateManager(tmp_dir)
         state = DailyState(
-            date="2026-03-22", start_balance=76000,
+            date=dt_date.today().isoformat(), start_balance=76000,
             realized_pnl=500, trade_count=2,
         )
         mgr.save(state, force=True)

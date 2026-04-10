@@ -15,7 +15,7 @@ class BotConfig:
     """Complete bot configuration."""
 
     # Execution backend
-    execution_backend: str = "ib"   # "ib" | "binance_um"
+    execution_backend: str = "ib"   # "ib" | "binance_um" | "tradovate"
 
     # IB Connection
     ib_host: str = "127.0.0.1"
@@ -34,6 +34,16 @@ class BotConfig:
     binance_position_mode: str = "ONE_WAY" # ONE_WAY | HEDGE
     binance_default_leverage: int = 10
     binance_user_stream_keepalive: int = 1800
+
+    # Tradovate
+    tradovate_username: str = ""
+    tradovate_password: str = ""
+    tradovate_app_id: str = ""
+    tradovate_app_version: str = "1.0"
+    tradovate_cid: int = 0
+    tradovate_sec: str = ""
+    tradovate_device_id: str = ""
+    tradovate_environment: str = "demo"  # "demo" | "live"
 
     # Contract
     ticker: str = "NQ"
