@@ -971,6 +971,113 @@ def api_bot_cell_performance():
         return JSONResponse({"error": str(e)})
 
 
+def _compute_backtest_percentiles(active_id: str) -> dict:
+    """Compute weekly/monthly return percentiles from WF backtest daily P&L.
+
+    Reads all backtest runs whose strategy_id shares the same WF family as
+    the active strategy (matched by the base name pattern). Collects daily
+    P&L, groups into weeks/months as % of balance, returns percentile dict.
+
+    Returns empty dict if insufficient data.
+    """
+    import glob
+    from collections import defaultdict
+    from datetime import datetime
+
+    results_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..",
+        "bot", "backtest", "results")
+    manifest_path = os.path.join(results_dir, "manifest.json")
+
+    if not os.path.exists(manifest_path):
+        return {}
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    # Find WF family: strip year suffixes to match siblings.
+    # E.g., "mixed-best-ev-wf-2020-2025-slotbl-non3" matches
+    #        "wf-2020-test-2021-slotbl-non3" etc. via shared suffix.
+    # Simpler approach: collect all runs from the manifest (they're
+    # already curated as the WF series).
+    run_ids = [r["run_id"] for r in manifest.get("runs", [])]
+    if not run_ids:
+        return {}
+
+    all_daily = []
+    for run_id in run_ids:
+        result_path = os.path.join(results_dir, f"{run_id}.json")
+        if not os.path.exists(result_path):
+            continue
+        with open(result_path) as f:
+            data = json.load(f)
+        start_bal = data.get("meta", {}).get("balance", 80000)
+        # Build running balance from cumulative daily P&L
+        running_bal = start_bal
+        for dp in data.get("daily_pnl", []):
+            if running_bal <= 0:
+                running_bal = start_bal
+            all_daily.append({
+                "date": dp["date"],
+                "pnl_pct": dp["pnl"] / running_bal * 100,
+            })
+            running_bal += dp["pnl"]
+
+    if len(all_daily) < 50:
+        return {}
+
+    all_daily.sort(key=lambda x: x["date"])
+
+    # Group into ISO weeks and calendar months
+    weekly_pct = defaultdict(float)
+    monthly_pct = defaultdict(float)
+    for dp in all_daily:
+        dt = datetime.strptime(dp["date"], "%Y-%m-%d")
+        weekly_pct[dt.strftime("%Y-W%W")] += dp["pnl_pct"]
+        monthly_pct[dp["date"][:7]] += dp["pnl_pct"]
+
+    weeks = sorted(weekly_pct.values())
+    months = sorted(monthly_pct.values())
+
+    def _pctl(data, p):
+        k = (len(data) - 1) * p / 100
+        f = int(k)
+        c = min(f + 1, len(data) - 1)
+        return data[f] + (k - f) * (data[c] - data[f])
+
+    result = {}
+    if len(weeks) >= 20:
+        result["week"] = {
+            f"p{p}": round(_pctl(weeks, p), 4)
+            for p in (5, 10, 25, 50, 75, 90, 95)
+        }
+    if len(months) >= 6:
+        result["month"] = {
+            f"p{p}": round(_pctl(months, p), 4)
+            for p in (5, 10, 25, 50, 75, 90, 95)
+        }
+    return result
+
+
+# Cache: recompute at most once per hour
+_pctl_cache = {"data": {}, "time": 0, "strategy": ""}
+
+
+def _get_backtest_percentiles(active_id: str) -> dict:
+    """Cached wrapper for _compute_backtest_percentiles."""
+    import time as _time
+    now = _time.time()
+    if (_pctl_cache["strategy"] == active_id
+            and _pctl_cache["data"]
+            and now - _pctl_cache["time"] < 3600):
+        return _pctl_cache["data"]
+    result = _compute_backtest_percentiles(active_id)
+    _pctl_cache["data"] = result
+    _pctl_cache["time"] = now
+    _pctl_cache["strategy"] = active_id
+    return result
+
+
 def _strategy_daily_ev_pct(strat: dict) -> float:
     """Compute daily expected return as a fraction of balance from strategy cells.
 
@@ -1055,38 +1162,23 @@ def api_bot_period_pnl():
                 state = json.load(f)
             bal = (state.get("start_balance") or 80000) + (state.get("realized_pnl") or 0)
 
-            # Compute daily expected return % from active strategy
-            daily_ev_pct = _strategy_daily_ev_pct(strat) if active_id else None
-            if daily_ev_pct and daily_ev_pct > 0:
-                import math
-                # Expected PnL: p50 from empirical backtest distribution.
-                # Percentiles from 269 weeks / 64 months of WF backtest data
-                # (2021-2026), normalized as % of balance at each point.
-                #
-                # Weekly:  mean +2.19%, median +1.35%, σ 15.14%
-                # Monthly: mean +9.23%, median +6.63%, σ 23.99%
-                #
-                # We use median (p50) as "expected" since the distribution
-                # is right-skewed (mean > median due to outsized wins).
-                result["week_expected_pnl"] = round(bal * 0.0135, 0)
-                result["month_expected_pnl"] = round(bal * 0.0663, 0)
+            # Compute percentiles from WF backtest daily P&L (dynamic).
+            # Reads all runs in backtest manifest, groups daily PnL into
+            # weeks/months as % of balance, returns empirical percentiles.
+            # Cached for 1 hour. Auto-updates when strategy or backtests change.
+            pctls = _get_backtest_percentiles(active_id) if active_id else {}
+
+            if "week" in pctls:
+                wp = pctls["week"]
+                result["week_expected_pnl"] = round(bal * wp["p50"] / 100, 0)
                 result["week_pctls"] = {
-                    "p5":  round(bal * -0.1599),
-                    "p10": round(bal * -0.1258),
-                    "p25": round(bal * -0.0562),
-                    "p50": round(bal * 0.0135),
-                    "p75": round(bal * 0.0775),
-                    "p90": round(bal * 0.1762),
-                    "p95": round(bal * 0.2380),
+                    k: round(bal * v / 100) for k, v in wp.items()
                 }
+            if "month" in pctls:
+                mp = pctls["month"]
+                result["month_expected_pnl"] = round(bal * mp["p50"] / 100, 0)
                 result["month_pctls"] = {
-                    "p5":  round(bal * -0.3005),
-                    "p10": round(bal * -0.1524),
-                    "p25": round(bal * -0.0344),
-                    "p50": round(bal * 0.0663),
-                    "p75": round(bal * 0.2343),
-                    "p90": round(bal * 0.3985),
-                    "p95": round(bal * 0.4606),
+                    k: round(bal * v / 100) for k, v in mp.items()
                 }
         except Exception:
             pass
