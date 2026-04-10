@@ -23,14 +23,8 @@ def create_broker_adapter(config, logger=None, clock=None) -> BrokerAdapter:
     backend = config.execution_backend
 
     if backend == "ib":
-        # Lazy import to avoid pulling in ib_async when not needed
-        from bot.execution.ib_connection import IBConnection
-        # For now, return the IBConnection directly — the full IBAdapter
-        # wrapping will come in a subsequent step. Engine still uses
-        # IBConnection for IB mode.
-        raise NotImplementedError(
-            "IBAdapter not yet implemented — use ib_connection directly for IB mode"
-        )
+        from bot.execution.ib_adapter import IBAdapter
+        return IBAdapter(config, bot_logger=logger, clock=clock)
 
     elif backend == "tradovate":
         from bot.execution.tradovate.tradovate_adapter import TradovateAdapter

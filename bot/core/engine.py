@@ -31,9 +31,8 @@ from bot.strategy.tick_imbalance_accumulator import TickImbalanceAccumulator
 from bot.strategy.trade_calculator import calculate_setup
 from bot.risk.risk_gates import RiskGates
 from bot.risk.time_gates import TimeGates
-from bot.execution.ib_connection import IBConnection
+from bot.execution.broker_factory import create_broker_adapter
 from bot.execution.order_manager import OrderManager
-from bot.execution.position_tracker import get_account_balance, get_ib_open_orders, get_ib_positions
 from bot.alerts.telegram import TelegramAlerter
 from bot.db import TradeDB
 from bot.risk.calendar_gates import WitchingGateConfig, is_blocked_by_witching_gate
@@ -98,10 +97,9 @@ class BotEngine:
         self.strategy = StrategyLoader(config.strategy_dir, self.logger)
         self.risk_gates = RiskGates(config)
         self.time_gates = TimeGates(config, clock=self.clock)
-        self.ib_conn = IBConnection(
-            config.ib_host, config.ib_port, config.ib_client_id, self.logger,
-            clock=self.clock,
-        )
+        self.broker = create_broker_adapter(config, logger=self.logger, clock=self.clock)
+        # Backward compat alias for code that still references ib_conn
+        self.ib_conn = getattr(self.broker, 'ib_connection', None)
         self.db = TradeDB(os.path.join(config.state_dir, "bot_trades.db"))
         self.telegram = TelegramAlerter(
             config.telegram_bot_token, config.telegram_chat_id, self.logger,
@@ -197,15 +195,20 @@ class BotEngine:
 
         # 2. Connect to IB
         if not self.config.dry_run:
-            await self.ib_conn.connect()
-            self._register_ib_error_handler()
+            await self.broker.connect()
+            # IB error handler is now registered inside IBAdapter.connect()
+            # For legacy code that still calls it directly, gate on backend:
+            if self.config.execution_backend == "ib" and self.ib_conn:
+                self._register_ib_error_handler()
 
-            # 3. Resolve NQ front-month contract
-            self._contract = await self._resolve_contract()
+            # 3. Resolve contract
+            self._contract = await self.broker.resolve_contract(
+                self.config.ticker, self.config.exchange,
+            )
 
             # 4. Initialize order manager
             self.order_mgr = OrderManager(
-                self.ib_conn, self._contract, self.state_mgr, self.logger, self.config,
+                self.ib_conn or self.broker, self._contract, self.state_mgr, self.logger, self.config,
                 clock=self.clock, db=self.db,
                 on_kill_switch=self._trigger_kill_switch,
             )
@@ -215,7 +218,7 @@ class BotEngine:
                 from bot.risk.margin_tracker import MarginTracker
                 from bot.risk.margin_priority import MarginPriorityManager
                 self.margin_tracker = MarginTracker(
-                    self.ib_conn, self._contract, self.logger, self.config,
+                    self.ib_conn or self.broker, self._contract, self.logger, self.config,
                     clock=self.clock,
                 )
                 await self.margin_tracker.initialize()
@@ -231,16 +234,16 @@ class BotEngine:
         self.daily_state = self.state_mgr.load()
         if self.daily_state is None:
             balance = 76000.0  # Default; overridden by IB query if connected
-            if not self.config.dry_run and self.ib_conn.is_connected:
-                ib_balance = await get_account_balance(self.ib_conn)
+            if not self.config.dry_run and self.broker.is_connected:
+                ib_balance = await self.broker.get_account_balance()
                 if ib_balance:
                     balance = ib_balance
             self.daily_state = self.state_mgr.create_new(balance)
         else:
             # Reconcile with IB
-            if not self.config.dry_run and self.ib_conn.is_connected:
-                ib_orders = await get_ib_open_orders(self.ib_conn)
-                ib_positions = await get_ib_positions(self.ib_conn)
+            if not self.config.dry_run and self.broker.is_connected:
+                ib_orders = await self.broker.get_open_orders()
+                ib_positions = await self.broker.get_positions()
                 self.daily_state = self.state_mgr.reconcile_with_ib(
                     self.daily_state, ib_orders, ib_positions
                 )
@@ -286,11 +289,11 @@ class BotEngine:
             return
 
         # 5b. Cross-validate clock with IB server time
-        if not self.config.dry_run and self.ib_conn.is_connected:
-            await self.clock.validate_with_ib(self.ib_conn)
+        if not self.config.dry_run and self.broker.is_connected:
+            await self.clock.validate_with_broker(self.broker)
 
         # 6. Subscribe to bar data
-        if not self.config.dry_run and self.ib_conn.is_connected:
+        if not self.config.dry_run and self.broker.is_connected:
             await self._subscribe_bars()
             self._seed_recent_bars()
             self._subscribe_ticks()
@@ -310,7 +313,7 @@ class BotEngine:
                 self._session_seeded = True
 
             # 6c. Register reconnect handler (re-subscribe bars if IB drops)
-            self.ib_conn.on_reconnect(self._on_reconnect)
+            self.broker.on_reconnect(self._on_reconnect)
 
         # 7. Schedule EOD actions
         self._schedule_eod()
@@ -405,11 +408,11 @@ class BotEngine:
         """
         if self._disconnect_flatten_done:
             return
-        if self.config.dry_run or not self.ib_conn:
+        if self.config.dry_run or not self.broker:
             return
 
         max_seconds = self.config.max_disconnect_minutes * 60
-        disc_secs = self.ib_conn.disconnect_seconds
+        disc_secs = self.broker.disconnect_seconds
         if disc_secs >= max_seconds:
             self._disconnect_flatten_done = True
             self.logger.log(
@@ -451,7 +454,7 @@ class BotEngine:
         """Connect to IB and print account/position info, then disconnect."""
         print(f"\nConnecting to IB at {self.config.ib_host}:{self.config.ib_port} ...")
         try:
-            await self.ib_conn.connect()
+            await self.broker.connect()
         except Exception as e:
             print(f"CONNECTION FAILED: {e}")
             return
@@ -484,7 +487,7 @@ class BotEngine:
             print(f"  (Could not fetch positions: {e})")
 
         print("\nConnection test complete.")
-        await self.ib_conn.disconnect()
+        await self.broker.disconnect()
 
     def _calendar_gate_allows_entry(self):
         """Check strategy hard calendar gates (e.g., witching filters)."""
@@ -1243,7 +1246,7 @@ class BotEngine:
                 setup_log["hfoiv_pct"] = hfoiv_info.get("percentile")
             self.logger.log("setup_accepted", **setup_log)
 
-            if self.order_mgr and (self.config.dry_run or self.ib_conn.is_connected):
+            if self.order_mgr and (self.config.dry_run or self.broker.is_connected):
                 if self.margin_priority and not self.config.dry_run:
                     current_price = self._get_current_price()
                     margin_result = await self.margin_priority.evaluate_and_place(
@@ -1263,7 +1266,7 @@ class BotEngine:
                         return
                 else:
                     await self.order_mgr.place_bracket(order, self.daily_state)
-            elif self.order_mgr and not self.ib_conn.is_connected:
+            elif self.order_mgr and not self.broker.is_connected:
                 self.logger.log(
                     "setup_rejected", fvg_id=fvg.fvg_id,
                     gate="connection", reason="IB not connected",
@@ -1904,7 +1907,9 @@ class BotEngine:
         # EOD tasks are now wall-clock driven (no call_later handles to cancel)
 
         # Cancel tick subscription
-        if self._tick_subscription is not None and self.ib_conn.is_connected:
+        # Tick cleanup handled by broker.disconnect() for adapter-based backends.
+        # Legacy IB direct cleanup for tick subscriptions still in engine:
+        if self._tick_subscription is not None and self.ib_conn and self.broker.is_connected:
             try:
                 self.ib_conn.ib.cancelTickByTickData(self._tick_subscription)
             except Exception:
@@ -1915,8 +1920,8 @@ class BotEngine:
             self.state_mgr.save(self.daily_state, force=True)
 
         # Disconnect from IB
-        if self.ib_conn.is_connected:
-            await self.ib_conn.disconnect()
+        if self.broker.is_connected:
+            await self.broker.disconnect()
 
         self.logger.log("bot_stop", reason="shutdown")
         self.logger.close()

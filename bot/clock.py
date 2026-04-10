@@ -174,41 +174,54 @@ class Clock:
 
         return True
 
-    async def validate_with_ib(self, ib_connection):
+    async def validate_with_broker(self, broker):
         """
-        Cross-check our NTP-corrected time with IB's server time.
+        Cross-check our NTP-corrected time with the broker's server time.
         Logs a warning if they disagree by more than 1 second.
+
+        Args:
+            broker: BrokerAdapter instance (or legacy IBConnection).
         """
-        if not ib_connection.is_connected:
+        if not broker.is_connected:
             return
 
         try:
-            ib_time = await ib_connection.ib.reqCurrentTimeAsync()
-            if ib_time is None:
+            # BrokerAdapter path
+            if hasattr(broker, 'get_server_time'):
+                broker_time = await broker.get_server_time()
+            # Legacy IBConnection path
+            elif hasattr(broker, 'ib'):
+                broker_time = await broker.ib.reqCurrentTimeAsync()
+            else:
                 return
 
-            # ib_time is a datetime object (UTC)
-            ib_unix = ib_time.timestamp()
-            our_unix = self.now_utc().timestamp()
-            ib_offset = our_unix - ib_unix
+            if broker_time is None:
+                return
 
-            self._ib_offset = ib_offset
+            broker_unix = broker_time.timestamp()
+            our_unix = self.now_utc().timestamp()
+            offset = our_unix - broker_unix
+
+            self._ib_offset = offset
 
             if self._logger:
-                if abs(ib_offset) > 1.0:
+                if abs(offset) > 1.0:
                     self._logger.log(
-                        "clock_ib_mismatch",
-                        our_vs_ib_ms=round(ib_offset * 1000, 1),
-                        note="Bot clock disagrees with IB server by >1s",
+                        "clock_broker_mismatch",
+                        our_vs_broker_ms=round(offset * 1000, 1),
+                        note="Bot clock disagrees with broker server by >1s",
                     )
                 else:
                     self._logger.log(
-                        "clock_ib_validated",
-                        our_vs_ib_ms=round(ib_offset * 1000, 1),
+                        "clock_broker_validated",
+                        our_vs_broker_ms=round(offset * 1000, 1),
                     )
         except Exception as e:
             if self._logger:
-                self._logger.log("clock_ib_check_error", error=str(e))
+                self._logger.log("clock_broker_check_error", error=str(e))
+
+    # Backward compat alias
+    validate_with_ib = validate_with_broker
 
     def now(self):
         """
