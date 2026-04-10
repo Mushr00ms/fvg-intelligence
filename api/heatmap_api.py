@@ -1012,16 +1012,14 @@ def _compute_backtest_percentiles(active_id: str) -> dict:
         with open(result_path) as f:
             data = json.load(f)
         start_bal = data.get("meta", {}).get("balance", 80000)
-        # Build running balance from cumulative daily P&L
-        running_bal = start_bal
+        # Normalize daily dollar P&L as % of the run's starting balance.
+        # This gives "what fraction of my capital did I make/lose today"
+        # and sums correctly to the known annual return (72100/80000 = 90.1%).
         for dp in data.get("daily_pnl", []):
-            if running_bal <= 0:
-                running_bal = start_bal
             all_daily.append({
                 "date": dp["date"],
-                "pnl_pct": dp["pnl"] / running_bal * 100,
+                "pnl_pct": dp["pnl"] / start_bal * 100,
             })
-            running_bal += dp["pnl"]
 
     if len(all_daily) < 50:
         return {}
