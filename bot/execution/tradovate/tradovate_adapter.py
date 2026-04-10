@@ -78,19 +78,11 @@ class TradovateAdapter(BrokerAdapter):
         self._bot_logger = bot_logger
         self._clock = clock
 
-        # Auth
-        self._creds = TradovateCredentials(
-            username=config.tradovate_username,
-            password=config.tradovate_password,
-            app_id=config.tradovate_app_id,
-            app_version=config.tradovate_app_version,
-            cid=config.tradovate_cid,
-            sec=config.tradovate_sec,
-            device_id=config.tradovate_device_id,
-            environment=config.tradovate_environment,
-        )
-        self._auth = TradovateAuth(self._creds)
-        self._rest = TradovateRestClient(self._auth)
+        # Credentials loaded from AWS SSM Parameter Store at connect() time.
+        # Nothing sensitive touches config or disk.
+        self._creds: Optional[TradovateCredentials] = None
+        self._auth: Optional[TradovateAuth] = None
+        self._rest: Optional[TradovateRestClient] = None
 
         # WebSockets
         self._order_ws = TradovateWebSocket(name="order")
@@ -121,6 +113,25 @@ class TradovateAdapter(BrokerAdapter):
     # ── Connection ──────────────────────────────────────────────────────
 
     async def connect(self) -> None:
+        # Step 0: Load credentials from AWS SSM Parameter Store
+        from bot.secrets import SecretStore
+        env = self._config.tradovate_environment
+        store = SecretStore(environment=env)
+        secrets = store.load_tradovate()
+
+        self._creds = TradovateCredentials(
+            username=secrets.username,
+            password=secrets.password,
+            app_id=secrets.app_id,
+            app_version=secrets.app_version or self._config.tradovate_app_version,
+            cid=secrets.cid,
+            sec=secrets.sec,
+            device_id=secrets.device_id,
+            environment=env,
+        )
+        self._auth = TradovateAuth(self._creds)
+        self._rest = TradovateRestClient(self._auth)
+
         # Step 1: Authenticate via REST
         token = await self._auth.authenticate()
         await self._auth.start_renewal_loop()

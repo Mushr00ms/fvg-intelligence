@@ -35,15 +35,10 @@ class BotConfig:
     binance_default_leverage: int = 10
     binance_user_stream_keepalive: int = 1800
 
-    # Tradovate
-    tradovate_username: str = ""
-    tradovate_password: str = ""
-    tradovate_app_id: str = ""
-    tradovate_app_version: str = "1.0"
-    tradovate_cid: int = 0
-    tradovate_sec: str = ""
-    tradovate_device_id: str = ""
+    # Tradovate — credentials loaded from AWS SSM Parameter Store (see bot/secrets.py)
+    # Only non-secret config lives here; creds fetched at runtime via IAM role.
     tradovate_environment: str = "demo"  # "demo" | "live"
+    tradovate_app_version: str = "1.0"   # Sent in auth request
 
     # Contract
     ticker: str = "NQ"
@@ -143,10 +138,10 @@ class BotConfig:
         project_dir = os.path.dirname(bot_dir)
 
         self.execution_backend = (self.execution_backend or "ib").lower()
-        if self.execution_backend not in {"ib", "binance_um"}:
+        if self.execution_backend not in {"ib", "binance_um", "tradovate"}:
             raise ValueError(
                 f"Unsupported execution_backend={self.execution_backend!r}; "
-                "expected 'ib' or 'binance_um'"
+                "expected 'ib', 'binance_um', or 'tradovate'"
             )
 
         # WSL2: auto-detect Windows host IP if ib_host is still localhost
