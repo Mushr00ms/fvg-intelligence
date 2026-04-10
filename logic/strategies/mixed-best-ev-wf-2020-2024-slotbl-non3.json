@@ -1,0 +1,381 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "name": "WF 2025 OOS [TRUE COMPOUNDED] - $251k start",
+    "description": "Reconstructed from WF backtest result 20260408_181720_d2afdd",
+    "ticker": "NQ",
+    "timeframe": "5min",
+    "source_dataset": "rr_nq_5min_2020_2025_30min",
+    "session_minutes": 30,
+    "slippage": {
+      "entry_ticks": 1,
+      "tp_ticks": 1,
+      "sl_ticks": 0,
+      "tick_size": 0.25,
+      "description": "BUY entry-1tick, SELL entry+1tick, TP 1tick early, SL unchanged"
+    },
+    "risk_rules": {
+      "small_buckets": [
+        "5-10",
+        "10-15"
+      ],
+      "small_risk_pct": 0.005,
+      "medium_buckets": [
+        "15-20",
+        "20-25",
+        "25-30",
+        "30-40"
+      ],
+      "medium_risk_pct": 0.015,
+      "large_buckets": [
+        "40-50",
+        "50-200"
+      ],
+      "large_risk_pct": 0.03
+    },
+    "id": "mixed-best-ev-wf-2020-2024-slotbl-non3",
+    "created_at": "2026-04-08T11:34:10.428301+00:00",
+    "updated_at": "2026-04-08T13:54:21.427289+00:00",
+    "hard_gates": {
+      "no_trade_after_dec": 19,
+      "no_trade_witching_day": true,
+      "no_trade_witching_day_minus_1": true,
+      "description": "No trades from December 20 through end of year (low liquidity / holiday risk). Also skip quarterly witching day and prior weekday."
+    },
+    "hfoiv_gate": {
+      "enabled": true,
+      "rolling_bars": 6,
+      "lookback_sessions": 90,
+      "bucket_minutes": 30,
+      "thresholds": [
+        [
+          70,
+          0.25
+        ]
+      ],
+      "config_label": "p70_x0.25_r6_lb90"
+    }
+  },
+  "cells": [
+    {
+      "time_period": "10:30-11:00",
+      "risk_range": "40-50",
+      "setup": "mid_extreme",
+      "rr_target": 2.75,
+      "ev": 0,
+      "win_rate": 36.8,
+      "samples": 19,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "14:00-14:30",
+      "risk_range": "40-50",
+      "setup": "mit_extreme",
+      "rr_target": 1.0,
+      "ev": 0,
+      "win_rate": 65.0,
+      "samples": 20,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "14:00-14:30",
+      "risk_range": "20-25",
+      "setup": "mit_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 54.2,
+      "samples": 24,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:30-12:00",
+      "risk_range": "30-40",
+      "setup": "mid_extreme",
+      "rr_target": 2.0,
+      "ev": 0,
+      "win_rate": 55.6,
+      "samples": 9,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "10:00-10:30",
+      "risk_range": "30-40",
+      "setup": "mid_extreme",
+      "rr_target": 1.75,
+      "ev": 0,
+      "win_rate": 42.5,
+      "samples": 40,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "13:30-14:00",
+      "risk_range": "40-50",
+      "setup": "mit_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 53.8,
+      "samples": 13,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:00-11:30",
+      "risk_range": "25-30",
+      "setup": "mit_extreme",
+      "rr_target": 1.25,
+      "ev": 0,
+      "win_rate": 51.9,
+      "samples": 27,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "14:30-15:00",
+      "risk_range": "5-10",
+      "setup": "mit_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 47.9,
+      "samples": 48,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "10:30-11:00",
+      "risk_range": "10-15",
+      "setup": "mid_extreme",
+      "rr_target": 2.75,
+      "ev": 0,
+      "win_rate": 32.3,
+      "samples": 31,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "15:00-15:30",
+      "risk_range": "5-10",
+      "setup": "mid_extreme",
+      "rr_target": 2.0,
+      "ev": 0,
+      "win_rate": 30.6,
+      "samples": 49,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "13:30-14:00",
+      "risk_range": "15-20",
+      "setup": "mit_extreme",
+      "rr_target": 1.0,
+      "ev": 0,
+      "win_rate": 48.7,
+      "samples": 39,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:30-12:00",
+      "risk_range": "50-200",
+      "setup": "mit_extreme",
+      "rr_target": 2.5,
+      "ev": 0,
+      "win_rate": 28.0,
+      "samples": 25,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "13:30-14:00",
+      "risk_range": "25-30",
+      "setup": "mid_extreme",
+      "rr_target": 1.0,
+      "ev": 0,
+      "win_rate": 50.0,
+      "samples": 4,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "10:00-10:30",
+      "risk_range": "10-15",
+      "setup": "mit_extreme",
+      "rr_target": 2.0,
+      "ev": 0,
+      "win_rate": 37.5,
+      "samples": 16,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "14:30-15:00",
+      "risk_range": "30-40",
+      "setup": "mid_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 41.7,
+      "samples": 12,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:30-12:00",
+      "risk_range": "5-10",
+      "setup": "mid_extreme",
+      "rr_target": 1.75,
+      "ev": 0,
+      "win_rate": 39.2,
+      "samples": 51,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:00-11:30",
+      "risk_range": "5-10",
+      "setup": "mid_extreme",
+      "rr_target": 1.0,
+      "ev": 0,
+      "win_rate": 45.5,
+      "samples": 11,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:00-11:30",
+      "risk_range": "30-40",
+      "setup": "mid_extreme",
+      "rr_target": 2.5,
+      "ev": 0,
+      "win_rate": 22.7,
+      "samples": 22,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "14:30-15:00",
+      "risk_range": "10-15",
+      "setup": "mit_extreme",
+      "rr_target": 1.25,
+      "ev": 0,
+      "win_rate": 44.9,
+      "samples": 49,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "12:30-13:00",
+      "risk_range": "25-30",
+      "setup": "mid_extreme",
+      "rr_target": 2.75,
+      "ev": 0,
+      "win_rate": 33.3,
+      "samples": 6,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "10:30-11:00",
+      "risk_range": "30-40",
+      "setup": "mid_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 37.5,
+      "samples": 32,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "10:30-11:00",
+      "risk_range": "5-10",
+      "setup": "mit_extreme",
+      "rr_target": 2.5,
+      "ev": 0,
+      "win_rate": 30.8,
+      "samples": 13,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:00-11:30",
+      "risk_range": "10-15",
+      "setup": "mit_extreme",
+      "rr_target": 2.5,
+      "ev": 0,
+      "win_rate": 24.4,
+      "samples": 41,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "12:30-13:00",
+      "risk_range": "30-40",
+      "setup": "mit_extreme",
+      "rr_target": 1.0,
+      "ev": 0,
+      "win_rate": 53.6,
+      "samples": 28,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "14:30-15:00",
+      "risk_range": "15-20",
+      "setup": "mid_extreme",
+      "rr_target": 1.75,
+      "ev": 0,
+      "win_rate": 36.4,
+      "samples": 22,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "12:30-13:00",
+      "risk_range": "10-15",
+      "setup": "mid_extreme",
+      "rr_target": 2.25,
+      "ev": 0,
+      "win_rate": 25.0,
+      "samples": 44,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "11:30-12:00",
+      "risk_range": "25-30",
+      "setup": "mit_extreme",
+      "rr_target": 1.25,
+      "ev": 0,
+      "win_rate": 40.0,
+      "samples": 25,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "13:30-14:00",
+      "risk_range": "30-40",
+      "setup": "mit_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 40.0,
+      "samples": 30,
+      "trades_per_day": 0,
+      "enabled": true
+    },
+    {
+      "time_period": "09:30-10:00",
+      "risk_range": "30-40",
+      "setup": "mit_extreme",
+      "rr_target": 1.5,
+      "ev": 0,
+      "win_rate": 38.7,
+      "samples": 31,
+      "trades_per_day": 0,
+      "enabled": true
+    }
+  ],
+  "stats": {}
+}
