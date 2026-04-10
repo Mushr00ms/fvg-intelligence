@@ -547,31 +547,58 @@ def api_backtest_history():
     """List all completed backtest runs."""
     os.makedirs(_BACKTEST_RESULTS_DIR, exist_ok=True)
     manifest_path = os.path.join(_BACKTEST_RESULTS_DIR, "manifest.json")
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            return JSONResponse(json.load(f))
 
-    # Build manifest from existing result files
-    runs = []
+    # Load existing manifest or start fresh
+    manifest = {"runs": [], "last_updated": None}
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+        except Exception:
+            pass
+
+    # Check for result files missing from manifest and append them
+    known_ids = {r["run_id"] for r in manifest.get("runs", [])}
+    added = False
     for f in sorted(os.listdir(_BACKTEST_RESULTS_DIR)):
         if f.endswith(".json") and f != "manifest.json":
+            run_id = f.replace(".json", "")
+            if run_id in known_ids:
+                continue
             try:
                 with open(os.path.join(_BACKTEST_RESULTS_DIR, f)) as fh:
                     data = json.load(fh)
                 meta = data.get("meta", {})
                 summary = data.get("summary", {})
-                runs.append({
-                    "run_id": f.replace(".json", ""),
+                manifest["runs"].append({
+                    "run_id": run_id,
+                    "strategy_id": meta.get("strategy_id", ""),
                     "strategy_name": meta.get("strategy_name", ""),
                     "start_date": meta.get("start_date", ""),
                     "end_date": meta.get("end_date", ""),
+                    "balance": meta.get("balance", 0),
                     "total_trades": summary.get("total_trades", 0),
                     "net_pnl": summary.get("net_pnl", 0),
+                    "pnl_pct": summary.get("pnl_pct", 0),
                     "win_rate": summary.get("win_rate", 0),
+                    "profit_factor": summary.get("profit_factor"),
+                    "max_dd_pct": summary.get("max_dd_pct", 0),
+                    "saved_at": data.get("saved_at", ""),
                 })
+                added = True
             except Exception:
                 continue
-    return JSONResponse({"runs": runs})
+
+    # Persist updated manifest if new runs were found
+    if added:
+        from datetime import datetime, timezone
+        manifest["last_updated"] = datetime.now(timezone.utc).isoformat()
+        tmp = manifest_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(manifest, f, indent=2)
+        os.replace(tmp, manifest_path)
+
+    return JSONResponse(manifest)
 
 
 # ── Trade Bar endpoints (for inline trade viewer) ──────────────────────────
@@ -935,6 +962,8 @@ def api_bot_cell_performance():
                 for c in cells:
                     key = (c.get("time_period"), c.get("risk_range"), c.get("setup"))
                     c["baseline_wr"] = baseline.get(key)
+                # Drop cells from old strategies that don't map to current strategy
+                cells = [c for c in cells if c.get("baseline_wr") is not None]
         except Exception:
             pass
         return JSONResponse({"cells": cells})
