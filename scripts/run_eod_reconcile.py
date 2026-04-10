@@ -35,6 +35,7 @@ from bot.backtest.backtester import load_1s_bars, run_backtest
 from bot.backtest.eod_reconciler import (
     match_trades, format_telegram_report, build_backtest_config,
     build_weekly_summary, result_to_db_kwargs, ReconciliationResult,
+    load_margin_schedule,
     validate_fills, has_bad_fills,
 )
 
@@ -226,8 +227,10 @@ async def run_reconciliation(target_date=None, skip_download=False):
     data_dir = os.path.join(ROOT, "bot", "data")
     os.makedirs(data_dir, exist_ok=True)
 
+    runtime_db_path = os.path.join(state_dir, "bot_trades.db")
+
     logger = BotLogger(log_dir)
-    db = TradeDB()
+    db = TradeDB(runtime_db_path)
     telegram = TelegramAlerter(config.telegram_bot_token, config.telegram_chat_id,
                                logger, db)
     state_mgr = StateManager(state_dir, logger)
@@ -245,6 +248,7 @@ async def run_reconciliation(target_date=None, skip_download=False):
     print(f"\n{'='*50}")
     print(f"EOD Reconciliation — {today}")
     print(f"{'='*50}")
+    print(f"DB: {runtime_db_path}")
 
     # Load state to get start_balance
     daily_state = state_mgr.load()
@@ -301,7 +305,9 @@ async def run_reconciliation(target_date=None, skip_download=False):
     # --- Step 2: Run backtester ---
     print(f"\n[2/5] Running backtester...")
     try:
-        bt_config = build_backtest_config(config, strategy.strategy, start_balance)
+        margin_schedule = load_margin_schedule(log_dir, today)
+        bt_config = build_backtest_config(
+            config, strategy.strategy, start_balance, margin_schedule=margin_schedule)
         df = load_1s_bars(data_dir, start_date=today_fmt, end_date=today_fmt)
         bt_trades, _ = run_backtest(df, strategy.strategy, bt_config)
         print(f"  Backtest produced {len(bt_trades)} trades")
@@ -324,9 +330,15 @@ async def run_reconciliation(target_date=None, skip_download=False):
 
     # --- Step 4: Compare ---
     print(f"\n[4/5] Comparing live vs backtest...")
-    result = match_trades(live_trades, bt_trades)
+    hfoiv_on = bool(strategy.strategy.get("meta", {}).get("hfoiv_gate", {}).get("enabled", False))
+    result = match_trades(live_trades, bt_trades, hfoiv_active=hfoiv_on)
     result.date = today
     result.kill_switch_active = kill_switch
+    if daily_state and daily_state.date == today:
+        result.daily_pnl = daily_state.realized_pnl
+        result.daily_pnl_pct = daily_state.daily_pnl_pct * 100
+        result.balance = daily_state.start_balance + daily_state.realized_pnl
+        result.filled_trades = daily_state.filled_trade_count
 
     print(f"  Matched: {result.matched_count}")
     print(f"  Divergences: {len(result.divergences)}")
@@ -357,8 +369,13 @@ async def run_reconciliation(target_date=None, skip_download=False):
 
     if telegram.enabled:
         msg = format_telegram_report(result, weekly_html, fills_garbage=fills_garbage)
-        await telegram.alert_reconciliation(msg)
-        print(f"  Telegram report sent!")
+        sent = await telegram.alert_reconciliation(msg)
+        if sent:
+            print("  Telegram report sent!")
+        else:
+            print("  WARNING: Telegram delivery failed, printing report locally:\n")
+            import re
+            print(re.sub(r"<[^>]+>", "", msg))
     else:
         print(f"  WARNING: Telegram not configured, printing report:\n")
         msg = format_telegram_report(result, weekly_html, fills_garbage=fills_garbage)

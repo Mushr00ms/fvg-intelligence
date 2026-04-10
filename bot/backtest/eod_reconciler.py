@@ -9,6 +9,7 @@ Pure functions — no async, no I/O. The engine handles orchestration.
 """
 
 import json
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -366,11 +367,18 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
         lines.append(f"     Corrected: ${true_pnl:>+,.0f}")
     else:
         delta = result.live_net_pnl - result.backtest_net_pnl
+        corrected_delta = result.live_net_pnl - result.corrected_net_pnl
         live_icon = "📈" if result.live_net_pnl >= 0 else "📉"
         lines.append(f"\n{live_icon} <b>P&L</b>")
-        lines.append(f"     Live:     ${result.live_net_pnl:>+,.0f}")
-        lines.append(f"     Backtest: ${result.backtest_net_pnl:>+,.0f}")
-        lines.append(f"     Delta:    ${delta:>+,.0f}")
+        lines.append(f"     Live:      ${result.live_net_pnl:>+,.0f}")
+        lines.append(f"     Backtest:  ${result.backtest_net_pnl:>+,.0f}")
+        if hfoiv:
+            lines.append(f"     Corrected: ${result.corrected_net_pnl:>+,.0f}")
+            lines.append(f"     Delta:     ${delta:>+,.0f}")
+            if round(corrected_delta) != 0:
+                lines.append(f"     Residual:  ${corrected_delta:>+,.0f}")
+        else:
+            lines.append(f"     Delta:     ${delta:>+,.0f}")
 
     if result.kill_switch_active:
         lines.append("\n🛑 Kill switch fired — backtest-only trades expected")
@@ -506,7 +514,49 @@ def build_weekly_summary(db, today_str, account_balance):
 
 # ── Backtest config builder ──────────────────────────────────────────────
 
-def build_backtest_config(bot_config, strategy_dict, start_balance):
+def load_margin_schedule(log_dir, date_str):
+    """Load live intraday margin snapshots from the bot JSONL log."""
+    if not date_str:
+        return []
+
+    if "-" not in date_str and len(date_str) == 8:
+        date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+    log_path = os.path.join(log_dir, f"{date_str}.jsonl")
+    if not os.path.exists(log_path):
+        return []
+
+    schedule = []
+    with open(log_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if evt.get("event") != "margin_fetched" or evt.get("mode") != "live":
+                continue
+            per_contract = evt.get("per_contract")
+            ts = evt.get("ts")
+            if per_contract is None or not ts:
+                continue
+            try:
+                dt_obj = datetime.fromisoformat(ts)
+            except ValueError:
+                continue
+            minute = dt_obj.hour * 60 + dt_obj.minute
+            if minute < 9 * 60 + 30 or minute > 16 * 60:
+                continue
+            schedule.append({
+                "minute": minute,
+                "per_contract": float(per_contract),
+            })
+    return schedule
+
+
+def build_backtest_config(bot_config, strategy_dict, start_balance, margin_schedule=None):
     """
     Build backtester config dict from BotConfig + loaded strategy.
 
@@ -526,6 +576,7 @@ def build_backtest_config(bot_config, strategy_dict, start_balance):
         "tp_mode": "fixed",
         "risk_tiers": bot_config.use_risk_tiers,
         "margin_per_contract": bot_config.margin_intraday_initial,
+        "margin_schedule": margin_schedule or [],
         "hfoiv": {
             "enabled": False,  # Default off — overridden if bot uses it
         },

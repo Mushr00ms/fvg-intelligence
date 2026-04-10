@@ -404,6 +404,34 @@ def _excursion_past_tp_numba(highs, lows, start_idx, tp_price, is_buy, eod_minut
 
 
 @nb.njit(cache=True)
+def _tp_before_midpoint_numba(highs, lows, start_idx, tp_price, mid_price, is_buy):
+    """Check if speculative mit_extreme TP is reached before price hits the midpoint.
+
+    Scans 1s bars from mitigation forward:
+      - bullish: TP = highs >= tp_price, midpoint = lows <= mid_price
+      - bearish: TP = lows <= tp_price, midpoint = highs >= mid_price
+
+    Returns True if TP hit first (FVG exhausted → skip mid_extreme).
+    Returns False if midpoint hit first (FVG still has edge → valid).
+    """
+    n = len(highs)
+    for i in range(start_idx, n):
+        if is_buy:
+            tp_hit = highs[i] >= tp_price
+            mid_hit = lows[i] <= mid_price
+        else:
+            tp_hit = lows[i] <= tp_price
+            mid_hit = highs[i] >= mid_price
+        if tp_hit and mid_hit:
+            return True   # same bar — conservatively treat as exhausted
+        if tp_hit:
+            return True   # TP first → FVG gave its move
+        if mid_hit:
+            return False  # midpoint first → FVG hasn't TP'd yet
+    return False  # neither reached (EOD) — no mid_extreme fill anyway
+
+
+@nb.njit(cache=True)
 def _find_mitigation_numba(highs, lows, start_idx, zone_low, zone_high):
     """Numba-accelerated mitigation scan. Returns bar index or -1."""
     n = len(highs)
@@ -650,6 +678,43 @@ def check_entry_fill(df_1s, entry_time, entry_price, side,
 
 # ── Backtest Engine ──────────────────────────────────────────────────────
 
+def _normalize_margin_schedule(raw_schedule):
+    """Convert config margin schedule to sorted [(minute, per_contract)] tuples."""
+    schedule = []
+    for item in raw_schedule or []:
+        minute = item.get("minute")
+        per_contract = item.get("per_contract")
+        if minute is None or per_contract is None:
+            continue
+        try:
+            minute = int(minute)
+            per_contract = float(per_contract)
+        except (TypeError, ValueError):
+            continue
+        if minute < 0 or per_contract <= 0:
+            continue
+        schedule.append((minute, per_contract))
+
+    schedule.sort(key=lambda x: x[0])
+    deduped = []
+    for minute, per_contract in schedule:
+        if deduped and deduped[-1][0] == minute:
+            deduped[-1] = (minute, per_contract)
+        else:
+            deduped.append((minute, per_contract))
+    return deduped
+
+
+def _margin_per_contract_for_minute(schedule, minute, default_margin):
+    """Return the latest known margin snapshot at or before `minute`."""
+    current = default_margin
+    for sched_minute, per_contract in schedule:
+        if sched_minute > minute:
+            break
+        current = per_contract
+    return current
+
+
 def run_backtest(df_1s, strategy, config=None):
     """
     Run a full backtest of a strategy against 1-second historical data.
@@ -672,8 +737,10 @@ def run_backtest(df_1s, strategy, config=None):
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
     mit_entry_ticks = config.get("mit_entry_ticks", 0)  # MIT entry slippage (0=limit, 1-4=MIT)
+    skip_mid_if_mit = config.get("skip_mid_if_mit", False)  # skip mid_extreme if mit_extreme level already reached
     consecutive_filter = config.get("consecutive_filter", False)  # skip near, take far
     consecutive_near_only = config.get("consecutive_near_only", False)  # skip far, take near (live behavior)
+    margin_schedule = _normalize_margin_schedule(config.get("margin_schedule"))
     # confirmed_limit removed — volume analysis showed 95% of trades have ≥30
     # contracts at entry price, making touch=fill the correct default model
     tp_mode = config.get("tp_mode", "fixed")  # fixed, runner, runner-be, split
@@ -733,6 +800,12 @@ def run_backtest(df_1s, strategy, config=None):
     _streak_base = config.get("streak_base", 0.005)
     _streak_mult = config.get("streak_mult", 1.5)
     _streak_max = config.get("streak_max", 0.04)
+    use_hybrid_streak = config.get("hybrid_streak", False)
+    _hybrid_base = config.get("hybrid_base", 0.01)
+    _hybrid_win_mult = config.get("hybrid_win_mult", 2.0)
+    _hybrid_floor = config.get("hybrid_floor", 0.0025)
+    _hybrid_max = config.get("hybrid_max")
+    _hybrid_risk = _hybrid_base
     _streak_risk = _streak_base  # Current risk level — persists across days
 
     # Tier reset: after loss → all buckets drop to small_risk, first win → restore tiers
@@ -757,8 +830,17 @@ def run_backtest(df_1s, strategy, config=None):
     MARGIN_MNQ = 3300.0  # Intraday MNQ margin (~10% of NQ)
 
     strategy_lookup = build_strategy_lookup(strategy)
-    sizing_label = "streak" if use_streak else ("tier_reset" if use_tier_reset else ("risk_tiers" if use_risk_tiers else "uniform"))
+    sizing_label = (
+        "hybrid_streak" if use_hybrid_streak else
+        ("streak" if use_streak else ("tier_reset" if use_tier_reset else ("risk_tiers" if use_risk_tiers else "uniform")))
+    )
     print(f"Strategy: {strategy.get('meta', {}).get('name', '?')} ({len(strategy_lookup)} cells)")
+    if use_hybrid_streak:
+        _hybrid_max_label = "none" if _hybrid_max in (None, 0) else f"{_hybrid_max:.2%}"
+        print(
+            f"Hybrid streak sizing: base={_hybrid_base:.2%} mult={_hybrid_win_mult}x "
+            f"floor={_hybrid_floor:.2%} max={_hybrid_max_label}"
+        )
     if use_streak:
         print(f"Streak sizing: base={_streak_base:.2%} mult={_streak_mult}x max={_streak_max:.1%}")
     if use_tier_reset:
@@ -993,6 +1075,28 @@ def run_backtest(df_1s, strategy, config=None):
                 if cell is None or cell["setup"] != setup_type:
                     continue
 
+                # Skip mid_extreme if a speculative mit_extreme would have TP'd
+                # before price reached the midpoint. Scenario: price hits zone edge,
+                # runs to what would be the mit_extreme TP, then reverses back to
+                # the midpoint — the FVG already "gave its move."
+                if skip_mid_if_mit and setup_type == "mid_extreme":
+                    _is_buy = fvg.fvg_type == "bullish"
+                    _mit_e = round_to_tick(
+                        fvg.zone_high if _is_buy else fvg.zone_low
+                    )
+                    _mit_risk = round_to_tick(abs(_mit_e - stop))
+                    if _mit_risk > 0:
+                        _spec_n = cell["rr_target"]
+                        _mit_target = round_to_tick(
+                            _mit_e + round_to_tick(_spec_n * _mit_risk) if _is_buy
+                            else _mit_e - round_to_tick(_spec_n * _mit_risk)
+                        )
+                        if _tp_before_midpoint_numba(
+                            day_arrays['highs'], day_arrays['lows'],
+                            mit_idx, _mit_target, entry_exact, _is_buy
+                        ):
+                            continue
+
                 # Apply entry slippage for fill simulation:
                 # --slip: legacy 1-tick model (entry + TP slippage)
                 # --mit-entry N: MIT order slippage (N ticks on entry only, TP = limit touch)
@@ -1039,7 +1143,11 @@ def run_backtest(df_1s, strategy, config=None):
 
                 # Position size — streak, risk tiers, or uniform
                 _dd_notes = []
-                if use_streak:
+                if use_hybrid_streak:
+                    _rpct = _hybrid_risk
+                    risk_budget = running_balance * _rpct
+                    _dd_notes.append(f"hybrid {_rpct:.2%}")
+                elif use_streak:
                     _rpct = _streak_risk
                     risk_budget = running_balance * _rpct
                     _dd_notes.append(f"streak {_rpct:.2%}")
@@ -1097,7 +1205,7 @@ def run_backtest(df_1s, strategy, config=None):
                         contracts = 1  # legacy: floor at 1 NQ
 
                 # Per-trade risk gate — use same rate that sized the position
-                _gate_pct = _rpct if (use_risk_tiers or use_streak or use_loss_streak) else risk_pct
+                _gate_pct = _rpct if (use_hybrid_streak or use_risk_tiers or use_streak or use_loss_streak) else risk_pct
                 if risk_pts * _eff_point_value * contracts > running_balance * _gate_pct * 1.01:
                     contracts = max(1, math.floor(running_balance * _gate_pct / (risk_pts * _eff_point_value)))
 
@@ -1105,7 +1213,12 @@ def run_backtest(df_1s, strategy, config=None):
                 # Subtract day_margin_reserved to model concurrent bracket orders
                 # (matches live bot reservation tracking)
                 _pre_margin_contracts = contracts
-                buffered_margin = _eff_margin * (1.0 + margin_buffer_pct)
+                _live_margin_per_contract = _eff_margin
+                if _contract_type == "NQ" and margin_schedule:
+                    _live_margin_per_contract = _margin_per_contract_for_minute(
+                        margin_schedule, int(day_arrays['minutes'][mit_idx]), _eff_margin
+                    )
+                buffered_margin = _live_margin_per_contract * (1.0 + margin_buffer_pct)
                 _available_for_margin = max(0.0, running_balance - day_margin_reserved)
                 max_by_margin = math.floor(_available_for_margin / buffered_margin)
                 if contracts > max_by_margin:
@@ -1157,7 +1270,7 @@ def run_backtest(df_1s, strategy, config=None):
                     continue
 
                 # Reserve margin for this position (matches live bot reservation)
-                _trade_margin = contracts * _eff_margin
+                _trade_margin = contracts * _live_margin_per_contract
                 day_margin_reserved += _trade_margin
 
                 # Walk trade with fill price (slipped if MIT), limit TP (touch)
@@ -1253,6 +1366,20 @@ def run_backtest(df_1s, strategy, config=None):
                         _tier_reduced = True
 
                 # Streak sizing: ramp on win, reset on loss (persists across days)
+                if use_hybrid_streak:
+                    _prev_hybrid = _hybrid_risk
+                    if is_win:
+                        _next_hybrid = _hybrid_risk * _hybrid_win_mult
+                        if _hybrid_max not in (None, 0):
+                            _next_hybrid = min(_next_hybrid, _hybrid_max)
+                        _hybrid_risk = _next_hybrid
+                    elif _hybrid_risk > _hybrid_base:
+                        _hybrid_risk = _hybrid_base
+                    else:
+                        _hybrid_risk = max(_hybrid_floor, _hybrid_risk * 0.5)
+                    if _hybrid_risk != _prev_hybrid:
+                        _dd_notes.append(f"hybrid {_prev_hybrid:.2%}→{_hybrid_risk:.2%}")
+
                 if use_streak:
                     if is_win:
                         _prev_streak = _streak_risk
@@ -1263,7 +1390,6 @@ def run_backtest(df_1s, strategy, config=None):
                         if _streak_risk != _streak_base:
                             _dd_notes.append(f"streak reset→{_streak_base:.2%}")
                         _streak_risk = _streak_base
-
                 # Defensive loss-streak: increment on loss, reset on win
                 # Persists across days (no daily reset)
                 if use_loss_streak or use_streak_defensive:
@@ -1686,6 +1812,16 @@ def main():
                         help="Streak win multiplier (default: 1.5)")
     parser.add_argument("--streak-max", type=float, default=0.04,
                         help="Streak max risk pct cap (default: 0.04 = 4%%)")
+    parser.add_argument("--hybrid-streak", action="store_true",
+                        help="Hybrid streak sizing: wins multiply risk, first loss above base resets to base, losses at/base halve to floor")
+    parser.add_argument("--hybrid-base", type=float, default=0.01,
+                        help="Hybrid streak base risk pct (default: 0.01 = 1%%)")
+    parser.add_argument("--hybrid-win-mult", type=float, default=2.0,
+                        help="Hybrid streak win multiplier (default: 2.0)")
+    parser.add_argument("--hybrid-floor", type=float, default=0.0025,
+                        help="Hybrid streak floor risk pct (default: 0.0025 = 0.25%%)")
+    parser.add_argument("--hybrid-max", type=float, default=None,
+                        help="Optional cap for hybrid streak risk pct (default: uncapped)")
     parser.add_argument("--margin", type=float, default=33000.0,
                         help="Margin per contract (default: NQ intraday initial $33,000)")
     parser.add_argument("--hfoiv", action="store_true",
@@ -1711,6 +1847,8 @@ def main():
                         help="Switch to MNQ contracts when calculated NQ contracts < 1 (10x finer granularity)")
     parser.add_argument("--mnq-zero", choices=["trade","skip"], default="trade",
                         help="When MNQ also rounds to 0: trade 1 MNQ (default) or skip the trade")
+    parser.add_argument("--skip-mid-if-mit", action="store_true",
+                        help="Skip mid_extreme setups when FVG already mitigated at mit_extreme level")
     parser.add_argument("--streak-defensive", action="store_true",
                         help="Binary defensive: halve Kelly tiers after N consecutive losses, restore on first win (persistent across days)")
     parser.add_argument("--streak-defensive-after", type=int, default=3,
@@ -1744,6 +1882,11 @@ def main():
         "streak_base": args.streak_base,
         "streak_mult": args.streak_mult,
         "streak_max": args.streak_max,
+        "hybrid_streak": args.hybrid_streak,
+        "hybrid_base": args.hybrid_base,
+        "hybrid_win_mult": args.hybrid_win_mult,
+        "hybrid_floor": args.hybrid_floor,
+        "hybrid_max": args.hybrid_max,
         "hfoiv": {
             "enabled": args.hfoiv,
             "rolling_bars": args.hfoiv_rolling,
@@ -1758,6 +1901,7 @@ def main():
         "mnq_zero": args.mnq_zero,
         "streak_defensive": args.streak_defensive,
         "streak_defensive_after": args.streak_defensive_after,
+        "skip_mid_if_mit": args.skip_mid_if_mit,
     }
     trades, final_balance = run_backtest(df, strategy, config)
 
@@ -1784,6 +1928,14 @@ def main():
                 "base_pct": args.streak_base,
                 "multiplier": args.streak_mult,
                 "max_pct": args.streak_max,
+            }
+        if args.hybrid_streak:
+            results["meta"]["sizing"] = "hybrid_streak"
+            results["meta"]["hybrid_streak"] = {
+                "base_pct": args.hybrid_base,
+                "win_multiplier": args.hybrid_win_mult,
+                "floor_pct": args.hybrid_floor,
+                "max_pct": args.hybrid_max,
             }
         if args.hfoiv:
             results["meta"]["hfoiv_gate"] = {

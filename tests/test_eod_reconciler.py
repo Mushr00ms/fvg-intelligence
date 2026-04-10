@@ -319,6 +319,30 @@ class TestFormatTelegramReport:
         assert "12:00-12:30" in msg
         assert "Delta" in msg
 
+    def test_hfoiv_report_shows_corrected_pnl(self):
+        result = ReconciliationResult(
+            date="2026-04-09",
+            live_count=8,
+            backtest_count=8,
+            matched_count=8,
+            live_net_pnl=3745.0,
+            backtest_net_pnl=8487.0,
+            corrected_net_pnl=3775.0,
+            divergences=[
+                Divergence(
+                    "HFOIV_EXPECTED",
+                    "09:30-10:00 | 20-25 | mid_extreme | SELL",
+                    "1ct ⬇ HFOIV",
+                    "2ct",
+                ),
+            ],
+        )
+        msg = format_telegram_report(result)
+        assert "Corrected" in msg
+        assert "$+3,775" in msg
+        assert "Residual" in msg
+        assert "$-30" in msg
+
     def test_with_weekly_html(self):
         result = ReconciliationResult(
             date="2026-03-31", live_count=0, backtest_count=0, matched_count=0)
