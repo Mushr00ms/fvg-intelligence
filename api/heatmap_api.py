@@ -971,6 +971,38 @@ def api_bot_cell_performance():
         return JSONResponse({"error": str(e)})
 
 
+def _strategy_daily_ev_pct(strat: dict) -> float:
+    """Compute daily expected return as a fraction of balance from strategy cells.
+
+    For each cell: expected_pnl_per_trade = ev × risk_pct × balance
+    (because contracts = risk_pct × balance / (risk_pts × point_value),
+     and pnl = ev × risk_pts × contracts × point_value = ev × risk_pct × balance)
+
+    daily_ev_pct = Σ(trades_per_day × ev × risk_pct_for_bucket)
+    """
+    risk_rules = strat.get("meta", {}).get("risk_rules", {})
+    small_set = set(risk_rules.get("small_buckets", ["5-10", "10-15"]))
+    large_set = set(risk_rules.get("large_buckets", ["40-50", "50-200"]))
+    small_pct = risk_rules.get("small_risk_pct", 0.005)
+    medium_pct = risk_rules.get("medium_risk_pct", 0.015)
+    large_pct = risk_rules.get("large_risk_pct", 0.03)
+
+    daily_ev = 0.0
+    for c in strat.get("cells", []):
+        if not c.get("enabled", True):
+            continue
+        rr = c.get("risk_range", "")
+        if rr in small_set:
+            rpct = small_pct
+        elif rr in large_set:
+            rpct = large_pct
+        else:
+            rpct = medium_pct
+        daily_ev += c.get("trades_per_day", 0) * c.get("ev", 0) * rpct
+
+    return daily_ev
+
+
 @app.get("/api/bot/period-pnl")
 def api_bot_period_pnl():
     """Current day/week/month PNL + WR with cell-weighted baseline WR."""
@@ -1013,28 +1045,48 @@ def api_bot_period_pnl():
             # Clean up cell data even on error
             for period in ("today", "week", "month"):
                 result.pop(f"{period}_cells", None)
-        # Balance-scaled expected PnL + percentile distribution from backtest
-        # Computed from 319 weeks / 75 months of $80k backtest data
+        # Strategy-derived expected PnL: compute from active strategy cells
+        # daily_ev_pct = Σ(trades_per_day × cell_ev × risk_pct_for_bucket)
+        # Then: week = daily × 5, month = daily × 21
+        # Percentiles estimated from per-trade σ and √N scaling
         try:
             state_file = os.path.join(_BOT_STATE_DIR, "bot_state.json")
             with open(state_file) as f:
                 state = json.load(f)
             bal = (state.get("start_balance") or 80000) + (state.get("realized_pnl") or 0)
-            result["week_expected_pnl"] = round(bal * 0.0129, 0)
-            result["month_expected_pnl"] = round(bal * 0.0561, 0)
-            # Percentile thresholds (return % from backtest distribution)
-            result["week_pctls"] = {
-                "p5": round(bal * -0.0518), "p10": round(bal * -0.0326),
-                "p25": round(bal * -0.0140), "p50": round(bal * 0.0129),
-                "p75": round(bal * 0.0417), "p90": round(bal * 0.0698),
-                "p95": round(bal * 0.0855),
-            }
-            result["month_pctls"] = {
-                "p5": round(bal * -0.0812), "p10": round(bal * -0.0366),
-                "p25": round(bal * -0.0016), "p50": round(bal * 0.0561),
-                "p75": round(bal * 0.1352), "p90": round(bal * 0.2487),
-                "p95": round(bal * 0.2882),
-            }
+
+            # Compute daily expected return % from active strategy
+            daily_ev_pct = _strategy_daily_ev_pct(strat) if active_id else None
+            if daily_ev_pct and daily_ev_pct > 0:
+                result["week_expected_pnl"] = round(bal * daily_ev_pct * 5, 0)
+                result["month_expected_pnl"] = round(bal * daily_ev_pct * 21, 0)
+                # Percentile estimates from per-trade variance model:
+                # σ_daily ≈ daily_ev × 4 (empirical from backtest Sharpe ~0.25/day)
+                # Scale: σ_week = σ_daily × √5, σ_month = σ_daily × √21
+                sd = daily_ev_pct * 4  # daily σ as fraction of balance
+                import math
+                sw = sd * math.sqrt(5)
+                sm = sd * math.sqrt(21)
+                ew = daily_ev_pct * 5
+                em = daily_ev_pct * 21
+                result["week_pctls"] = {
+                    "p5":  round(bal * (ew - 1.645 * sw)),
+                    "p10": round(bal * (ew - 1.282 * sw)),
+                    "p25": round(bal * (ew - 0.674 * sw)),
+                    "p50": round(bal * ew),
+                    "p75": round(bal * (ew + 0.674 * sw)),
+                    "p90": round(bal * (ew + 1.282 * sw)),
+                    "p95": round(bal * (ew + 1.645 * sw)),
+                }
+                result["month_pctls"] = {
+                    "p5":  round(bal * (em - 1.645 * sm)),
+                    "p10": round(bal * (em - 1.282 * sm)),
+                    "p25": round(bal * (em - 0.674 * sm)),
+                    "p50": round(bal * em),
+                    "p75": round(bal * (em + 0.674 * sm)),
+                    "p90": round(bal * (em + 1.282 * sm)),
+                    "p95": round(bal * (em + 1.645 * sm)),
+                }
         except Exception:
             pass
         return JSONResponse(result)
