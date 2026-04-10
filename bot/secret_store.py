@@ -1,9 +1,9 @@
 """
-secrets.py — Credential loading from AWS SSM Parameter Store.
+secret_store.py â€” Credential loading from AWS SSM Parameter Store.
 
 All broker credentials (Tradovate, Binance, Telegram) are stored as
 SecureString parameters in SSM, encrypted at rest with KMS.
-The EC2 instance's IAM role grants ssm:GetParameter — no keys on disk.
+The EC2 instance's IAM role grants ssm:GetParameter â€” no keys on disk.
 
 Parameter naming convention:
     /fvg-bot/{environment}/tradovate/username
@@ -50,18 +50,19 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# SSM path prefix — override via BOT_SSM_PREFIX env var
+# SSM path prefix â€” override via BOT_SSM_PREFIX env var
 DEFAULT_SSM_PREFIX = "/fvg-bot"
 
 
 @dataclass(frozen=True)
 class TradovateSecrets:
     """Tradovate credentials loaded from SSM."""
+
     username: str
     password: str
     cid: int
@@ -74,6 +75,7 @@ class TradovateSecrets:
 @dataclass(frozen=True)
 class TelegramSecrets:
     """Telegram credentials loaded from SSM."""
+
     bot_token: str
     chat_id: str
 
@@ -81,7 +83,7 @@ class TelegramSecrets:
 class SecretStore:
     """Loads secrets from AWS SSM Parameter Store.
 
-    Uses the EC2 instance's IAM role for authentication — no access keys
+    Uses the EC2 instance's IAM role for authentication â€” no access keys
     needed on disk. Falls back to environment variables for local dev.
     """
 
@@ -97,6 +99,7 @@ class SecretStore:
         """Lazy-init boto3 SSM client."""
         if self._ssm_client is None:
             import boto3
+
             region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
             self._ssm_client = boto3.client("ssm", region_name=region)
         return self._ssm_client
@@ -143,7 +146,7 @@ class SecretStore:
             ):
                 for param in page.get("Parameters", []):
                     # Extract key name from full path
-                    # /fvg-bot/demo/tradovate/username → username
+                    # /fvg-bot/demo/tradovate/username â†’ username
                     key = param["Name"].rsplit("/", 1)[-1]
                     params[key] = param["Value"]
                     self._cache[param["Name"]] = param["Value"]
@@ -189,7 +192,8 @@ class SecretStore:
 
         logger.info(
             "Loaded Tradovate credentials: user=%s env=%s source=%s",
-            username, self._env,
+            username,
+            self._env,
             "ssm" if params else "env",
         )
 

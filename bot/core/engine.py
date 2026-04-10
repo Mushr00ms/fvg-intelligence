@@ -111,6 +111,7 @@ class BotEngine:
         self.margin_priority = None  # Initialized after margin tracker
         self.daily_state = None
         self._contract = None
+        self._contract_info = None
         self._bars_5min = None
         self._bars_1min = None
         self._tick_subscription = None
@@ -202,9 +203,11 @@ class BotEngine:
                 self._register_ib_error_handler()
 
             # 3. Resolve contract
-            self._contract = await self.broker.resolve_contract(
+            resolved_contract = await self.broker.resolve_contract(
                 self.config.ticker, self.config.exchange,
             )
+            self._contract_info = resolved_contract
+            self._contract = await self._normalize_runtime_contract(resolved_contract)
 
             # 4. Initialize order manager
             self.order_mgr = OrderManager(
@@ -344,6 +347,20 @@ class BotEngine:
             cells=self.strategy.cell_count,
             active_fvgs=self.fvg_mgr.active_count,
         )
+
+    async def _normalize_runtime_contract(self, contract):
+        """Convert broker-agnostic contracts into the native shape legacy IB paths expect."""
+        if contract is None:
+            return None
+        if self.config.execution_backend != "ib" or not self.ib_conn:
+            return contract
+        if hasattr(contract, "includeExpired"):
+            return contract
+
+        native_contract = getattr(self.broker, "_get_ib_contract", None)
+        if native_contract is None:
+            return contract
+        return await native_contract(contract)
 
     async def _event_loop(self):
         """Run until shutdown signal, session end, or kill switch.
@@ -1553,12 +1570,16 @@ class BotEngine:
 
         self.logger.log("eod_reconcile_start", date=today)
 
-        # 1. Wait for IB data to become available
-        await asyncio.sleep(180)
-
-        # 2. Download 1-second bars via Windows subprocess
+        # 1. Reuse any existing parquet before waiting or hitting IB again.
         data_dir = self._download_data_dir()
-        data_file = await self._download_today_data(today_fmt, data_dir)
+        cached_file = self._reconciliation_data_file(today_fmt, data_dir)
+        if os.path.exists(cached_file):
+            self.logger.log("eod_reconcile_download_cached", file=cached_file)
+            data_file = cached_file
+        else:
+            # Wait for IB data to become available before the first download.
+            await asyncio.sleep(180)
+            data_file = await self._download_today_data(today_fmt, data_dir)
         def _stamp_daily(r):
             """Attach daily summary fields to a ReconciliationResult."""
             r.daily_pnl = self.daily_state.realized_pnl
@@ -1650,13 +1671,17 @@ class BotEngine:
         os.makedirs(d, exist_ok=True)
         return d
 
+    def _reconciliation_data_file(self, date_str, data_dir):
+        """Return the parquet path used by EOD reconciliation for one day."""
+        return os.path.join(data_dir, f"nq_1secs_{date_str}.parquet")
+
     async def _download_today_data(self, date_str, data_dir):
         """Download today's 1-second bars directly via ib_async.
 
         Connects with a separate clientId (20) so it doesn't interfere
         with the bot's main connection. Returns parquet path or None.
         """
-        out_file = os.path.join(data_dir, f"nq_1secs_{date_str}.parquet")
+        out_file = self._reconciliation_data_file(date_str, data_dir)
 
         # If already downloaded, skip
         if os.path.exists(out_file):

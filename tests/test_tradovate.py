@@ -590,18 +590,18 @@ class TestSecretStore:
     """Test SecretStore SSM path construction and env var fallback."""
 
     def test_param_path_construction(self):
-        from bot.secrets import SecretStore
+        from bot.secret_store import SecretStore
         store = SecretStore(environment="demo", ssm_prefix="/fvg-bot")
         assert store._param_path("tradovate", "username") == "/fvg-bot/demo/tradovate/username"
 
     def test_param_path_live(self):
-        from bot.secrets import SecretStore
+        from bot.secret_store import SecretStore
         store = SecretStore(environment="live", ssm_prefix="/fvg-bot")
         assert store._param_path("tradovate", "cid") == "/fvg-bot/live/tradovate/cid"
 
     def test_env_var_fallback(self):
         """When SSM is unavailable, env vars provide credentials."""
-        from bot.secrets import SecretStore
+        from bot.secret_store import SecretStore
         import os
 
         store = SecretStore(environment="demo")
@@ -627,7 +627,7 @@ class TestSecretStore:
         assert secrets.device_id == "dev-123"
 
     def test_missing_credentials_raises(self):
-        from bot.secrets import SecretStore, SecretLoadError
+        from bot.secret_store import SecretStore, SecretLoadError
         import os
 
         store = SecretStore(environment="demo")

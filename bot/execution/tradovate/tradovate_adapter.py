@@ -114,7 +114,7 @@ class TradovateAdapter(BrokerAdapter):
 
     async def connect(self) -> None:
         # Step 0: Load credentials from AWS SSM Parameter Store
-        from bot.secrets import SecretStore
+        from bot.secret_store import SecretStore
         env = self._config.tradovate_environment
         store = SecretStore(environment=env)
         secrets = store.load_tradovate()
