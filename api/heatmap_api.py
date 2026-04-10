@@ -1059,39 +1059,34 @@ def api_bot_period_pnl():
             daily_ev_pct = _strategy_daily_ev_pct(strat) if active_id else None
             if daily_ev_pct and daily_ev_pct > 0:
                 import math
-                # Strategy-projected expected PnL for full periods.
-                # Week/month expected always uses the strategy projection
-                # (full-period forecast), not the DB per-trade sum which
-                # only covers trades already placed.
-                # Today's expected uses the DB value (actual trades taken).
-                week_proj = round(bal * daily_ev_pct * 5, 0)
-                month_proj = round(bal * daily_ev_pct * 21, 0)
-                result["week_expected_pnl"] = week_proj
-                result["month_expected_pnl"] = month_proj
-
-                # Percentile distribution around the strategy projection.
-                # p50 = strategy expected (mean = median for normal dist).
-                # σ_daily ≈ daily_ev × 4 (empirical from backtest Sharpe ~0.25/day)
-                sd = daily_ev_pct * 4
-                sw = sd * math.sqrt(5)
-                sm = sd * math.sqrt(21)
+                # Expected PnL: p50 from empirical backtest distribution.
+                # Percentiles from 269 weeks / 64 months of WF backtest data
+                # (2021-2026), normalized as % of balance at each point.
+                #
+                # Weekly:  mean +2.19%, median +1.35%, σ 15.14%
+                # Monthly: mean +9.23%, median +6.63%, σ 23.99%
+                #
+                # We use median (p50) as "expected" since the distribution
+                # is right-skewed (mean > median due to outsized wins).
+                result["week_expected_pnl"] = round(bal * 0.0135, 0)
+                result["month_expected_pnl"] = round(bal * 0.0663, 0)
                 result["week_pctls"] = {
-                    "p5":  round(bal * (daily_ev_pct * 5 - 1.645 * sw)),
-                    "p10": round(bal * (daily_ev_pct * 5 - 1.282 * sw)),
-                    "p25": round(bal * (daily_ev_pct * 5 - 0.674 * sw)),
-                    "p50": week_proj,
-                    "p75": round(bal * (daily_ev_pct * 5 + 0.674 * sw)),
-                    "p90": round(bal * (daily_ev_pct * 5 + 1.282 * sw)),
-                    "p95": round(bal * (daily_ev_pct * 5 + 1.645 * sw)),
+                    "p5":  round(bal * -0.1599),
+                    "p10": round(bal * -0.1258),
+                    "p25": round(bal * -0.0562),
+                    "p50": round(bal * 0.0135),
+                    "p75": round(bal * 0.0775),
+                    "p90": round(bal * 0.1762),
+                    "p95": round(bal * 0.2380),
                 }
                 result["month_pctls"] = {
-                    "p5":  round(bal * (daily_ev_pct * 21 - 1.645 * sm)),
-                    "p10": round(bal * (daily_ev_pct * 21 - 1.282 * sm)),
-                    "p25": round(bal * (daily_ev_pct * 21 - 0.674 * sm)),
-                    "p50": month_proj,
-                    "p75": round(bal * (daily_ev_pct * 21 + 0.674 * sm)),
-                    "p90": round(bal * (daily_ev_pct * 21 + 1.282 * sm)),
-                    "p95": round(bal * (daily_ev_pct * 21 + 1.645 * sm)),
+                    "p5":  round(bal * -0.3005),
+                    "p10": round(bal * -0.1524),
+                    "p25": round(bal * -0.0344),
+                    "p50": round(bal * 0.0663),
+                    "p75": round(bal * 0.2343),
+                    "p90": round(bal * 0.3985),
+                    "p95": round(bal * 0.4606),
                 }
         except Exception:
             pass
