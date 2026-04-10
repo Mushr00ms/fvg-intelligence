@@ -1059,18 +1059,15 @@ def api_bot_period_pnl():
             daily_ev_pct = _strategy_daily_ev_pct(strat) if active_id else None
             if daily_ev_pct and daily_ev_pct > 0:
                 import math
-                # Strategy-projected expected PnL for full periods
+                # Strategy-projected expected PnL for full periods.
+                # Week/month expected always uses the strategy projection
+                # (full-period forecast), not the DB per-trade sum which
+                # only covers trades already placed.
+                # Today's expected uses the DB value (actual trades taken).
                 week_proj = round(bal * daily_ev_pct * 5, 0)
                 month_proj = round(bal * daily_ev_pct * 21, 0)
-
-                # Only use strategy projection if no trade-based expected
-                # from the DB (i.e., no trades yet in the period).
-                # DB's per-trade expected (cell_ev × risk × qty × $20) is
-                # more accurate for the actual trades taken.
-                if not result.get("week_expected_pnl"):
-                    result["week_expected_pnl"] = week_proj
-                if not result.get("month_expected_pnl"):
-                    result["month_expected_pnl"] = month_proj
+                result["week_expected_pnl"] = week_proj
+                result["month_expected_pnl"] = month_proj
 
                 # Percentile distribution around the strategy projection.
                 # p50 = strategy expected (mean = median for normal dist).
