@@ -280,7 +280,7 @@ class TestFullDetectionToOrder:
         """Valid FVG + matching cell → order placed in DRY_RUN."""
         shell, fvg = self._setup()
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             shell._process_detection(fvg)
         )
 
@@ -308,7 +308,7 @@ class TestFullDetectionToOrder:
         fvg = _generate_fvg("bullish", zone_low=24100, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         accepted = logger.events("setup_accepted")
         assert len(accepted) == 1
@@ -320,7 +320,7 @@ class TestFullDetectionToOrder:
     def test_trade_written_to_db(self):
         """Order placement writes trade to DB."""
         shell, fvg = self._setup()
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert len(shell.db.trades) == 1
         trade = shell.db.trades[0]
@@ -341,7 +341,7 @@ class TestFullDetectionToOrder:
                             time_period="10:30-11:00")  # no cell for this period
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.fvg_mgr.active_count == 0
         assert len(shell.daily_state.pending_orders) == 0
@@ -358,7 +358,7 @@ class TestFullDetectionToOrder:
         fvg = _generate_fvg("bearish", zone_low=24100, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         if shell.daily_state.pending_orders:
             assert shell.daily_state.pending_orders[0].side == "SELL"
@@ -409,7 +409,7 @@ class TestConcurrentPositionLimits:
         fvg = _generate_fvg("bullish", zone_low=24500, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert len(shell.daily_state.pending_orders) == 0
         rejected = shell.logger.events("setup_rejected")
@@ -421,7 +421,7 @@ class TestConcurrentPositionLimits:
         fvg = _generate_fvg("bullish", zone_low=24500, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.daily_state.trade_count == 0
 
@@ -431,7 +431,7 @@ class TestConcurrentPositionLimits:
         fvg = _generate_fvg("bullish", zone_low=24500, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.daily_state.trade_count == 1
 
@@ -442,7 +442,7 @@ class TestConcurrentPositionLimits:
         fvg = _generate_fvg("bullish", zone_low=24500, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.daily_state.trade_count == 1
 
@@ -463,7 +463,7 @@ class TestConcurrentPositionLimits:
         fvg = _generate_fvg("bullish", zone_low=24500, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.daily_state.trade_count == 1  # allowed
 
@@ -632,7 +632,7 @@ class TestKillSwitch:
         fvg = _generate_fvg("bullish", zone_low=24100, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert len(shell.daily_state.pending_orders) == 0
         rejected = shell.logger.events("setup_rejected")
@@ -666,7 +666,7 @@ class TestKillSwitch:
         fvg = _generate_fvg("bullish", zone_low=24100, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.daily_state.trade_count == 1
 
@@ -678,7 +678,7 @@ class TestKillSwitch:
         fvg = _generate_fvg("bullish", zone_low=24100, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
 
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert len(shell.daily_state.pending_orders) == 0
         rejected = shell.logger.events("setup_rejected")
@@ -709,7 +709,7 @@ class TestSequentialFillsAndLimits:
             fvgs.append(fvg)
 
         for fvg in fvgs:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 shell._process_detection(fvg)
             )
 
@@ -736,7 +736,7 @@ class TestSequentialFillsAndLimits:
         for i in range(3):
             fvg = _generate_fvg("bullish", zone_low=24100 + i * 50, zone_size=12)
             shell.fvg_mgr._active[fvg.fvg_id] = fvg
-            asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+            asyncio.run(shell._process_detection(fvg))
             placed_ids.append(shell.daily_state.pending_orders[-1].group_id)
 
         assert len(shell.daily_state.pending_orders) == 3
@@ -750,6 +750,6 @@ class TestSequentialFillsAndLimits:
 
         fvg = _generate_fvg("bullish", zone_low=24400, zone_size=12)
         shell.fvg_mgr._active[fvg.fvg_id] = fvg
-        asyncio.get_event_loop().run_until_complete(shell._process_detection(fvg))
+        asyncio.run(shell._process_detection(fvg))
 
         assert shell.daily_state.trade_count == 4  # 3 + 1 new
