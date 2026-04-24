@@ -178,6 +178,7 @@ class OrderManager:
         register = getattr(self._adapter, 'register_order_callbacks', None)
         if not register:
             return
+        is_open = og in daily_state.open_positions
         register(
             entry_id=og.broker_entry_order_id,
             tp_id=og.broker_tp_order_id,
@@ -186,6 +187,9 @@ class OrderManager:
             on_tp_fill=lambda order: self._on_tp_fill_adapter(order, og, daily_state),
             on_sl_fill=lambda order: self._on_sl_fill_adapter(order, og, daily_state),
             on_status_change=lambda order: self._on_status_adapter(order, og, daily_state),
+            target_qty=og.target_qty,
+            filled_qty=og.filled_qty or 0,
+            is_open=is_open,
         )
 
     def _on_exit_ids_resolved(self, tp_id, sl_id, og, daily_state):
@@ -629,9 +633,26 @@ class OrderManager:
         if timer and not timer.done():
             timer.cancel()
 
-        unreleased = max(0, og.target_qty - (og.filled_qty or 0))
+        # If partially filled, market-flatten the filled portion before closing
+        filled = og.filled_qty or 0
+        if filled > 0 and not self._config.dry_run and self._is_exec_connected:
+            reverse_side = "SELL" if og.side == "BUY" else "BUY"
+            if self._use_adapter:
+                # Cancel manual protective exits first
+                if hasattr(self._adapter, 'cancel_bracket_exits'):
+                    await self._adapter.cancel_bracket_exits(og.broker_entry_order_id)
+                    await asyncio.sleep(0.3)
+                from bot.execution.broker_adapter import ContractInfo
+                ci = ContractInfo(symbol=self._config.ticker, broker_contract_id="",
+                                  expiry="", exchange=self._config.exchange)
+                await self._adapter.place_market_order(ci, reverse_side, filled)
+                self._logger.log("partial_fill_flattened", group_id=og.group_id,
+                                 qty=filled, reason=reason)
+
+        unreleased = max(0, og.target_qty - filled)
         daily_state.move_to_closed(og.group_id, reason)
-        self._logger.log("order_cancelled", group_id=og.group_id, reason=reason)
+        self._logger.log("order_cancelled", group_id=og.group_id, reason=reason,
+                         flattened_qty=filled)
         self._notify_order_resolved(released_qty=unreleased)
 
     async def cancel_all_pending(self, daily_state, reason=CLOSE_EOD):

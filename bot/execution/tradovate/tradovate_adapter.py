@@ -110,6 +110,9 @@ class TradovateAdapter(BrokerAdapter):
         # pre-allocated IDs for crash-safe state persistence)
         self._local_order_id = 1000000
 
+        # Lock for manual exit placement (prevents duplicate OCOs from rapid fills)
+        self._manual_exit_lock = asyncio.Lock()
+
     # ── Connection ──────────────────────────────────────────────────────
 
     async def connect(self) -> None:
@@ -325,56 +328,64 @@ class TradovateAdapter(BrokerAdapter):
         """Place or update manual OCO exits for a partially filled OSO entry.
 
         OSO brackets don't activate until the entry fully fills. Manual exits
-        protect the filled portion in the interim.
+        protect the filled portion in the interim. Locked to prevent duplicate
+        OCOs from rapid consecutive execution reports.
         """
-        cbs = self._order_callbacks.get(bracket_key)
-        if not cbs:
-            return
+        async with self._manual_exit_lock:
+            cbs = self._order_callbacks.get(bracket_key)
+            if not cbs:
+                return
 
-        symbol = cbs.get("_symbol", "")
-        reverse = cbs.get("_reverse_action", "")
-        tp_price = cbs.get("_tp_price")
-        sl_price = cbs.get("_sl_price")
-        manual_tp = cbs.get("_manual_tp_id")
-        manual_sl = cbs.get("_manual_sl_id")
+            symbol = cbs.get("_symbol", "")
+            reverse = cbs.get("_reverse_action", "")
+            tp_price = cbs.get("_tp_price")
+            sl_price = cbs.get("_sl_price")
+            manual_tp = cbs.get("_manual_tp_id")
+            manual_sl = cbs.get("_manual_sl_id")
 
-        if manual_tp and manual_sl:
-            # Already have manual exits — modify their quantities
+            if manual_tp and manual_sl:
+                try:
+                    await self._rest.modify_order(int(manual_tp), order_qty=filled_qty)
+                    await self._rest.modify_order(int(manual_sl), order_qty=filled_qty)
+                    logger.info("Manual exits adjusted to qty=%d for bracket %s",
+                                filled_qty, bracket_key)
+                except Exception as e:
+                    logger.error("Manual exit adjust failed for bracket %s: %s",
+                                 bracket_key, e)
+                return
+
             try:
-                await self._rest.modify_order(int(manual_tp), order_qty=filled_qty)
-                await self._rest.modify_order(int(manual_sl), order_qty=filled_qty)
-                logger.info("Manual exits adjusted to qty=%d for bracket %s",
-                            filled_qty, bracket_key)
+                result = await self._rest.place_oco(
+                    account_id=self._account_id,
+                    account_spec=self._account_spec,
+                    symbol=symbol,
+                    action=reverse,
+                    order_qty=filled_qty,
+                    order_type="Limit",
+                    price=tp_price,
+                    other={
+                        "action": reverse,
+                        "orderType": "Stop",
+                        "stopPrice": sl_price,
+                    },
+                )
+                cbs["_manual_tp_id"] = result.get("orderId")
+                cbs["_manual_sl_id"] = result.get("ocoId")
+                logger.info(
+                    "Manual exits placed for partial fill: TP=%s SL=%s qty=%d bracket=%s",
+                    cbs["_manual_tp_id"], cbs["_manual_sl_id"], filled_qty, bracket_key,
+                )
             except Exception as e:
-                logger.error("Manual exit adjust failed for bracket %s: %s",
-                             bracket_key, e)
-            return
-
-        # Place new manual OCO exits
-        try:
-            result = await self._rest.place_oco(
-                account_id=self._account_id,
-                account_spec=self._account_spec,
-                symbol=symbol,
-                action=reverse,
-                order_qty=filled_qty,
-                order_type="Limit",
-                price=tp_price,
-                other={
-                    "action": reverse,
-                    "orderType": "Stop",
-                    "stopPrice": sl_price,
-                },
-            )
-            cbs["_manual_tp_id"] = result.get("orderId")
-            cbs["_manual_sl_id"] = result.get("ocoId")
-            logger.info(
-                "Manual exits placed for partial fill: TP=%s SL=%s qty=%d bracket=%s",
-                cbs["_manual_tp_id"], cbs["_manual_sl_id"], filled_qty, bracket_key,
-            )
-        except Exception as e:
-            logger.error("Failed to place manual exits for bracket %s: %s",
-                         bracket_key, e)
+                logger.error(
+                    "CRITICAL: Manual exit placement failed for bracket %s: %s — "
+                    "cancelling entry to prevent naked exposure", bracket_key, e,
+                )
+                entry_id = cbs.get("_entry_id")
+                if entry_id:
+                    try:
+                        await self._rest.cancel_order(int(entry_id))
+                    except Exception:
+                        pass
 
     async def _cancel_manual_exits(self, bracket_key: str) -> None:
         """Cancel manual exits after full fill — OSO brackets take over."""
@@ -402,6 +413,8 @@ class TradovateAdapter(BrokerAdapter):
             entry_id = cbs.get("_entry_id")
             tp_id = cbs.get("_tp_id")
             sl_id = cbs.get("_sl_id")
+            manual_tp = cbs.get("_manual_tp_id")
+            manual_sl = cbs.get("_manual_sl_id")
 
             if order_id == entry_id and status == "Filled":
                 if not cbs.get("_fill_handled"):
@@ -410,12 +423,13 @@ class TradovateAdapter(BrokerAdapter):
                         self._cancel_manual_exits(bracket_key))
                     cbs["on_entry_fill"]({"filledQty": cbs.get("_target_qty", 0),
                                           "avgFillPrice": 0, "id": order_id})
-            elif order_id == tp_id and status == "Filled":
+            elif order_id in (tp_id, manual_tp) and status == "Filled":
                 cbs["on_tp_fill"](order)
-            elif order_id == sl_id and status == "Filled":
+            elif order_id in (sl_id, manual_sl) and status == "Filled":
                 cbs["on_sl_fill"](order)
 
-            if order_id in (entry_id, tp_id, sl_id):
+            all_ids = {entry_id, tp_id, sl_id, manual_tp, manual_sl} - {None}
+            if order_id in all_ids:
                 cbs["on_status_change"](order)
 
     def register_order_callbacks(
@@ -427,9 +441,18 @@ class TradovateAdapter(BrokerAdapter):
         on_tp_fill: Callable,
         on_sl_fill: Callable,
         on_status_change: Callable,
+        target_qty: int = 0,
+        filled_qty: int = 0,
+        is_open: bool = False,
     ) -> None:
-        """Re-register callbacks for orders restored from persisted state."""
+        """Re-register callbacks for orders restored from persisted state.
+
+        For PARTIAL orders: _fill_handled=False and _target_qty/filled_qty are
+        set from persisted state so execution reports continue processing.
+        For OPEN orders: _fill_handled=True (entry already fully filled).
+        """
         bracket_key = str(entry_id)
+        entry_fully_filled = is_open or (filled_qty > 0 and filled_qty >= target_qty)
         self._order_callbacks[bracket_key] = {
             "on_entry_fill": on_entry_fill,
             "on_tp_fill": on_tp_fill,
@@ -438,9 +461,9 @@ class TradovateAdapter(BrokerAdapter):
             "_entry_id": int(entry_id) if str(entry_id).isdigit() else entry_id,
             "_tp_id": int(tp_id) if str(tp_id).isdigit() else tp_id,
             "_sl_id": int(sl_id) if str(sl_id).isdigit() else sl_id,
-            "_fill_handled": True,
-            "_target_qty": 0,
-            "_last_cum_qty": 0,
+            "_fill_handled": entry_fully_filled,
+            "_target_qty": target_qty,
+            "_last_cum_qty": filled_qty,
             "_manual_tp_id": None,
             "_manual_sl_id": None,
         }
