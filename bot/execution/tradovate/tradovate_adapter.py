@@ -302,6 +302,29 @@ class TradovateAdapter(BrokerAdapter):
             if order_id in (entry_id, tp_id, sl_id):
                 cbs["on_status_change"](order)
 
+    def register_order_callbacks(
+        self,
+        entry_id,
+        tp_id,
+        sl_id,
+        on_entry_fill: Callable,
+        on_tp_fill: Callable,
+        on_sl_fill: Callable,
+        on_status_change: Callable,
+    ) -> None:
+        """Re-register callbacks for orders restored from persisted state."""
+        bracket_key = str(entry_id)
+        self._order_callbacks[bracket_key] = {
+            "on_entry_fill": on_entry_fill,
+            "on_tp_fill": on_tp_fill,
+            "on_sl_fill": on_sl_fill,
+            "on_status_change": on_status_change,
+            "_entry_id": int(entry_id) if str(entry_id).isdigit() else entry_id,
+            "_tp_id": int(tp_id) if str(tp_id).isdigit() else tp_id,
+            "_sl_id": int(sl_id) if str(sl_id).isdigit() else sl_id,
+            "_fill_handled": True,
+        }
+
     # ── Contract Resolution ─────────────────────────────────────────────
 
     async def resolve_contract(
@@ -584,6 +607,16 @@ class TradovateAdapter(BrokerAdapter):
             entry_id = result.get("orderId")
             tp_id = result.get("oso1Id")
             sl_id = result.get("oso2Id")
+
+            if not entry_id or not tp_id or not sl_id:
+                logger.error("PlaceOSO returned incomplete IDs: entry=%s tp=%s sl=%s", entry_id, tp_id, sl_id)
+                if entry_id:
+                    try:
+                        await self._rest.cancel_order(int(entry_id))
+                    except Exception:
+                        pass
+                return BracketOrderResult(success=False, error=f"Incomplete OSO IDs: entry={entry_id} tp={tp_id} sl={sl_id}")
+
             bracket_key = str(entry_id)
 
             cbs = {
@@ -767,7 +800,9 @@ class TradovateAdapter(BrokerAdapter):
         return None
 
     async def get_available_funds(self) -> float:
-        return self._cash_balance
+        open_qty = sum(abs(p.get("netPos", 0)) for p in self._positions.values())
+        margin_consumed = open_qty * self._config.margin_intraday_initial
+        return max(0.0, self._cash_balance - margin_consumed)
 
     # ── Time Sync ───────────────────────────────────────────────────────
 

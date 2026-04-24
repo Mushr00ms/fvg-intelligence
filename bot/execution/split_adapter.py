@@ -62,8 +62,11 @@ class SplitAdapter(BrokerAdapter):
         return max(self._data.disconnect_seconds, self._exec.disconnect_seconds)
 
     def on_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
-        self._exec.on_reconnect(callback)
         self._data.on_reconnect(callback)
+
+    def on_exec_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register a callback for execution-side reconnects only."""
+        self._exec.on_reconnect(callback)
 
     # ── Contract resolution ────────────────────────────────────────
 

@@ -171,6 +171,23 @@ class OrderManager:
         )
         return og
 
+    def rehydrate_bracket(self, og, daily_state):
+        """Re-register adapter callbacks for an order restored from persisted state."""
+        if not self._use_adapter:
+            return
+        register = getattr(self._adapter, 'register_order_callbacks', None)
+        if not register:
+            return
+        register(
+            entry_id=og.broker_entry_order_id,
+            tp_id=og.broker_tp_order_id,
+            sl_id=og.broker_sl_order_id,
+            on_entry_fill=lambda order: self._on_entry_fill_adapter(order, og, daily_state),
+            on_tp_fill=lambda order: self._on_tp_fill_adapter(order, og, daily_state),
+            on_sl_fill=lambda order: self._on_sl_fill_adapter(order, og, daily_state),
+            on_status_change=lambda order: self._on_status_adapter(order, og, daily_state),
+        )
+
     def _on_exit_ids_resolved(self, tp_id, sl_id, og, daily_state):
         """Persist real Tradovate TP/SL order IDs back to state."""
         og.broker_tp_order_id = tp_id

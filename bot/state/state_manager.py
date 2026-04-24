@@ -172,12 +172,40 @@ class StateManager:
             elif hasattr(order, "order_id"):
                 ib_order_ids.add(str(order.order_id))
 
-        # Check pending orders against IB
+        # Check pending orders against broker open orders AND positions.
+        # With Tradovate OSO, after entry fills only TP/SL remain as working
+        # orders — the entry itself disappears. A pending order whose entry
+        # filled while offline must be promoted to OPEN, not orphaned.
         orphaned = []
+        promoted = []
         for og in daily_state.pending_orders:
-            # If our entry order ID is set but not found in IB, it was never placed
-            if og.broker_entry_order_id and og.broker_entry_order_id not in ib_order_ids:
+            if not og.broker_entry_order_id:
+                continue
+            if og.broker_entry_order_id in ib_order_ids:
+                continue
+            # Entry not in working orders — either never placed, or already filled.
+            # Check if TP or SL are still working (proves entry filled + exits active).
+            tp_alive = og.broker_tp_order_id and og.broker_tp_order_id in ib_order_ids
+            sl_alive = og.broker_sl_order_id and og.broker_sl_order_id in ib_order_ids
+            if tp_alive or sl_alive:
+                promoted.append(og.group_id)
+            else:
                 orphaned.append(og.group_id)
+
+        for gid in promoted:
+            og = next((o for o in daily_state.pending_orders if o.group_id == gid), None)
+            if og:
+                og.filled_qty = og.target_qty
+                og.filled_at = og.submitted_at
+                og.actual_entry_price = og.entry_price
+                daily_state.move_to_open(gid)
+                if self._logger:
+                    self._logger.log(
+                        "reconciliation",
+                        action="promoted_to_open",
+                        group_id=gid,
+                        note="entry filled while offline, TP/SL still working",
+                    )
 
         for gid in orphaned:
             daily_state.move_to_closed(gid, "RECONCILE_ORPHAN")

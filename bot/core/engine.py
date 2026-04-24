@@ -271,6 +271,9 @@ class BotEngine:
                 # Recover stale placeholder TP/SL IDs and detect naked positions
                 await self._recover_bracket_ids(ib_orders)
 
+                # Re-register WS callbacks for surviving orders so fills aren't dropped
+                await self._rehydrate_callbacks()
+
                 # Reseed margin tracker for orders that survived reconciliation.
                 # _reserved_margin starts at 0 on every boot; without this, the
                 # local "release on suspend" path is a no-op for any order
@@ -337,8 +340,11 @@ class BotEngine:
             if self.time_gates.is_session_active():
                 self._session_seeded = True
 
-            # 6c. Register reconnect handler (re-subscribe bars if IB drops)
+            # 6c. Register reconnect handlers
             self.broker.on_reconnect(self._on_reconnect)
+            on_exec_reconnect = getattr(self.broker, 'on_exec_reconnect', None)
+            if on_exec_reconnect:
+                on_exec_reconnect(self._on_exec_reconnect)
 
         # 7. Schedule EOD actions
         self._schedule_eod()
@@ -1044,6 +1050,33 @@ class BotEngine:
                 await self.order_mgr.flatten_all(self.daily_state, "NAKED_RECOVERY")
                 self.state_mgr.save(self.daily_state, force=True)
                 break
+
+    async def _rehydrate_callbacks(self):
+        """Re-register WS fill callbacks for orders restored from persisted state.
+
+        Without this, TP/SL fills arriving via WS are silently dropped because
+        _order_callbacks is empty after restart. That leaves stale local state
+        which can trigger a reverse market order at EOD flatten.
+        """
+        if not self.order_mgr or not self.daily_state:
+            return
+        count = 0
+        for og in list(self.daily_state.open_positions) + list(self.daily_state.pending_orders):
+            if og.broker_entry_order_id and not og.broker_entry_order_id.startswith("tv_"):
+                self.order_mgr.rehydrate_bracket(og, self.daily_state)
+                count += 1
+        if count > 0:
+            self.logger.log("callbacks_rehydrated", count=count)
+
+    async def _on_exec_reconnect(self):
+        """Handle execution-side (Tradovate) reconnect — re-sync orders only."""
+        self._disconnect_flatten_done = False
+        self.logger.log("exec_reconnect")
+        try:
+            if self.order_mgr and self.daily_state:
+                await self._rehydrate_callbacks()
+        except Exception as e:
+            self.logger.log("exec_reconnect_error", error=str(e))
 
     async def _on_reconnect(self):
         """Re-subscribe bars/ticks and backfill FVGs after IB reconnect."""
