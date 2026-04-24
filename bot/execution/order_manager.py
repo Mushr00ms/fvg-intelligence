@@ -195,12 +195,24 @@ class OrderManager:
         self._state_mgr.save(daily_state)
 
     def _on_entry_fill_adapter(self, order, og, daily_state):
-        """Handle entry fill from adapter (Tradovate/split mode)."""
+        """Handle entry fill from adapter (Tradovate/split mode).
+
+        Supports partial fills: if filledQty < target_qty, routes to the
+        partial fill handler (timer + child qty adjustment) instead of
+        moving directly to OPEN.
+        """
         broker_qty = order.get("filledQty", 0) if isinstance(order, dict) else 0
-        og.filled_qty = broker_qty if broker_qty > 0 else og.target_qty
-        og.filled_at = self._now_iso()
+        filled = broker_qty if broker_qty > 0 else og.target_qty
         broker_price = order.get("avgFillPrice", 0) if isinstance(order, dict) else 0
-        og.actual_entry_price = broker_price if broker_price > 0 else og.entry_price
+        avg_price = broker_price if broker_price > 0 else og.entry_price
+
+        if 0 < filled < og.target_qty:
+            self._handle_partial_fill_adapter(order, og, daily_state, filled, avg_price)
+            return
+
+        og.filled_qty = filled
+        og.filled_at = self._now_iso()
+        og.actual_entry_price = avg_price
         og.entry_commission = 0.0
         daily_state.move_to_open(og.group_id)
         self._notify_order_resolved(released_qty=og.target_qty)
@@ -208,10 +220,35 @@ class OrderManager:
         self._logger.log(
             "order_filled", group_id=og.group_id, setup=og.setup,
             side=og.side, qty=og.filled_qty, expected_price=og.entry_price,
-            avg_price=og.entry_price, slippage_pts=0,
+            avg_price=avg_price, slippage_pts=round(abs(avg_price - og.entry_price), 2),
             risk_pts=og.risk_pts, target_price=og.target_price,
             stop_price=og.stop_price, n_value=og.n_value,
         )
+
+    def _handle_partial_fill_adapter(self, order, og, daily_state, filled_qty, avg_price):
+        """Handle partial entry fill in adapter mode (mirrors IB _handle_partial_fill)."""
+        prior_filled = og.filled_qty or 0
+        og.filled_qty = filled_qty
+        og.actual_entry_price = avg_price
+        og.state = "PARTIAL"
+        og.partial_fill_timer_start = og.partial_fill_timer_start or self._now_iso()
+
+        new_increment = filled_qty - prior_filled
+        if new_increment > 0:
+            self._notify_order_resolved(released_qty=new_increment)
+
+        self._logger.log("partial_fill", group_id=og.group_id,
+                         filled=filled_qty, target=og.target_qty,
+                         remaining=og.target_qty - filled_qty,
+                         mode="adapter")
+
+        if og.group_id not in self._partial_timers:
+            timeout = self._config.partial_fill_timeout
+            task = asyncio.ensure_future(
+                self._partial_fill_timeout(og.group_id, daily_state, timeout))
+            self._partial_timers[og.group_id] = task
+
+        self._state_mgr.save(daily_state)
 
     def _on_tp_fill_adapter(self, order, og, daily_state):
         """Handle TP fill from adapter."""
