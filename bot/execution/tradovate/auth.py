@@ -28,7 +28,8 @@ ENVIRONMENTS = {
 class TokenInfo:
     """Authentication token state."""
     access_token: str
-    expiration_time: float          # Unix timestamp when token expires
+    md_access_token: str = ""       # Separate token for md.tradovateapi.com
+    expiration_time: float = 0.0    # Unix timestamp when token expires
     user_id: int = 0
     name: str = ""
 
@@ -138,15 +139,17 @@ class TradovateAuth:
 
         self._token = TokenInfo(
             access_token=data["accessToken"],
+            md_access_token=data.get("mdAccessToken", ""),
             expiration_time=exp_unix,
             user_id=data.get("userId", 0),
             name=data.get("name", ""),
         )
 
         logger.info(
-            "Tradovate authenticated: user=%s env=%s expires_in=%.0fs",
+            "Tradovate authenticated: user=%s env=%s expires_in=%.0fs md_token=%s",
             self._token.name, self._creds.environment,
             self._token.seconds_until_expiry,
+            "yes" if self._token.md_access_token else "no",
         )
 
         return self._token
@@ -190,6 +193,7 @@ class TradovateAuth:
 
         self._token = TokenInfo(
             access_token=data["accessToken"],
+            md_access_token=data.get("mdAccessToken", ""),
             expiration_time=exp_unix,
             user_id=data.get("userId", 0),
             name=data.get("name", ""),

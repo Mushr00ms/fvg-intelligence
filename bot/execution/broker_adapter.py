@@ -211,3 +211,8 @@ class BrokerAdapter(ABC):
     def allocate_order_ids(self, count: int) -> List[str]:
         """Pre-allocate broker-native order IDs for crash-safe state persistence.
         Returns list of string IDs."""
+
+    # ── Optional bracket helpers (not all brokers need these) ──────────
+
+    async def cancel_bracket_exits(self, entry_order_id: str) -> None:
+        """Cancel TP + SL exits for a bracket. Default no-op (IB uses OCA)."""

@@ -156,10 +156,10 @@ class BotEngine:
             self._shutdown = True
             return
 
-        if self.config.execution_backend != "ib":
+        if self.config.execution_backend not in ("ib", "tradovate", "ib_data_tradovate_exec"):
             raise NotImplementedError(
-                "execution_backend='binance_um' is scaffolded at the client/adapter layer "
-                "but not yet wired into BotEngine"
+                f"execution_backend={self.config.execution_backend!r} "
+                "is not yet wired into BotEngine"
             )
 
         self.logger.log("bot_start", mode="PAPER" if self.config.paper_mode else "LIVE",
@@ -199,7 +199,7 @@ class BotEngine:
             await self.broker.connect()
             # IB error handler is now registered inside IBAdapter.connect()
             # For legacy code that still calls it directly, gate on backend:
-            if self.config.execution_backend == "ib" and self.ib_conn:
+            if self.config.execution_backend in ("ib", "ib_data_tradovate_exec") and self.ib_conn:
                 self._register_ib_error_handler()
 
             # 3. Resolve contract
@@ -207,11 +207,24 @@ class BotEngine:
                 self.config.ticker, self.config.exchange,
             )
             self._contract_info = resolved_contract
-            self._contract = await self._normalize_runtime_contract(resolved_contract)
+
+            # In split mode, resolve_contract returns Tradovate's contract for
+            # execution, but we need IB's contract for bar/tick subscriptions
+            if self.config.execution_backend == "ib_data_tradovate_exec":
+                data_contract = getattr(self.broker, "data_contract", resolved_contract)
+                self._contract = await self._normalize_runtime_contract(data_contract)
+            else:
+                self._contract = await self._normalize_runtime_contract(resolved_contract)
 
             # 4. Initialize order manager
+            # In split/tradovate mode, pass the adapter (not IB conn)
+            # so orders route through the BrokerAdapter interface
+            if self.config.execution_backend in ("ib_data_tradovate_exec", "tradovate"):
+                om_connection = self.broker
+            else:
+                om_connection = self.ib_conn or self.broker
             self.order_mgr = OrderManager(
-                self.ib_conn or self.broker, self._contract, self.state_mgr, self.logger, self.config,
+                om_connection, self._contract, self.state_mgr, self.logger, self.config,
                 clock=self.clock, db=self.db,
                 on_kill_switch=self._trigger_kill_switch,
             )
@@ -352,7 +365,7 @@ class BotEngine:
         """Convert broker-agnostic contracts into the native shape legacy IB paths expect."""
         if contract is None:
             return None
-        if self.config.execution_backend != "ib" or not self.ib_conn:
+        if self.config.execution_backend not in ("ib", "ib_data_tradovate_exec") or not self.ib_conn:
             return contract
         if hasattr(contract, "includeExpired"):
             return contract
@@ -1909,6 +1922,7 @@ class BotEngine:
         config = build_backtest_config(
             self.config, strategy_dict, self.daily_state.start_balance,
             margin_schedule=margin_schedule)
+        config["margin_per_contract"] = 1
 
         loop = asyncio.get_event_loop()
 

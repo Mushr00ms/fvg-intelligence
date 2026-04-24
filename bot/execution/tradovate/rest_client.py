@@ -221,18 +221,45 @@ class TradovateRestClient:
         self,
         order_id: int,
         order_qty: Optional[int] = None,
+        order_type: Optional[str] = None,
         price: Optional[float] = None,
         stop_price: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Modify an existing order."""
-        body: Dict[str, Any] = {"orderId": order_id}
-        if order_qty is not None:
-            body["orderQty"] = order_qty
-        if price is not None:
-            body["price"] = price
-        if stop_price is not None:
-            body["stopPrice"] = stop_price
-        return await self._post("/order/modifyOrder", body)
+        """Modify an existing order.
+
+        Tradovate requires orderType (and price for Limit orders) in every
+        modify request. We fetch the current orderVersion to fill in any
+        fields not explicitly provided.
+
+        Returns the latest orderVersion after modification.
+        """
+        ver = await self._get("/orderVersion/item", {"id": order_id})
+
+        body: Dict[str, Any] = {
+            "orderId": order_id,
+            "orderType": order_type or ver.get("orderType", "Limit"),
+            "orderQty": order_qty if order_qty is not None else ver.get("orderQty"),
+        }
+        eff_type = body["orderType"]
+
+        if eff_type in ("Limit", "StopLimit"):
+            body["price"] = price if price is not None else ver.get("price")
+        if eff_type in ("Stop", "StopLimit"):
+            body["stopPrice"] = stop_price if stop_price is not None else ver.get("stopPrice")
+
+        await self._post("/order/modifyOrder", body)
+        return await self.get_latest_order_version(order_id)
+
+    async def get_latest_order_version(self, order_id: int) -> Dict[str, Any]:
+        """Get the most recent orderVersion for an order.
+
+        Tradovate creates a new version (with new ID) on each modify.
+        /orderVersion/item?id={orderId} always returns the FIRST version.
+        """
+        versions = await self._get("/orderVersion/deps", {"masterid": order_id})
+        if isinstance(versions, list) and versions:
+            return versions[-1]
+        return await self._get("/orderVersion/item", {"id": order_id})
 
     async def liquidate_position(
         self, account_id: int, contract_id: int, admin: bool = False

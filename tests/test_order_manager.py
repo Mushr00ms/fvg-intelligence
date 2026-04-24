@@ -201,7 +201,7 @@ def _make_daily():
 
 def _make_mgr(config=None, conn=None, state_mgr=None, clock=None, logger=None):
     return OrderManager(
-        ib_connection=conn or _FakeIBConn(),
+        connection=conn or _FakeIBConn(),
         contract=object(),
         state_manager=state_mgr or _TrackingStateMgr(),
         logger=logger or _CaptureLogger(),

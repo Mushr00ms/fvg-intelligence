@@ -1,5 +1,5 @@
 [Unit]
-Description=NQ IB bot Telegram manager (WSL)
+Description=NQ trading bot manager (WSL)
 After=network-online.target
 Wants=network-online.target
 
@@ -11,6 +11,18 @@ Restart=on-failure
 RestartSec=10
 KillSignal=SIGINT
 TimeoutStopSec=30
+
+# Tradovate credentials (encrypted at rest, decrypted at service start)
+LoadCredentialEncrypted=tradovate-username:%h/.config/fvg-intelligence/credentials/tradovate-username.cred
+LoadCredentialEncrypted=tradovate-password:%h/.config/fvg-intelligence/credentials/tradovate-password.cred
+LoadCredentialEncrypted=tradovate-cid:%h/.config/fvg-intelligence/credentials/tradovate-cid.cred
+LoadCredentialEncrypted=tradovate-sec:%h/.config/fvg-intelligence/credentials/tradovate-sec.cred
+LoadCredentialEncrypted=tradovate-app_id:%h/.config/fvg-intelligence/credentials/tradovate-app_id.cred
+LoadCredentialEncrypted=tradovate-device_id:%h/.config/fvg-intelligence/credentials/tradovate-device_id.cred
+
+# Telegram credentials
+LoadCredentialEncrypted=telegram-bot_token:%h/.config/fvg-intelligence/credentials/telegram-bot_token.cred
+LoadCredentialEncrypted=telegram-chat_id:%h/.config/fvg-intelligence/credentials/telegram-chat_id.cred
 
 [Install]
 WantedBy=default.target

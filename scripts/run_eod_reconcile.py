@@ -266,7 +266,7 @@ async def run_reconciliation(target_date=None, skip_download=False):
         print(f"State: no state for today, using last balance=${start_balance:,.2f}")
 
     # --- Step 1: Download 1-second bars ---
-    print(f"\n[1/5] Downloading 1-second bars...")
+    print(f"\n[1/6] Downloading 1-second bars...")
     if skip_download:
         data_file = os.path.join(data_dir, f"nq_1secs_{today_fmt}.parquet")
         if not os.path.exists(data_file):
@@ -303,7 +303,7 @@ async def run_reconciliation(target_date=None, skip_download=False):
             return
 
     # --- Step 2: Run backtester ---
-    print(f"\n[2/5] Running backtester...")
+    print(f"\n[2/6] Running backtester...")
     try:
         margin_schedule = load_margin_schedule(log_dir, today)
         bt_config = build_backtest_config(
@@ -323,13 +323,13 @@ async def run_reconciliation(target_date=None, skip_download=False):
         return
 
     # --- Step 3: Load live trades ---
-    print(f"\n[3/5] Loading live trades from DB...")
+    print(f"\n[3/6] Loading live trades from DB...")
     live_trades = db.get_trades(date=today, limit=999)
     live_trades = [t for t in live_trades if t.get("exit_reason")]
     print(f"  {len(live_trades)} closed live trades")
 
     # --- Step 4: Compare ---
-    print(f"\n[4/5] Comparing live vs backtest...")
+    print(f"\n[4/6] Comparing live vs backtest...")
     hfoiv_on = bool(strategy.strategy.get("meta", {}).get("hfoiv_gate", {}).get("enabled", False))
     result = match_trades(live_trades, bt_trades, hfoiv_active=hfoiv_on)
     result.date = today
@@ -360,7 +360,7 @@ async def run_reconciliation(target_date=None, skip_download=False):
             print(f"  Tick validation skipped: {e}")
 
     # --- Step 5: Save + send ---
-    print(f"\n[5/5] Saving results and sending Telegram report...")
+    print(f"\n[5/6] Saving results and sending Telegram report...")
     db.insert_reconciliation(**result_to_db_kwargs(result))
 
     # Weekly summary (Fridays only)

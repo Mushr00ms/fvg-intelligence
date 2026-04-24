@@ -638,6 +638,50 @@ class TestSecretStore:
             with pytest.raises(SecretLoadError, match="Tradovate credentials not found"):
                 store.load_tradovate()
 
+    def test_systemd_credential_fallback(self, tmp_path):
+        """When SSM is unavailable, systemd credentials provide values."""
+        from bot.secret_store import SecretStore
+        import bot.secret_store as ss
+        import os
+
+        (tmp_path / "tradovate-username").write_text("sysuser\n")
+        (tmp_path / "tradovate-password").write_text("syspass\n")
+        (tmp_path / "tradovate-cid").write_text("42")
+        (tmp_path / "tradovate-sec").write_text("symsec")
+        (tmp_path / "tradovate-app_id").write_text("sysapp")
+        (tmp_path / "tradovate-device_id").write_text("dev-sys")
+
+        store = SecretStore(environment="demo")
+        store._get_all_parameters = lambda service: {}
+
+        orig = ss.CREDENTIALS_DIR
+        try:
+            ss.CREDENTIALS_DIR = str(tmp_path)
+            with patch.dict(os.environ, {}, clear=True):
+                secrets = store.load_tradovate()
+        finally:
+            ss.CREDENTIALS_DIR = orig
+
+        assert secrets.username == "sysuser"
+        assert secrets.password == "syspass"
+        assert secrets.cid == 42
+        assert secrets.sec == "symsec"
+
+    def test_systemd_credential_strips_whitespace(self, tmp_path):
+        """Credential files may have trailing newlines from echo."""
+        from bot.secret_store import SecretStore
+
+        assert SecretStore._read_credential("tradovate", "nope") == ""
+
+        import bot.secret_store as ss
+        orig = ss.CREDENTIALS_DIR
+        try:
+            ss.CREDENTIALS_DIR = str(tmp_path)
+            (tmp_path / "tradovate-username").write_text("  myuser  \n")
+            assert SecretStore._read_credential("tradovate", "username") == "myuser"
+        finally:
+            ss.CREDENTIALS_DIR = orig
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 8. BROKER ADAPTER ABC COMPLIANCE

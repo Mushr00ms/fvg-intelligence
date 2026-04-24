@@ -108,17 +108,16 @@ class BotConfig:
     bridge_port: int = 9100          # TCP port for WSL↔Windows bridge
     auto_launch_bridge: bool = True  # Auto-launch bridge via python.exe
 
-    # Margin Management — time-aware (IB intraday vs overnight)
-    # Intraday initial applies during RTH for NEW positions (used as fallback when whatIfOrder fails)
-    # Intraday maintenance is what IB requires to HOLD existing positions (lower than initial)
-    # Overnight initial applies outside RTH (we're always flat before this)
-    margin_intraday_initial: float = 36750.0      # NQ intraday initial margin (empirical from IB rejection: $110,241/3)
-    margin_intraday_maintenance: float = 22924.0   # NQ intraday maintenance margin (holding)
-    margin_overnight_initial: float = 46373.0      # NQ overnight initial margin
-    margin_fallback_per_contract: float = 36750.0  # Ultimate fallback (= intraday initial)
+    # Margin Management — time-aware (intraday vs overnight)
+    # Tradovate day-trade margin: $1,000/contract (verified empirically on demo)
+    # Overnight: CME exchange margin from /productMargin/item endpoint
+    margin_intraday_initial: float = 1000.0        # Tradovate day-trade margin per contract
+    margin_intraday_maintenance: float = 1000.0    # Tradovate day-trade maintenance (same as initial)
+    margin_overnight_initial: float = 40249.0      # CME exchange margin (from Tradovate API)
+    margin_fallback_per_contract: float = 1000.0   # Ultimate fallback (= intraday)
     margin_intraday_start: str = "09:30"           # ET — intraday margin begins
-    margin_intraday_end: str = "16:00"             # ET — intraday margin ends (15 min before RTH close)
-    margin_buffer_pct: float = 0.0                  # No buffer — using empirical margin from IB
+    margin_intraday_end: str = "16:00"             # ET — intraday margin ends
+    margin_buffer_pct: float = 0.0                 # No buffer — Tradovate rejects at their limit
     margin_refresh_interval: int = 1800            # Re-fetch margin every 30 minutes
     margin_management_enabled: bool = True         # Enable intelligent margin priority system
 
@@ -138,10 +137,10 @@ class BotConfig:
         project_dir = os.path.dirname(bot_dir)
 
         self.execution_backend = (self.execution_backend or "ib").lower()
-        if self.execution_backend not in {"ib", "binance_um", "tradovate"}:
+        if self.execution_backend not in {"ib", "binance_um", "tradovate", "ib_data_tradovate_exec"}:
             raise ValueError(
                 f"Unsupported execution_backend={self.execution_backend!r}; "
-                "expected 'ib', 'binance_um', or 'tradovate'"
+                "expected 'ib', 'tradovate', or 'ib_data_tradovate_exec'"
             )
 
         # WSL2: auto-detect Windows host IP if ib_host is still localhost

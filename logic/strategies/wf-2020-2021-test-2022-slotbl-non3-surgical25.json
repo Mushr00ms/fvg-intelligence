@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "name": "WF 2022 OOS [TRUE COMPOUNDED] - $152k start",
+    "name": "WF 2022 OOS [TRUE COMPOUNDED] - $152k start [surgical 25-30]",
     "description": "Reconstructed from WF backtest result 20260408_181720_0938a9",
     "ticker": "NQ",
     "timeframe": "5min",
@@ -16,14 +16,14 @@
     },
     "risk_rules": {
       "small_buckets": [
-        "5-10",
-        "10-15"
+        "10-15",
+        "25-30",
+        "5-10"
       ],
       "small_risk_pct": 0.0025,
       "medium_buckets": [
         "15-20",
         "20-25",
-        "25-30",
         "30-40"
       ],
       "medium_risk_pct": 0.01,
@@ -33,7 +33,7 @@
       ],
       "large_risk_pct": 0.03
     },
-    "id": "wf-2020-2021-test-2022-slotbl-non3",
+    "id": "wf-2020-2021-test-2022-slotbl-non3-surgical25",
     "created_at": "2026-04-08T11:34:10.428301+00:00",
     "updated_at": "2026-04-08T13:54:21.427289+00:00",
     "hard_gates": {

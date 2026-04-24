@@ -104,13 +104,12 @@ class TradovateWebSocket:
         self._last_message_time = time.time()
         self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
-        # Authenticate
+        # Authenticate — read response directly (receive loop not yet running)
         auth_id = self._allocate_id()
         auth_msg = f"authorize\n{auth_id}\n\n{access_token}"
         await self._ws.send_str(auth_msg)
 
-        # Wait for auth response
-        auth_response = await self._wait_for_response(auth_id, timeout=10.0)
+        auth_response = await self._read_auth_response(auth_id, timeout=10.0)
         status = auth_response.get("s", 0)
         if status != 200:
             raise ConnectionError(
@@ -236,6 +235,33 @@ class TradovateWebSocket:
             unsub_listener=unsub_listener,
         )
 
+    async def _read_auth_response(self, auth_id: int, timeout: float = 10.0) -> Dict:
+        """Read WS frames directly until the auth response arrives.
+
+        Called during connect() before the receive loop starts.
+        """
+        import asyncio as _aio
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            try:
+                msg = await _aio.wait_for(self._ws.receive(), timeout=remaining)
+            except _aio.TimeoutError:
+                break
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+            data = msg.data
+            if not data or data[0] != "a":
+                continue
+            try:
+                items = json.loads(data[1:])
+            except json.JSONDecodeError:
+                continue
+            for item in items:
+                if item.get("i") == auth_id:
+                    return item
+        raise TimeoutError(f"[{self._name}] Auth response timed out after {timeout}s")
+
     # ── Receive Loop ────────────────────────────────────────────────────
 
     async def _receive_loop(self) -> None:
@@ -360,7 +386,7 @@ class TradovateWebSocket:
 
                 auth_id = self._allocate_id()
                 await self._ws.send_str(f"authorize\n{auth_id}\n\n{self._access_token}")
-                auth_resp = await self._wait_for_response(auth_id, timeout=10.0)
+                auth_resp = await self._read_auth_response(auth_id, timeout=10.0)
                 if auth_resp.get("s") != 200:
                     raise ConnectionError(f"Auth failed: {auth_resp}")
 

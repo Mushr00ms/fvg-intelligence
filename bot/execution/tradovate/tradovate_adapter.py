@@ -148,12 +148,16 @@ class TradovateAdapter(BrokerAdapter):
                      self._account_spec, self._account_id)
 
         # Step 3: Connect WebSockets
+        # Order WS: environment-specific URL with access_token
+        # Market data WS: always md.tradovateapi.com with mdAccessToken
+        #   (md feed is live exchange data regardless of demo/live account)
         env = self._creds.environment
         order_url = WS_URLS[env]
         md_url = WS_URLS["md"]
+        md_token = token.md_access_token or token.access_token
 
         await self._order_ws.connect(order_url, token.access_token)
-        await self._md_ws.connect(md_url, token.access_token)
+        await self._md_ws.connect(md_url, md_token)
 
         # Step 4: Start user sync (positions, orders, accounts)
         await self._start_user_sync()
@@ -249,41 +253,29 @@ class TradovateAdapter(BrokerAdapter):
 
     # ── Order Event Dispatch ────────────────────────────────────────────
 
-    _order_callbacks: Dict[str, Dict[str, Callable]] = {}
-
-    def _register_order_callbacks(
-        self,
-        order_strategy_id: str,
-        on_entry_fill: Callable,
-        on_tp_fill: Callable,
-        on_sl_fill: Callable,
-        on_status_change: Callable,
-    ) -> None:
-        self._order_callbacks[order_strategy_id] = {
-            "on_entry_fill": on_entry_fill,
-            "on_tp_fill": on_tp_fill,
-            "on_sl_fill": on_sl_fill,
-            "on_status_change": on_status_change,
-        }
+    _order_callbacks: Dict[str, Dict] = {}
 
     def _dispatch_order_event(self, order: Dict) -> None:
-        """Route order status changes to registered callbacks."""
-        # Order events include: ordStatus (Working, Filled, Cancelled, Rejected)
+        """Route order status changes to registered callbacks.
+
+        On entry fill, places the OCO exit pair (TP Limit + SL Stop).
+        """
         status = order.get("ordStatus", "")
         if not status:
             return
 
-        # Find matching callbacks by order's strategy or parent linkage
-        # The order object contains ocoId or parentId for linked orders
-        for strategy_id, cbs in list(self._order_callbacks.items()):
-            # Match by stored order IDs
+        order_id = order.get("id")
+
+        for bracket_key, cbs in list(self._order_callbacks.items()):
             entry_id = cbs.get("_entry_id")
             tp_id = cbs.get("_tp_id")
             sl_id = cbs.get("_sl_id")
-            order_id = order.get("id")
 
             if order_id == entry_id and status == "Filled":
                 cbs["on_entry_fill"](order)
+                if not cbs.get("_oco_placed"):
+                    cbs["_oco_placed"] = True
+                    asyncio.ensure_future(self._place_exit_oco(bracket_key))
             elif order_id == tp_id and status == "Filled":
                 cbs["on_tp_fill"](order)
             elif order_id == sl_id and status == "Filled":
@@ -291,6 +283,44 @@ class TradovateAdapter(BrokerAdapter):
 
             if order_id in (entry_id, tp_id, sl_id):
                 cbs["on_status_change"](order)
+
+    async def _place_exit_oco(self, bracket_key: str) -> None:
+        """Place OCO exit pair (TP Limit + SL Stop) after entry fills."""
+        cbs = self._order_callbacks.get(bracket_key)
+        if not cbs:
+            return
+
+        symbol = cbs["_symbol"]
+        reverse = cbs["_reverse_action"]
+        qty = cbs["_qty"]
+        tp_price = cbs["_tp_price"]
+        sl_price = cbs["_sl_price"]
+
+        try:
+            result = await self._rest.place_oco(
+                account_id=self._account_id,
+                account_spec=self._account_spec,
+                symbol=symbol,
+                action=reverse,
+                order_qty=qty,
+                order_type="Limit",
+                price=tp_price,
+                other={
+                    "action": reverse,
+                    "orderType": "Stop",
+                    "stopPrice": sl_price,
+                },
+            )
+            tp_real_id = result.get("orderId")
+            sl_real_id = result.get("ocoId")
+            cbs["_tp_id"] = tp_real_id
+            cbs["_sl_id"] = sl_real_id
+            logger.info(
+                "OCO exits placed: TP=%s SL=%s for bracket %s",
+                tp_real_id, sl_real_id, bracket_key,
+            )
+        except Exception as e:
+            logger.error("Failed to place OCO exits for bracket %s: %s", bracket_key, e)
 
     # ── Contract Resolution ─────────────────────────────────────────────
 
@@ -529,32 +559,21 @@ class TradovateAdapter(BrokerAdapter):
         on_sl_fill: Callable,
         on_status_change: Callable,
     ) -> BracketOrderResult:
-        """Place an atomic bracket order via Tradovate's order strategy.
+        """Place bracket: Limit entry, poll for fill, then OCO exits.
 
-        Uses orderStrategyTypeId: 2 (bracket) to send entry + TP + SL
-        as one atomic unit.
+        Mirrors the IB adapter pattern — entry is a standalone Limit order.
+        A background task polls for the fill, then places a Limit TP + Stop SL
+        as an OCO pair. Both exit legs are visible as regular orders.
         """
         action = "Buy" if side == "BUY" else "Sell"
         reverse_action = "Sell" if side == "BUY" else "Buy"
         symbol = contract.name or contract.symbol
 
-        # Build bracket parameters
-        brackets = {
-            "entryVersion": {
-                "orderQty": qty,
-                "orderType": "Limit",
-                "price": entry_price,
-            },
-            "brackets": [{
-                "qty": qty,
-                "profitTarget": abs(tp_price - entry_price),
-                "stopLoss": abs(entry_price - sl_price),
-                "trailingStop": False,
-            }],
-        }
+        tp_id = self._allocate_local_id()
+        sl_id = self._allocate_local_id()
 
         try:
-            result = await self._rest.start_order_strategy(
+            result = await self._rest.place_order(
                 account_id=self._account_id,
                 account_spec=self._account_spec,
                 symbol=symbol,
@@ -562,49 +581,113 @@ class TradovateAdapter(BrokerAdapter):
                 order_qty=qty,
                 order_type="Limit",
                 price=entry_price,
-                brackets=brackets,
             )
 
-            # Extract order IDs from response
-            strategy_id = str(result.get("id", ""))
-            entry_id = str(result.get("orderId", ""))
+            entry_id = result.get("orderId", result.get("id"))
+            bracket_key = str(entry_id)
 
-            # Pre-allocate TP/SL IDs (Tradovate assigns them, but we need
-            # placeholders for state persistence before they're known)
-            tp_id = self._allocate_local_id()
-            sl_id = self._allocate_local_id()
-
-            # Register callbacks for fill events
             cbs = {
                 "on_entry_fill": on_entry_fill,
                 "on_tp_fill": on_tp_fill,
                 "on_sl_fill": on_sl_fill,
                 "on_status_change": on_status_change,
-                "_entry_id": int(entry_id) if entry_id.isdigit() else None,
-                "_tp_id": None,  # Updated when Tradovate creates child orders
+                "_entry_id": entry_id,
+                "_tp_id": None,
                 "_sl_id": None,
+                "_oco_placed": False,
+                "_symbol": symbol,
+                "_reverse_action": reverse_action,
+                "_qty": qty,
+                "_tp_price": tp_price,
+                "_sl_price": sl_price,
             }
-            self._order_callbacks[strategy_id] = cbs
+            self._order_callbacks[bracket_key] = cbs
+
+            asyncio.ensure_future(self._poll_entry_fill(bracket_key))
 
             return BracketOrderResult(
                 success=True,
-                entry_order_id=entry_id,
+                entry_order_id=str(entry_id),
                 tp_order_id=tp_id,
                 sl_order_id=sl_id,
             )
 
         except Exception as e:
-            logger.error("Bracket order placement failed: %s", e)
+            logger.error("Bracket entry placement failed: %s", e)
             return BracketOrderResult(
                 success=False,
                 error=str(e),
             )
 
+    async def _poll_entry_fill(self, bracket_key: str, timeout: float = 300) -> None:
+        """Poll REST for entry fill, then place OCO exits."""
+        cbs = self._order_callbacks.get(bracket_key)
+        if not cbs:
+            return
+
+        entry_id = cbs["_entry_id"]
+        deadline = asyncio.get_event_loop().time() + timeout
+
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                order = await self._rest._get("/order/item", {"id": entry_id})
+                status = order.get("ordStatus", "")
+                if status == "Filled":
+                    logger.info("Entry %s filled, placing OCO exits", entry_id)
+                    cbs["on_entry_fill"](order)
+                    await self._place_exit_oco(bracket_key)
+                    return
+                if status in ("Cancelled", "Rejected"):
+                    logger.warning("Entry %s %s, skipping OCO", entry_id, status)
+                    cbs["on_status_change"](order)
+                    return
+            except Exception as e:
+                logger.debug("Poll entry %s: %s", entry_id, e)
+            await asyncio.sleep(0.5)
+
+        logger.warning("Entry %s fill poll timed out after %.0fs", entry_id, timeout)
+
     async def cancel_order(self, order_id: str) -> None:
+        oid = int(order_id)
         try:
-            await self._rest.cancel_order(int(order_id))
+            await self._rest.cancel_order(oid)
         except Exception as e:
             logger.error("Cancel order %s failed: %s", order_id, e)
+
+        # Cancel the OCO counterpart — Tradovate does not always auto-cancel
+        for cbs in self._order_callbacks.values():
+            tp_id = cbs.get("_tp_id")
+            sl_id = cbs.get("_sl_id")
+            if oid == tp_id and sl_id:
+                try:
+                    await self._rest.cancel_order(sl_id)
+                except Exception:
+                    pass
+            elif oid == sl_id and tp_id:
+                try:
+                    await self._rest.cancel_order(tp_id)
+                except Exception:
+                    pass
+
+    async def cancel_bracket_exits(self, entry_order_id: str) -> None:
+        """Cancel TP + SL exits for a bracket. Used before flattening."""
+        cbs = self._order_callbacks.get(str(entry_order_id))
+        if not cbs:
+            # Fallback: cancel ALL working orders (flatten safety)
+            for o in (await self._rest._get("/order/list") or []):
+                if o.get("ordStatus") in ("Working", "Accepted"):
+                    try:
+                        await self._rest.cancel_order(o["id"])
+                    except Exception:
+                        pass
+            return
+        for key in ("_tp_id", "_sl_id"):
+            oid = cbs.get(key)
+            if oid:
+                try:
+                    await self._rest.cancel_order(oid)
+                except Exception:
+                    pass
 
     async def modify_order_qty(self, order_id: str, new_qty: int) -> None:
         try:

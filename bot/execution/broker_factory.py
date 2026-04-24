@@ -30,8 +30,16 @@ def create_broker_adapter(config, logger=None, clock=None) -> BrokerAdapter:
         from bot.execution.tradovate.tradovate_adapter import TradovateAdapter
         return TradovateAdapter(config, bot_logger=logger, clock=clock)
 
+    elif backend == "ib_data_tradovate_exec":
+        from bot.execution.ib_adapter import IBAdapter
+        from bot.execution.tradovate.tradovate_adapter import TradovateAdapter
+        from bot.execution.split_adapter import SplitAdapter
+        data = IBAdapter(config, bot_logger=logger, clock=clock)
+        exec_ = TradovateAdapter(config, bot_logger=logger, clock=clock)
+        return SplitAdapter(data_adapter=data, exec_adapter=exec_)
+
     else:
         raise ValueError(
             f"Unknown execution_backend: {backend!r}. "
-            f"Supported: 'ib', 'tradovate'"
+            f"Supported: 'ib', 'tradovate', 'ib_data_tradovate_exec'"
         )
