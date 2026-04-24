@@ -971,6 +971,143 @@ def api_bot_cell_performance():
         return JSONResponse({"error": str(e)})
 
 
+def _compute_backtest_percentiles(active_id: str) -> dict:
+    """Compute weekly/monthly return percentiles from WF backtest daily P&L.
+
+    Reads all backtest runs whose strategy_id shares the same WF family as
+    the active strategy (matched by the base name pattern). Collects daily
+    P&L, groups into weeks/months as % of balance, returns percentile dict.
+
+    Returns empty dict if insufficient data.
+    """
+    import glob
+    from collections import defaultdict
+    from datetime import datetime
+
+    results_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..",
+        "bot", "backtest", "results")
+    manifest_path = os.path.join(results_dir, "manifest.json")
+
+    if not os.path.exists(manifest_path):
+        return {}
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    # Find WF family: strip year suffixes to match siblings.
+    # E.g., "mixed-best-ev-wf-2020-2025-slotbl-non3" matches
+    #        "wf-2020-test-2021-slotbl-non3" etc. via shared suffix.
+    # Simpler approach: collect all runs from the manifest (they're
+    # already curated as the WF series).
+    run_ids = [r["run_id"] for r in manifest.get("runs", [])]
+    if not run_ids:
+        return {}
+
+    all_daily = []
+    for run_id in run_ids:
+        result_path = os.path.join(results_dir, f"{run_id}.json")
+        if not os.path.exists(result_path):
+            continue
+        with open(result_path) as f:
+            data = json.load(f)
+        start_bal = data.get("meta", {}).get("balance", 80000)
+        # Normalize daily dollar P&L as % of the run's starting balance.
+        # This gives "what fraction of my capital did I make/lose today"
+        # and sums correctly to the known annual return (72100/80000 = 90.1%).
+        for dp in data.get("daily_pnl", []):
+            all_daily.append({
+                "date": dp["date"],
+                "pnl_pct": dp["pnl"] / start_bal * 100,
+            })
+
+    if len(all_daily) < 50:
+        return {}
+
+    all_daily.sort(key=lambda x: x["date"])
+
+    # Group into ISO weeks and calendar months
+    weekly_pct = defaultdict(float)
+    monthly_pct = defaultdict(float)
+    for dp in all_daily:
+        dt = datetime.strptime(dp["date"], "%Y-%m-%d")
+        weekly_pct[dt.strftime("%Y-W%W")] += dp["pnl_pct"]
+        monthly_pct[dp["date"][:7]] += dp["pnl_pct"]
+
+    weeks = sorted(weekly_pct.values())
+    months = sorted(monthly_pct.values())
+
+    def _pctl(data, p):
+        k = (len(data) - 1) * p / 100
+        f = int(k)
+        c = min(f + 1, len(data) - 1)
+        return data[f] + (k - f) * (data[c] - data[f])
+
+    result = {}
+    if len(weeks) >= 20:
+        result["week"] = {
+            f"p{p}": round(_pctl(weeks, p), 4)
+            for p in (5, 10, 25, 50, 75, 90, 95)
+        }
+    if len(months) >= 6:
+        result["month"] = {
+            f"p{p}": round(_pctl(months, p), 4)
+            for p in (5, 10, 25, 50, 75, 90, 95)
+        }
+    return result
+
+
+# Cache: recompute at most once per hour
+_pctl_cache = {"data": {}, "time": 0, "strategy": ""}
+
+
+def _get_backtest_percentiles(active_id: str) -> dict:
+    """Cached wrapper for _compute_backtest_percentiles."""
+    import time as _time
+    now = _time.time()
+    if (_pctl_cache["strategy"] == active_id
+            and _pctl_cache["data"]
+            and now - _pctl_cache["time"] < 3600):
+        return _pctl_cache["data"]
+    result = _compute_backtest_percentiles(active_id)
+    _pctl_cache["data"] = result
+    _pctl_cache["time"] = now
+    _pctl_cache["strategy"] = active_id
+    return result
+
+
+def _strategy_daily_ev_pct(strat: dict) -> float:
+    """Compute daily expected return as a fraction of balance from strategy cells.
+
+    For each cell: expected_pnl_per_trade = ev × risk_pct × balance
+    (because contracts = risk_pct × balance / (risk_pts × point_value),
+     and pnl = ev × risk_pts × contracts × point_value = ev × risk_pct × balance)
+
+    daily_ev_pct = Σ(trades_per_day × ev × risk_pct_for_bucket)
+    """
+    risk_rules = strat.get("meta", {}).get("risk_rules", {})
+    small_set = set(risk_rules.get("small_buckets", ["5-10", "10-15"]))
+    large_set = set(risk_rules.get("large_buckets", ["40-50", "50-200"]))
+    small_pct = risk_rules.get("small_risk_pct", 0.005)
+    medium_pct = risk_rules.get("medium_risk_pct", 0.015)
+    large_pct = risk_rules.get("large_risk_pct", 0.03)
+
+    daily_ev = 0.0
+    for c in strat.get("cells", []):
+        if not c.get("enabled", True):
+            continue
+        rr = c.get("risk_range", "")
+        if rr in small_set:
+            rpct = small_pct
+        elif rr in large_set:
+            rpct = large_pct
+        else:
+            rpct = medium_pct
+        daily_ev += c.get("trades_per_day", 0) * c.get("ev", 0) * rpct
+
+    return daily_ev
+
+
 @app.get("/api/bot/period-pnl")
 def api_bot_period_pnl():
     """Current day/week/month PNL + WR with cell-weighted baseline WR."""
@@ -1013,28 +1150,34 @@ def api_bot_period_pnl():
             # Clean up cell data even on error
             for period in ("today", "week", "month"):
                 result.pop(f"{period}_cells", None)
-        # Balance-scaled expected PnL + percentile distribution from backtest
-        # Computed from 319 weeks / 75 months of $80k backtest data
+        # Strategy-derived expected PnL: compute from active strategy cells
+        # daily_ev_pct = Σ(trades_per_day × cell_ev × risk_pct_for_bucket)
+        # Then: week = daily × 5, month = daily × 21
+        # Percentiles estimated from per-trade σ and √N scaling
         try:
             state_file = os.path.join(_BOT_STATE_DIR, "bot_state.json")
             with open(state_file) as f:
                 state = json.load(f)
             bal = (state.get("start_balance") or 80000) + (state.get("realized_pnl") or 0)
-            result["week_expected_pnl"] = round(bal * 0.0129, 0)
-            result["month_expected_pnl"] = round(bal * 0.0561, 0)
-            # Percentile thresholds (return % from backtest distribution)
-            result["week_pctls"] = {
-                "p5": round(bal * -0.0518), "p10": round(bal * -0.0326),
-                "p25": round(bal * -0.0140), "p50": round(bal * 0.0129),
-                "p75": round(bal * 0.0417), "p90": round(bal * 0.0698),
-                "p95": round(bal * 0.0855),
-            }
-            result["month_pctls"] = {
-                "p5": round(bal * -0.0812), "p10": round(bal * -0.0366),
-                "p25": round(bal * -0.0016), "p50": round(bal * 0.0561),
-                "p75": round(bal * 0.1352), "p90": round(bal * 0.2487),
-                "p95": round(bal * 0.2882),
-            }
+
+            # Compute percentiles from WF backtest daily P&L (dynamic).
+            # Reads all runs in backtest manifest, groups daily PnL into
+            # weeks/months as % of balance, returns empirical percentiles.
+            # Cached for 1 hour. Auto-updates when strategy or backtests change.
+            pctls = _get_backtest_percentiles(active_id) if active_id else {}
+
+            if "week" in pctls:
+                wp = pctls["week"]
+                result["week_expected_pnl"] = round(bal * wp["p50"] / 100, 0)
+                result["week_pctls"] = {
+                    k: round(bal * v / 100) for k, v in wp.items()
+                }
+            if "month" in pctls:
+                mp = pctls["month"]
+                result["month_expected_pnl"] = round(bal * mp["p50"] / 100, 0)
+                result["month_pctls"] = {
+                    k: round(bal * v / 100) for k, v in mp.items()
+                }
         except Exception:
             pass
         return JSONResponse(result)

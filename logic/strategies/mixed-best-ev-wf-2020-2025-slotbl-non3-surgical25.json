@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "name": "Mixed Best EV WF Train 2020-2025 (pruned)",
+    "name": "Mixed Best EV WF Train 2020-2025 (pruned) [surgical 25-30]",
     "description": "WF train: cells fit on NQ 5min FVGs from 2020-01-01 to 2025-12-31. Selection: extreme-stop only, EV>=0.07, samples>=30, best (setup,rr) per (time,risk). Live config gates copied from mixed-best-ev-v3-touch-moderate. Pruned 20 cells with negative train P&L (rule A).",
     "ticker": "NQ",
     "timeframe": "5min",
@@ -16,14 +16,14 @@
     },
     "risk_rules": {
       "small_buckets": [
-        "5-10",
-        "10-15"
+        "10-15",
+        "25-30",
+        "5-10"
       ],
       "small_risk_pct": 0.0025,
       "medium_buckets": [
         "15-20",
         "20-25",
-        "25-30",
         "30-40"
       ],
       "medium_risk_pct": 0.01,
@@ -33,7 +33,7 @@
       ],
       "large_risk_pct": 0.03
     },
-    "id": "mixed-best-ev-wf-2020-2025-slotbl-non3",
+    "id": "mixed-best-ev-wf-2020-2025-slotbl-non3-surgical25",
     "created_at": "2026-04-08T11:34:10.428301+00:00",
     "updated_at": "2026-04-08T13:54:21.427289+00:00",
     "hard_gates": {

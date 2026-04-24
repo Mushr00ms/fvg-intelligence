@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "name": "Mixed Best EV WF Train 2020-2025 (pruned)",
-    "description": "WF train: cells fit on NQ 5min FVGs from 2020-01-01 to 2025-12-31. Selection: extreme-stop only, EV>=0.07, samples>=30, best (setup,rr) per (time,risk). Live config gates copied from mixed-best-ev-v3-touch-moderate. Pruned 20 cells with negative train P&L (rule A).",
+    "name": "Tradovate launch \u2014 Mixed Best EV WF 2020-2025 + surgical 25-30 + D tiers",
+    "description": "TRADOVATE LAUNCH STRATEGY. Base cells: mixed-best-ev-wf-2020-2025-slotbl-non3 (LIVE candidate locked 2026-04-08). Modifications for Tradovate deployment (2026-04-17): (1) Risk tiers set to 0.40% / 1.35% / 3.00% (Config D from tier sweep) \u2014 trades ~10pt of theoretical upside for materially better single-year downside. (2) 25-30 bucket surgically reclassified from medium (1.35%) to small (0.40%) based on 6 walk-forward OOS years showing persistent underperformance (net -$3.2k on ~398 trades, negative in 4/6 years, WR ~37% vs healthy 54-56% on neighbor buckets). Expected profile (WF OOS, HFOIV ON, DD scale OFF, no margin): continuous 2021-2026 $80k\u2192$770k (+862%, 36.7% max DD); standalone worst year -1.3% (2024). Single-year max DD: 28.7%. Recommended deployment: HFOIV gate ON, DD scaling OFF (regime-level protection comes from HFOIV, not daily DD scaling).",
     "ticker": "NQ",
     "timeframe": "5min",
     "source_dataset": "rr_nq_5min_2020_2025_30min",
@@ -16,24 +16,24 @@
     },
     "risk_rules": {
       "small_buckets": [
-        "5-10",
-        "10-15"
+        "10-15",
+        "25-30",
+        "5-10"
       ],
-      "small_risk_pct": 0.0025,
+      "small_risk_pct": 0.004,
       "medium_buckets": [
         "15-20",
         "20-25",
-        "25-30",
         "30-40"
       ],
-      "medium_risk_pct": 0.01,
+      "medium_risk_pct": 0.0135,
       "large_buckets": [
         "40-50",
         "50-200"
       ],
       "large_risk_pct": 0.03
     },
-    "id": "mixed-best-ev-wf-2020-2025-slotbl-non3",
+    "id": "mixed-best-ev-wf-2020-2025-tradovate",
     "created_at": "2026-04-08T11:34:10.428301+00:00",
     "updated_at": "2026-04-08T13:54:21.427289+00:00",
     "hard_gates": {

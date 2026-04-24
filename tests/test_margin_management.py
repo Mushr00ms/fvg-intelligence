@@ -344,7 +344,7 @@ class TestStateMigration:
 
         migrated = sm._migrate_state(v10_data, "1.0")
 
-        assert migrated["version"] == "1.1"
+        assert migrated["version"] == "1.2"
         assert "suspended_orders" in migrated
         assert migrated["suspended_orders"] == []
         # Existing OrderGroups get new fields
@@ -352,7 +352,7 @@ class TestStateMigration:
         assert og["suspended_at"] is None
         assert og["suspend_reason"] == ""
 
-    def test_v00_to_v11_migration(self):
+    def test_v00_to_v12_migration(self):
         from bot.state.state_manager import StateManager
         sm = StateManager(tempfile.mkdtemp(), logger=_CaptureLogger())
 
@@ -366,7 +366,7 @@ class TestStateMigration:
 
         migrated = sm._migrate_state(v00_data, "0.0")
 
-        assert migrated["version"] == "1.1"
+        assert migrated["version"] == "1.2"
         assert "suspended_orders" in migrated
 
 
@@ -1034,10 +1034,10 @@ class TestConfigFields:
             log_dir=tempfile.mkdtemp(),
             strategy_dir=tempfile.mkdtemp(),
         )
-        assert config.margin_intraday_initial == 36750.0
-        assert config.margin_intraday_maintenance == 22924.0
-        assert config.margin_overnight_initial == 46373.0
-        assert config.margin_fallback_per_contract == 36750.0
+        assert config.margin_intraday_initial == 1000.0
+        assert config.margin_intraday_maintenance == 1000.0
+        assert config.margin_overnight_initial == 40249.0
+        assert config.margin_fallback_per_contract == 1000.0
         assert config.margin_intraday_start == "09:30"
         assert config.margin_intraday_end == "16:00"
         assert config.margin_buffer_pct == 0.0

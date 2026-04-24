@@ -19,14 +19,14 @@
         "5-10",
         "10-15"
       ],
-      "small_risk_pct": 0.005,
+      "small_risk_pct": 0.0025,
       "medium_buckets": [
         "15-20",
         "20-25",
         "25-30",
         "30-40"
       ],
-      "medium_risk_pct": 0.015,
+      "medium_risk_pct": 0.01,
       "large_buckets": [
         "40-50",
         "50-200"

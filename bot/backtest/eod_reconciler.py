@@ -245,9 +245,13 @@ def match_trades(live_trades, backtest_trades, hfoiv_active=False):
         # Check matched pairs for divergences
         for lt, bt in matched:
             divergences.extend(_compare_matched(lt, bt, ck, hfoiv_active))
-            # Corrected P&L: use backtest pnl_pts (real price action)
-            # but live contract count (HFOIV-adjusted sizing is correct)
-            corrected_pnl += bt["pnl_pts"] * POINT_VALUE * lt["contracts"]
+            # Corrected P&L: backtest price path normalized to live sizing.
+            # Scale bt net_pnl (which includes commissions) proportionally
+            # to the live/bt contract ratio so commissions scale correctly.
+            if bt["contracts"] > 0:
+                corrected_pnl += bt["net_pnl"] * lt["contracts"] / bt["contracts"]
+            else:
+                corrected_pnl += bt["net_pnl"]
 
         # Unmatched live trades — use live P&L as-is (backtest has no data)
         for lt in unmatched_live:
@@ -357,6 +361,8 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
             lines.append(f"\n⬇ {d.cell_key}: {d.live_detail} (BT {d.backtest_detail})")
 
     # P&L bar
+    corrected_diff = abs(result.corrected_net_pnl - result.backtest_net_pnl)
+    show_corrected = result.matched_count > 0 and corrected_diff >= 1.0 and not severe
     if fills_garbage and result.matched_count > 0:
         # Paper fills unreliable — use backtest prices × live sizing
         true_pnl = result.corrected_net_pnl
@@ -365,20 +371,19 @@ def format_telegram_report(result, weekly_html=None, fills_garbage=False):
         pnl_warn = "  ⚠️" if round(result.live_net_pnl) != round(true_pnl) else ""
         lines.append(f"     Paper:     ${result.live_net_pnl:>+,.0f}{pnl_warn}")
         lines.append(f"     Corrected: ${true_pnl:>+,.0f}")
+        if show_corrected:
+            lines.append(f"     BT raw:    ${result.backtest_net_pnl:>+,.0f}")
     else:
-        delta = result.live_net_pnl - result.backtest_net_pnl
-        corrected_delta = result.live_net_pnl - result.corrected_net_pnl
         live_icon = "📈" if result.live_net_pnl >= 0 else "📉"
-        lines.append(f"\n{live_icon} <b>P&L</b>")
-        lines.append(f"     Live:      ${result.live_net_pnl:>+,.0f}")
-        lines.append(f"     Backtest:  ${result.backtest_net_pnl:>+,.0f}")
-        if hfoiv:
+        if show_corrected:
+            lines.append(f"\n{live_icon} <b>P&L</b> (normalized to live size)")
+            lines.append(f"     Live:      ${result.live_net_pnl:>+,.0f}")
             lines.append(f"     Corrected: ${result.corrected_net_pnl:>+,.0f}")
-            lines.append(f"     Delta:     ${delta:>+,.0f}")
-            if round(corrected_delta) != 0:
-                lines.append(f"     Residual:  ${corrected_delta:>+,.0f}")
+            lines.append(f"     BT raw:    ${result.backtest_net_pnl:>+,.0f}")
         else:
-            lines.append(f"     Delta:     ${delta:>+,.0f}")
+            lines.append(f"\n{live_icon} <b>P&L</b>")
+            lines.append(f"     Live:      ${result.live_net_pnl:>+,.0f}")
+            lines.append(f"     Backtest:  ${result.backtest_net_pnl:>+,.0f}")
 
     if result.kill_switch_active:
         lines.append("\n🛑 Kill switch fired — backtest-only trades expected")
@@ -565,21 +570,34 @@ def build_backtest_config(bot_config, strategy_dict, start_balance, margin_sched
     """
     meta = strategy_dict.get("meta", {})
 
+    # Mirror HFOIV gate settings from strategy so the backtest applies
+    # identical sizing reductions — keeps reconciliation P&L aligned.
+    hfoiv_cfg = meta.get("hfoiv_gate", {})
+    if hfoiv_cfg.get("enabled", False):
+        hfoiv_dict = {
+            "enabled": True,
+            "rolling_bars": hfoiv_cfg.get("rolling_bars", 6),
+            "lookback_sessions": hfoiv_cfg.get("lookback_sessions", 90),
+            "bucket_minutes": hfoiv_cfg.get("bucket_minutes", 30),
+            "thresholds": hfoiv_cfg.get("thresholds", [(70, 0.25)]),
+        }
+    else:
+        hfoiv_dict = {"enabled": False}
+
     config = {
         "balance": start_balance,
         "risk_pct": bot_config.risk_per_trade,
         "max_concurrent": bot_config.max_concurrent,
         "max_daily_trades": bot_config.max_daily_trades,
         "min_fvg_size": bot_config.min_fvg_size,
-        "slip": False,          # Live bot uses limit orders
+        "slip": False,          # Live bot uses limit orders (entry/TP)
         "mit_entry_ticks": 0,   # Live bot uses limit orders
+        "sl_slip_ticks": 2,     # SL is stop-market → typically slips ~2 ticks
         "tp_mode": "fixed",
         "risk_tiers": bot_config.use_risk_tiers,
         "margin_per_contract": bot_config.margin_intraday_initial,
         "margin_schedule": margin_schedule or [],
-        "hfoiv": {
-            "enabled": False,  # Default off — overridden if bot uses it
-        },
+        "hfoiv": hfoiv_dict,
     }
 
     # Mirror risk tier settings from strategy meta if available

@@ -737,6 +737,7 @@ def run_backtest(df_1s, strategy, config=None):
     min_fvg_size = config.get("min_fvg_size", 0.25)
     use_slip = config.get("slip", False)
     mit_entry_ticks = config.get("mit_entry_ticks", 0)  # MIT entry slippage (0=limit, 1-4=MIT)
+    sl_slip_ticks = config.get("sl_slip_ticks", 0)    # SL slippage ticks (stop-market fill drift)
     skip_mid_if_mit = config.get("skip_mid_if_mit", False)  # skip mid_extreme if mit_extreme level already reached
     consecutive_filter = config.get("consecutive_filter", False)  # skip near, take far
     consecutive_near_only = config.get("consecutive_near_only", False)  # skip far, take near (live behavior)
@@ -745,45 +746,15 @@ def run_backtest(df_1s, strategy, config=None):
     # contracts at entry price, making touch=fill the correct default model
     tp_mode = config.get("tp_mode", "fixed")  # fixed, runner, runner-be, split
 
-    # IB tiered commission: per-side IB rate (marginal) + $1.40 exchange/reg
-    # Round-trip = 2 sides. Monthly volume determines IB rate tier.
-    _EXCHANGE_FEE_PER_SIDE = 1.40
-    _IB_TIERS = [  # (cumulative_threshold, per_side_ib_rate)
-        (1000,  0.85),
-        (10000, 0.65),
-        (20000, 0.45),
-        (float('inf'), 0.25),
-    ]
-    _monthly_contracts = 0  # reset each month
-    _current_month = None
+    # Tradovate flat commission: $2.88/contract/side (all-in: clearing + exchange + NFA)
+    # Verified empirically on demo: 5 sells = $14.40 realizedPnL with no closed trades.
+    _COMMISSION_PER_SIDE = 2.88
 
     def _calc_commission(num_contracts, trade_date):
-        """Calculate round-trip commission with IB tiered pricing."""
-        nonlocal _monthly_contracts, _current_month
-        # Reset on new month
-        trade_month = (trade_date.year, trade_date.month) if hasattr(trade_date, 'year') else None
-        if trade_month != _current_month:
-            _monthly_contracts = 0
-            _current_month = trade_month
-
-        total_comm = 0.0
-        remaining = num_contracts
-        vol = _monthly_contracts
-        for threshold, rate in _IB_TIERS:
-            if remaining <= 0:
-                break
-            available = threshold - vol
-            if available <= 0:
-                continue
-            batch = min(remaining, available)
-            per_side = rate + _EXCHANGE_FEE_PER_SIDE
-            total_comm += batch * per_side * 2  # round-trip = 2 sides
-            remaining -= batch
-            vol += batch
-
-        _monthly_contracts += num_contracts
-        return round(total_comm, 2)
+        """Calculate round-trip commission (entry + exit)."""
+        return round(num_contracts * _COMMISSION_PER_SIDE * 2, 2)
     use_risk_tiers = config.get("risk_tiers", False)
+    dd_scale_enabled = config.get("dd_scale", True)  # default matches live bot
     margin_per_contract = config.get("margin_per_contract", 33000.0)  # NQ intraday initial
     margin_buffer_pct = config.get("margin_buffer_pct", 0.0)
 
@@ -827,7 +798,7 @@ def run_backtest(df_1s, strategy, config=None):
     use_mnq = config.get("use_mnq", False)
     mnq_zero_policy = config.get("mnq_zero", "trade")  # "trade" or "skip"
     POINT_VALUE_MNQ = 2.0
-    MARGIN_MNQ = 3300.0  # Intraday MNQ margin (~10% of NQ)
+    MARGIN_MNQ = 100.0  # Tradovate MNQ intraday margin (~10% of NQ)
 
     strategy_lookup = build_strategy_lookup(strategy)
     sizing_label = (
@@ -873,10 +844,41 @@ def run_backtest(df_1s, strategy, config=None):
               f"lookback={hfoiv_gate.config.lookback_sessions} sessions)")
 
     # Group 1s bars by trading day (pre-group once, avoids O(N) scan per day)
+    # (need trading_days to determine warmup range, so group first)
     df_1s['trade_date'] = df_1s['date'].dt.date
     _day_groups = {day: grp for day, grp in df_1s.groupby('trade_date')}
     trading_days = sorted(_day_groups.keys())
     print(f"Trading days: {len(trading_days)} ({trading_days[0]} → {trading_days[-1]})")
+
+    # ── HFOIV warmup: pre-feed historical sessions before first trading day ──
+    # For short runs (e.g. single-day EOD reconciliation), the gate starts
+    # with zero history and returns 1.0 (no scaling).  Pre-feeding historical
+    # imbalance sessions mirrors what the live bot does in _load_hfoiv_history().
+    if hfoiv_enabled and _imbalance_by_date:
+        first_day_str = trading_days[0].strftime("%Y%m%d")
+        warmup_dates = sorted(d for d in _imbalance_by_date if d < first_day_str)
+        warmup_dates = warmup_dates[-hfoiv_gate.config.lookback_sessions:]
+        for dstr in warmup_dates:
+            try:
+                imb_df = pd.read_parquet(_imbalance_by_date[dstr])
+                if "date" not in imb_df.columns or "imbalance" not in imb_df.columns:
+                    continue
+                if imb_df.empty:
+                    continue
+                hfoiv_gate.reset_day()
+                imb_df["date"] = pd.to_datetime(imb_df["date"])
+                if imb_df["date"].dt.tz is None:
+                    imb_df["date"] = imb_df["date"].dt.tz_localize("America/New_York")
+                for _, row in imb_df.iterrows():
+                    bar_min = row["date"].hour * 60 + row["date"].minute
+                    hfoiv_gate.update(bar_min, float(row["imbalance"]))
+            except Exception:
+                continue
+        if warmup_dates:
+            # Final reset_day flushes the last warmup session into history
+            hfoiv_gate.reset_day()
+            print(f"HFOIV warmup: pre-fed {len(warmup_dates)} historical sessions "
+                  f"(gate has {hfoiv_gate._session_count} sessions)")
 
     all_trades = []
     trade_counter = 0
@@ -1226,7 +1228,7 @@ def run_backtest(df_1s, strategy, config=None):
                     _dd_notes.append(f"margin cap {_pre_margin_contracts}→{contracts} (avail ${_available_for_margin:,.0f} reserved ${day_margin_reserved:,.0f})")
 
                 # Drawdown scaling — reduce size as daily losses accumulate
-                if day_start_balance > 0:
+                if dd_scale_enabled and day_start_balance > 0:
                     dd_pct = daily_pnl / day_start_balance  # negative when losing
                     if dd_pct <= -0.06:
                         dd_mult = 0.25
@@ -1295,6 +1297,16 @@ def run_backtest(df_1s, strategy, config=None):
                 runner_contracts = exit_summary["runner_contracts"]
                 excursion_pts = exit_summary["excursion_pts"]
 
+                # SL slippage: stop-market orders fill worse than the stop
+                # price in real markets.  Entry/TP are limit orders (no slip).
+                if exit_reason == "SL" and sl_slip_ticks > 0:
+                    _sl_slip_pts = round_to_tick(sl_slip_ticks * TICK_SIZE)
+                    pnl_pts = round_to_tick(pnl_pts - _sl_slip_pts)
+                    if side == "BUY":
+                        exit_price = round_to_tick(exit_price - _sl_slip_pts)
+                    else:
+                        exit_price = round_to_tick(exit_price + _sl_slip_pts)
+
                 # For fixed TP wins, measure how far price went past target
                 if resolved_tp_mode == "fixed" and exit_reason == "TP":
                     exit_ts = np.datetime64(pd.Timestamp(exit_time))
@@ -1307,7 +1319,7 @@ def run_backtest(df_1s, strategy, config=None):
 
                 commission = _calc_commission(contracts, day)
                 if _contract_type == "MNQ":
-                    commission *= 0.5  # MNQ commission roughly half of NQ
+                    commission *= 0.215  # MNQ ~$0.62/side vs NQ $2.88/side
                 pnl_dollars = round(pnl_pts * contracts * _eff_point_value - commission, 2)
 
                 # Determine is_win
@@ -1824,6 +1836,8 @@ def main():
                         help="Optional cap for hybrid streak risk pct (default: uncapped)")
     parser.add_argument("--margin", type=float, default=33000.0,
                         help="Margin per contract (default: NQ intraday initial $33,000)")
+    parser.add_argument("--no-dd-scale", action="store_true",
+                        help="Disable intraday drawdown size scaling (default: enabled, matches live bot)")
     parser.add_argument("--hfoiv", action="store_true",
                         help="Enable HFOIV gate (requires pre-computed imbalance bars)")
     parser.add_argument("--hfoiv-rolling", type=int, default=12,
@@ -1877,6 +1891,7 @@ def main():
         "mit_entry_ticks": args.mit_entry,
         "tp_mode": args.tp_mode,
         "margin_per_contract": args.margin,
+        "dd_scale": not args.no_dd_scale,
         "tier_reset": args.tier_reset,
         "streak": args.streak,
         "streak_base": args.streak_base,

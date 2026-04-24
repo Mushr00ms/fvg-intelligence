@@ -274,6 +274,26 @@ class TestMatchTrades:
         assert len(mis) == 1
         assert "HFOIV" not in mis[0].live_detail
 
+    def test_corrected_pnl_scales_with_commissions(self):
+        """Corrected P&L should scale bt net_pnl (including commissions) to live sizing."""
+        # BT: 2ct, pnl_pts=+18.25, pnl_dollars=+720.50 (after $9.50 commission)
+        # Live: 1ct (HFOIV reduced)
+        # Corrected should be 720.50 * (1/2) = 360.25 (commission scales proportionally)
+        live = [_live_trade(contracts=1, pnl_pts=18.25, net_pnl=360.0)]
+        bt = [FakeTrade(contracts=2, pnl_pts=18.25, pnl_dollars=720.50)]
+        result = match_trades(live, bt, hfoiv_active=True)
+
+        assert result.corrected_net_pnl == pytest.approx(360.25, abs=0.01)
+
+    def test_corrected_pnl_equals_bt_when_contracts_match(self):
+        """When contracts match, corrected P&L equals bt net P&L (with commissions)."""
+        live = [_live_trade(contracts=2, pnl_pts=18.25, net_pnl=730.0)]
+        bt = [FakeTrade(contracts=2, pnl_pts=18.25, pnl_dollars=720.50)]
+        result = match_trades(live, bt)
+
+        # corrected should equal bt net_pnl since contracts match (1:1 ratio)
+        assert result.corrected_net_pnl == pytest.approx(720.50, abs=0.01)
+
 
 class TestFormatTelegramReport:
     """Test Telegram report formatting."""
@@ -317,31 +337,31 @@ class TestFormatTelegramReport:
         assert "2 divergences" in msg
         assert "10:30-11:00" in msg
         assert "12:00-12:30" in msg
-        assert "Delta" in msg
+        assert "Live:" in msg
+        assert "Backtest:" in msg
 
-    def test_hfoiv_report_shows_corrected_pnl(self):
+    def test_hfoiv_report_shows_corrected_pnl_when_size_differs(self):
+        """When sizing differs, report live-size-normalized P&L."""
         result = ReconciliationResult(
             date="2026-04-09",
             live_count=8,
             backtest_count=8,
             matched_count=8,
             live_net_pnl=3745.0,
-            backtest_net_pnl=8487.0,
+            backtest_net_pnl=4455.0,
             corrected_net_pnl=3775.0,
             divergences=[
-                Divergence(
-                    "HFOIV_EXPECTED",
-                    "09:30-10:00 | 20-25 | mid_extreme | SELL",
-                    "1ct ⬇ HFOIV",
-                    "2ct",
-                ),
+                Divergence("HFOIV_EXPECTED", "cell", "1ct ⬇ HFOIV", "2ct"),
             ],
         )
         msg = format_telegram_report(result)
-        assert "Corrected" in msg
+        assert "Live:" in msg
+        assert "Corrected:" in msg
+        assert "BT raw:" in msg
+        assert "$+3,745" in msg
         assert "$+3,775" in msg
-        assert "Residual" in msg
-        assert "$-30" in msg
+        assert "$+4,455" in msg
+        assert "normalized to live size" in msg
 
     def test_with_weekly_html(self):
         result = ReconciliationResult(
@@ -374,7 +394,8 @@ class TestBuildBacktestConfig:
         assert config["max_concurrent"] == 3
         assert config["max_daily_trades"] == 15
         assert config["slip"] is False
-        assert config["margin_per_contract"] == 36750.0
+        assert config["sl_slip_ticks"] == 2
+        assert config["margin_per_contract"] == 1000.0
 
     def test_risk_tiers_from_strategy(self):
         from bot.bot_config import BotConfig

@@ -1,134 +1,77 @@
 """
-Financial Content Automation - Utils Package
+Utilities exposed at the package level via lazy imports.
 
-This package contains refactored utility modules organized by theme:
-
-- time_utils: Time and timezone handling utilities
-- contract_utils: Futures contract management utilities
-- data_cache_utils: Data caching and fetching utilities
-- fvg_detection: Fair Value Gap detection algorithms
-- fvg_analysis: FVG analysis and processing functions
-- visualization_utils: Chart and plot generation utilities
-- statistical_analysis: Statistical analysis functions
-- insights_utils: Insights generation and file output utilities
+Keeping these imports lazy avoids pulling heavy analysis dependencies such as
+NumPy/Pandas into lightweight runtime paths that only need contract helpers.
 """
 
-from .contract_utils import (
-    create_contract,
-    generate_es_expirations,
-    generate_nq_expirations,
-    get_contract_for_date,
-)
-from .data_cache_utils import fetch_and_cache, fetch_market_data, get_filename
-from .fvg_analysis import (
-    analyze_fvg_size_time_distribution,
-    analyze_fvgs_by_time_period,
-    calculate_expansion_after_mitigation,
-    calculate_fvg_size,
-    find_fvg_mitigations,
-    get_random_fvg_with_expansion,
-    optimize_expansion_target,
-    study_specific_fvg,
-)
-from .fvg_detection import (
-    detect_fvg,
-    detect_fvg_by_size_ranges,
-    detect_fvg_with_size_threshold,
-)
-from .insights_utils import (
-    create_filename_prefix,
-    find_optimal_fvg_size_time,
-    save_fvg_size_time_insights,
-    save_insights_to_file,
-    save_time_period_insights,
-)
-from .statistical_analysis import (
-    calculate_combined_time_stats,
-    calculate_day_of_week_stats,
-    calculate_time_period_stats,
-    crosscheck_invalidated_fvgs,
-    crosscheck_valid_expansions,
-    crosscheck_all_fvgs,
-)
+from __future__ import annotations
 
-# Import commonly used functions for easier access
-from .time_utils import (
-    assign_time_period_to_fvgs,
-    create_time_intervals,
-    ensure_ny_timezone,
-    format_timedelta_analysis,
-)
-from .interactive_plots import (
-    create_interactive_heatmaps,
-    create_interactive_mitigation_heatmap,
-    create_optimizer_chart,
-)
-from .rr_analysis import (
-    compute_rr_for_fvgs,
-    aggregate_rr_cells,
-    save_rr_dataset,
-    load_rr_dataset,
-    get_rr_manifest,
-    SETUPS as RR_SETUPS,
-    N_VALUES as RR_N_VALUES,
-)
-from .visualization_utils import (
-    create_analysis_plots,
-    create_expansion_percentile_charts,
-    create_time_based_heatmaps,
-    create_mitigation_time_heatmap,
-    plot_fvg_expansion,
-)
+from importlib import import_module
 
-__all__ = [
-    # time_utils
-    "format_timedelta_analysis",
-    "ensure_ny_timezone",
-    "create_time_intervals",
-    "assign_time_period_to_fvgs",
-    # contract_utils
-    "generate_nq_expirations",
-    "generate_es_expirations",
-    "create_contract",
-    "get_contract_for_date",
-    # data_cache_utils
-    "fetch_and_cache",
-    "fetch_market_data", 
-    "get_filename",
-    # fvg_detection
-    "detect_fvg",
-    "detect_fvg_by_size_ranges",
-    "detect_fvg_with_size_threshold",
-    # fvg_analysis
-    "study_specific_fvg",
-    "find_fvg_mitigations",
-    "calculate_expansion_after_mitigation",
-    "calculate_fvg_size",
-    "get_random_fvg_with_expansion",
-    "analyze_fvgs_by_time_period",
-    "analyze_fvg_size_time_distribution",
-    "optimize_expansion_target",
-    # visualization_utils
-    "plot_fvg_expansion",
-    "create_time_based_heatmaps",
-    "create_mitigation_time_heatmap",
-    "create_analysis_plots",
-    "create_expansion_percentile_charts",
-    # interactive_plots
-    "create_interactive_heatmaps",
-    "create_interactive_mitigation_heatmap",
-    "create_optimizer_chart",
-    # statistical_analysis
-    "calculate_day_of_week_stats",
-    "calculate_time_period_stats",
-    "calculate_combined_time_stats",
-    "crosscheck_invalidated_fvgs",
-    "crosscheck_valid_expansions",
-    "crosscheck_all_fvgs",
-    # insights_utils
-    "find_optimal_fvg_size_time",
-    "save_insights_to_file",
-    "create_filename_prefix",
-    "save_time_period_insights",
-    "save_fvg_size_time_insights",
-]
+_EXPORTS = {
+    "aggregate_rr_cells": "rr_analysis",
+    "analyze_fvg_size_time_distribution": "fvg_analysis",
+    "analyze_fvgs_by_time_period": "fvg_analysis",
+    "assign_time_period_to_fvgs": "time_utils",
+    "calculate_combined_time_stats": "statistical_analysis",
+    "calculate_day_of_week_stats": "statistical_analysis",
+    "calculate_expansion_after_mitigation": "fvg_analysis",
+    "calculate_fvg_size": "fvg_analysis",
+    "calculate_time_period_stats": "statistical_analysis",
+    "compute_rr_for_fvgs": "rr_analysis",
+    "create_analysis_plots": "visualization_utils",
+    "create_contract": "contract_utils",
+    "create_expansion_percentile_charts": "visualization_utils",
+    "create_filename_prefix": "insights_utils",
+    "create_interactive_heatmaps": "interactive_plots",
+    "create_interactive_mitigation_heatmap": "interactive_plots",
+    "create_mitigation_time_heatmap": "visualization_utils",
+    "create_optimizer_chart": "interactive_plots",
+    "create_time_based_heatmaps": "visualization_utils",
+    "create_time_intervals": "time_utils",
+    "crosscheck_all_fvgs": "statistical_analysis",
+    "crosscheck_invalidated_fvgs": "statistical_analysis",
+    "crosscheck_valid_expansions": "statistical_analysis",
+    "detect_fvg": "fvg_detection",
+    "detect_fvg_by_size_ranges": "fvg_detection",
+    "detect_fvg_with_size_threshold": "fvg_detection",
+    "ensure_ny_timezone": "time_utils",
+    "fetch_and_cache": "data_cache_utils",
+    "fetch_market_data": "data_cache_utils",
+    "find_fvg_mitigations": "fvg_analysis",
+    "find_optimal_fvg_size_time": "insights_utils",
+    "format_timedelta_analysis": "time_utils",
+    "generate_es_expirations": "contract_utils",
+    "generate_nq_expirations": "contract_utils",
+    "get_contract_for_date": "contract_utils",
+    "get_filename": "data_cache_utils",
+    "get_random_fvg_with_expansion": "fvg_analysis",
+    "get_rr_manifest": "rr_analysis",
+    "load_rr_dataset": "rr_analysis",
+    "N_VALUES": "rr_analysis",
+    "optimize_expansion_target": "fvg_analysis",
+    "plot_fvg_expansion": "visualization_utils",
+    "RR_SETUPS": "rr_analysis",
+    "save_fvg_size_time_insights": "insights_utils",
+    "save_insights_to_file": "insights_utils",
+    "save_rr_dataset": "rr_analysis",
+    "save_time_period_insights": "insights_utils",
+    "study_specific_fvg": "fvg_analysis",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str):
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(f".{module_name}", __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

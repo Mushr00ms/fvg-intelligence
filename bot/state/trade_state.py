@@ -23,7 +23,18 @@ def _new_id():
 
 
 # State schema version — increment on breaking changes, add migration in state_manager.py
-STATE_VERSION = "1.1"
+STATE_VERSION = "1.2"
+
+
+def _migrate_order_id(d: dict, new_key: str, old_key: str) -> Optional[str]:
+    """Read broker order ID with backward compat for v1.1 ib_*_order_id fields."""
+    val = d.get(new_key)
+    if val is not None:
+        return str(val)
+    old_val = d.get(old_key)
+    if old_val is not None:
+        return str(old_val)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +138,9 @@ class OrderGroup:
     risk_pct: float = 0.01          # Actual risk fraction used (respects 3-tier)
     filled_qty: int = 0
     state: str = "PENDING"
-    ib_entry_order_id: Optional[int] = None
-    ib_tp_order_id: Optional[int] = None
-    ib_sl_order_id: Optional[int] = None
+    broker_entry_order_id: Optional[str] = None
+    broker_tp_order_id: Optional[str] = None
+    broker_sl_order_id: Optional[str] = None
     submitted_at: Optional[str] = None
     filled_at: Optional[str] = None
     closed_at: Optional[str] = None
@@ -158,9 +169,9 @@ class OrderGroup:
             "risk_pct": self.risk_pct,
             "filled_qty": self.filled_qty,
             "state": self.state,
-            "ib_entry_order_id": self.ib_entry_order_id,
-            "ib_tp_order_id": self.ib_tp_order_id,
-            "ib_sl_order_id": self.ib_sl_order_id,
+            "broker_entry_order_id": self.broker_entry_order_id,
+            "broker_tp_order_id": self.broker_tp_order_id,
+            "broker_sl_order_id": self.broker_sl_order_id,
             "submitted_at": self.submitted_at,
             "filled_at": self.filled_at,
             "closed_at": self.closed_at,
@@ -192,9 +203,9 @@ class OrderGroup:
             risk_pct=d.get("risk_pct", 0.01),
             filled_qty=d.get("filled_qty", 0),
             state=d.get("state", "PENDING"),
-            ib_entry_order_id=d.get("ib_entry_order_id"),
-            ib_tp_order_id=d.get("ib_tp_order_id"),
-            ib_sl_order_id=d.get("ib_sl_order_id"),
+            broker_entry_order_id=_migrate_order_id(d, "broker_entry_order_id", "ib_entry_order_id"),
+            broker_tp_order_id=_migrate_order_id(d, "broker_tp_order_id", "ib_tp_order_id"),
+            broker_sl_order_id=_migrate_order_id(d, "broker_sl_order_id", "ib_sl_order_id"),
             submitted_at=d.get("submitted_at"),
             filled_at=d.get("filled_at"),
             closed_at=d.get("closed_at"),
@@ -291,14 +302,18 @@ class DailyState:
             return 0.0
         return self.realized_pnl / self.start_balance
 
-    def find_order_by_ib_id(self, ib_order_id):
-        """Find an OrderGroup by any of its IB order IDs."""
+    def find_order_by_broker_id(self, broker_order_id):
+        """Find an OrderGroup by any of its broker order IDs."""
+        order_id = str(broker_order_id)
         for og in self.pending_orders + self.open_positions:
-            if ib_order_id in (
-                og.ib_entry_order_id, og.ib_tp_order_id, og.ib_sl_order_id
+            if order_id in (
+                og.broker_entry_order_id, og.broker_tp_order_id, og.broker_sl_order_id
             ):
                 return og
         return None
+
+    # Backward compat alias
+    find_order_by_ib_id = find_order_by_broker_id
 
     def move_to_open(self, group_id):
         """Move an order group from pending to open positions."""
