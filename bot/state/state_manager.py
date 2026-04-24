@@ -260,12 +260,31 @@ class StateManager:
                 closed_qty += og.filled_qty or og.target_qty
 
         for gid in stale_positions:
-            daily_state.move_to_closed(gid, "RECONCILE_IB_CLOSED")
+            og = next((o for o in daily_state.open_positions if o.group_id == gid), None)
+            est_pnl = 0.0
+            exit_type = "unknown"
+            if og:
+                tp_alive = og.broker_tp_order_id and og.broker_tp_order_id in ib_order_ids
+                sl_alive = og.broker_sl_order_id and og.broker_sl_order_id in ib_order_ids
+                qty = og.filled_qty or og.target_qty
+                if not tp_alive and sl_alive:
+                    exit_type = "TP"
+                    og.actual_exit_price = og.target_price
+                    pts = (og.target_price - og.entry_price) if og.side == "BUY" else (og.entry_price - og.target_price)
+                    est_pnl = round(pts * qty * 20, 2)
+                elif not sl_alive and tp_alive:
+                    exit_type = "SL"
+                    og.actual_exit_price = og.stop_price
+                    pts = (og.stop_price - og.entry_price) if og.side == "BUY" else (og.entry_price - og.stop_price)
+                    est_pnl = round(pts * qty * 20, 2)
+            daily_state.move_to_closed(gid, "RECONCILE_IB_CLOSED", est_pnl)
             if self._logger:
                 self._logger.log(
                     "reconciliation",
                     action="position_closed_at_ib",
                     group_id=gid,
+                    exit_type=exit_type,
+                    est_pnl=est_pnl,
                     note="TP/SL likely filled while bot was offline",
                 )
 

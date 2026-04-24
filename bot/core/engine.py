@@ -1389,12 +1389,23 @@ class BotEngine:
                             entry=order.entry_price,
                             reason=order.suspend_reason,
                         )
-                        # Still save state and link FVG (done below), but skip DB insert
                         fvg.orders_placed.append(order.group_id)
                         self.state_mgr.save(self.daily_state)
                         return
+                    if margin_result == "REJECTED":
+                        self.logger.log(
+                            "setup_rejected", fvg_id=fvg.fvg_id,
+                            gate="placement", reason="broker rejected",
+                        )
+                        continue
                 else:
-                    await self.order_mgr.place_bracket(order, self.daily_state)
+                    og = await self.order_mgr.place_bracket(order, self.daily_state)
+                    if og.state == "CLOSED":
+                        self.logger.log(
+                            "setup_rejected", fvg_id=fvg.fvg_id,
+                            gate="placement", reason="broker rejected",
+                        )
+                        continue
             elif self.order_mgr and not self.broker.is_connected:
                 self.logger.log(
                     "setup_rejected", fvg_id=fvg.fvg_id,

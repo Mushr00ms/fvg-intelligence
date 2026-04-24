@@ -196,9 +196,11 @@ class OrderManager:
 
     def _on_entry_fill_adapter(self, order, og, daily_state):
         """Handle entry fill from adapter (Tradovate/split mode)."""
-        og.filled_qty = og.target_qty
+        broker_qty = order.get("filledQty", 0) if isinstance(order, dict) else 0
+        og.filled_qty = broker_qty if broker_qty > 0 else og.target_qty
         og.filled_at = self._now_iso()
-        og.actual_entry_price = og.entry_price
+        broker_price = order.get("avgFillPrice", 0) if isinstance(order, dict) else 0
+        og.actual_entry_price = broker_price if broker_price > 0 else og.entry_price
         og.entry_commission = 0.0
         daily_state.move_to_open(og.group_id)
         self._notify_order_resolved(released_qty=og.target_qty)
