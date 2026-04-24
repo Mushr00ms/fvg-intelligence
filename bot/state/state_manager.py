@@ -169,6 +169,8 @@ class StateManager:
         for order in ib_orders:
             if hasattr(order, "orderId"):
                 ib_order_ids.add(str(order.orderId))
+            elif hasattr(order, "order_id"):
+                ib_order_ids.add(str(order.order_id))
 
         # Check pending orders against IB
         orphaned = []
@@ -192,9 +194,14 @@ class StateManager:
         # has any quantity at IB.
         ib_net_position = 0
         for pos in ib_positions:
-            # ib_positions is a list of Position objects with .position (signed qty)
+            # Support both raw IB Position (.position) and PositionSnapshot (.quantity/.side)
             if hasattr(pos, 'position'):
                 ib_net_position += int(pos.position)
+            elif hasattr(pos, 'quantity'):
+                signed = int(pos.quantity)
+                if hasattr(pos, 'side') and pos.side == "SELL":
+                    signed = -signed
+                ib_net_position += signed
 
         # Count what our state thinks we hold
         state_net_position = 0

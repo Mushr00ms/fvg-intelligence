@@ -149,9 +149,11 @@ class BrokerAdapter(ABC):
         on_tp_fill: Callable,
         on_sl_fill: Callable,
         on_status_change: Callable,
+        on_exit_ids: Optional[Callable[[str, str], None]] = None,
     ) -> BracketOrderResult:
         """Place an atomic bracket order (entry + TP + SL).
-        Callbacks fire on the asyncio event loop."""
+        Callbacks fire on the asyncio event loop.
+        on_exit_ids(tp_id, sl_id) fires when real exit order IDs are known."""
 
     @abstractmethod
     async def cancel_order(self, order_id: str) -> None:

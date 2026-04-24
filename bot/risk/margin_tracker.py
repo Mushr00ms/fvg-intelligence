@@ -29,6 +29,7 @@ class MarginTracker:
 
     def __init__(self, ib_connection, contract, logger, config, clock=None):
         self._conn = ib_connection
+        self._has_ib = hasattr(ib_connection, 'ib')
         self._contract = contract
         self._logger = logger
         self._config = config
@@ -38,6 +39,7 @@ class MarginTracker:
         self._initialized = False
         self._reserved_margin: float = 0.0  # locally reserved for pending orders
         self._primary_account: Optional[str] = None  # set by initialize()
+        self._cached_available_funds: float = 0.0  # for adapter mode (no IB)
 
         # Parse intraday window from config (ET times)
         self._intraday_start = _parse_time(config.margin_intraday_start)
@@ -69,6 +71,21 @@ class MarginTracker:
         """Fetch initial margin per contract at startup. Returns margin_per_contract."""
         margin = await self._fetch_margin_per_contract()
         self._initialized = True
+
+        # For adapter mode (no IB), cache available funds from the adapter
+        if not self._has_ib and not self._config.dry_run and self._conn.is_connected:
+            try:
+                self._cached_available_funds = await self._conn.get_available_funds()
+                self._logger.log(
+                    "margin_account_state",
+                    account="adapter",
+                    avail=round(self._cached_available_funds, 2),
+                    per_contract=round(margin, 2),
+                    max_new_contracts=int(self._cached_available_funds / margin) if margin > 0 else 0,
+                )
+            except Exception as e:
+                self._logger.log("margin_account_state_error", error=str(e))
+            return margin
 
         # Log account segment state so we can see the real margin capacity.
         # IB returns one row per (account, tag, currency) tuple. With multiple
@@ -158,6 +175,11 @@ class MarginTracker:
         elapsed = (self._now() - self._last_fetch_time).total_seconds()
         if elapsed >= self._config.margin_refresh_interval:
             await self._fetch_margin_per_contract()
+            if not self._has_ib and self._conn.is_connected:
+                try:
+                    self._cached_available_funds = await self._conn.get_available_funds()
+                except Exception:
+                    pass
 
     def reserve(self, qty: int):
         """Reserve margin for a pending order immediately after placement.
@@ -202,6 +224,18 @@ class MarginTracker:
             self._logger.log(
                 "margin_fetched",
                 mode="fallback",
+                per_contract=fallback,
+                period="intraday" if self._is_intraday() else "overnight",
+            )
+            return fallback
+
+        # Adapter mode (no IB API): skip IB probes, use config fallback
+        if not self._has_ib:
+            self._margin_per_contract = fallback
+            self._last_fetch_time = self._now()
+            self._logger.log(
+                "margin_fetched",
+                mode="config_fallback",
                 per_contract=fallback,
                 period="intraday" if self._is_intraday() else "overnight",
             )
@@ -413,6 +447,10 @@ class MarginTracker:
         """
         if self._config.dry_run or not self._conn.is_connected:
             return self._time_aware_fallback() * 3  # Assume 3-contract capacity in dry_run
+
+        # Adapter mode: use cached available funds (refreshed periodically)
+        if not self._has_ib:
+            return max(0.0, self._cached_available_funds - self._reserved_margin)
 
         raw_available = 0.0
         try:

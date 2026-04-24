@@ -84,7 +84,7 @@ class TradovateAdapter(BrokerAdapter):
         self._auth: Optional[TradovateAuth] = None
         self._rest: Optional[TradovateRestClient] = None
 
-        # WebSockets
+        # WebSockets — token getters wired after auth in connect()
         self._order_ws = TradovateWebSocket(name="order")
         self._md_ws = TradovateWebSocket(name="md")
 
@@ -140,8 +140,23 @@ class TradovateAdapter(BrokerAdapter):
         accounts = await self._rest.list_accounts()
         if not accounts:
             raise ConnectionError("No Tradovate accounts found")
-        # Pick the first account (or the one with largest balance)
-        account = accounts[0]
+        wanted = getattr(self._config, "tradovate_account_spec", "")
+        if wanted:
+            account = next((a for a in accounts if a["name"] == wanted), None)
+            if account is None:
+                available = [a["name"] for a in accounts]
+                raise ConnectionError(
+                    f"Tradovate account '{wanted}' not found. Available: {available}"
+                )
+        elif len(accounts) > 1:
+            names = [a["name"] for a in accounts]
+            logger.warning(
+                "Multiple Tradovate accounts found: %s — using first. "
+                "Set tradovate_account_spec in config to be explicit.", names,
+            )
+            account = accounts[0]
+        else:
+            account = accounts[0]
         self._account_id = account["id"]
         self._account_spec = account["name"]
         logger.info("Using Tradovate account: %s (id=%d)",
@@ -155,6 +170,13 @@ class TradovateAdapter(BrokerAdapter):
         order_url = WS_URLS[env]
         md_url = WS_URLS["md"]
         md_token = token.md_access_token or token.access_token
+
+        # Wire token getters so WS reconnect uses the latest renewed token
+        self._order_ws._token_getter = lambda: self._auth.access_token
+        self._md_ws._token_getter = lambda: (
+            self._auth.token.md_access_token or self._auth.access_token
+            if self._auth.token else self._auth.access_token
+        )
 
         await self._order_ws.connect(order_url, token.access_token)
         await self._md_ws.connect(md_url, md_token)
@@ -256,10 +278,7 @@ class TradovateAdapter(BrokerAdapter):
     _order_callbacks: Dict[str, Dict] = {}
 
     def _dispatch_order_event(self, order: Dict) -> None:
-        """Route order status changes to registered callbacks.
-
-        On entry fill, places the OCO exit pair (TP Limit + SL Stop).
-        """
+        """Route order status changes to registered callbacks."""
         status = order.get("ordStatus", "")
         if not status:
             return
@@ -272,10 +291,9 @@ class TradovateAdapter(BrokerAdapter):
             sl_id = cbs.get("_sl_id")
 
             if order_id == entry_id and status == "Filled":
-                cbs["on_entry_fill"](order)
-                if not cbs.get("_oco_placed"):
-                    cbs["_oco_placed"] = True
-                    asyncio.ensure_future(self._place_exit_oco(bracket_key))
+                if not cbs.get("_fill_handled"):
+                    cbs["_fill_handled"] = True
+                    cbs["on_entry_fill"](order)
             elif order_id == tp_id and status == "Filled":
                 cbs["on_tp_fill"](order)
             elif order_id == sl_id and status == "Filled":
@@ -283,44 +301,6 @@ class TradovateAdapter(BrokerAdapter):
 
             if order_id in (entry_id, tp_id, sl_id):
                 cbs["on_status_change"](order)
-
-    async def _place_exit_oco(self, bracket_key: str) -> None:
-        """Place OCO exit pair (TP Limit + SL Stop) after entry fills."""
-        cbs = self._order_callbacks.get(bracket_key)
-        if not cbs:
-            return
-
-        symbol = cbs["_symbol"]
-        reverse = cbs["_reverse_action"]
-        qty = cbs["_qty"]
-        tp_price = cbs["_tp_price"]
-        sl_price = cbs["_sl_price"]
-
-        try:
-            result = await self._rest.place_oco(
-                account_id=self._account_id,
-                account_spec=self._account_spec,
-                symbol=symbol,
-                action=reverse,
-                order_qty=qty,
-                order_type="Limit",
-                price=tp_price,
-                other={
-                    "action": reverse,
-                    "orderType": "Stop",
-                    "stopPrice": sl_price,
-                },
-            )
-            tp_real_id = result.get("orderId")
-            sl_real_id = result.get("ocoId")
-            cbs["_tp_id"] = tp_real_id
-            cbs["_sl_id"] = sl_real_id
-            logger.info(
-                "OCO exits placed: TP=%s SL=%s for bracket %s",
-                tp_real_id, sl_real_id, bracket_key,
-            )
-        except Exception as e:
-            logger.error("Failed to place OCO exits for bracket %s: %s", bracket_key, e)
 
     # ── Contract Resolution ─────────────────────────────────────────────
 
@@ -330,8 +310,12 @@ class TradovateAdapter(BrokerAdapter):
         exchange: str,
         expiry_hint: Optional[datetime] = None,
     ) -> ContractInfo:
-        now = expiry_hint or datetime.now(ET)
-        name = _expiry_to_tradovate_name(symbol, now)
+        from logic.utils.contract_utils import generate_nq_expirations, get_contract_for_date
+
+        now = expiry_hint or (self._clock.now() if self._clock else datetime.now(ET))
+        expirations = generate_nq_expirations(now.year - 1, now.year + 1)
+        exp_date = get_contract_for_date(now, expirations, roll_days=8)
+        name = _expiry_to_tradovate_name(symbol, exp_date)
 
         contract = await self._rest.find_contract(name)
 
@@ -558,22 +542,21 @@ class TradovateAdapter(BrokerAdapter):
         on_tp_fill: Callable,
         on_sl_fill: Callable,
         on_status_change: Callable,
+        on_exit_ids: Optional[Callable] = None,
     ) -> BracketOrderResult:
-        """Place bracket: Limit entry, poll for fill, then OCO exits.
+        """Place atomic bracket via Tradovate placeOSO.
 
-        Mirrors the IB adapter pattern — entry is a standalone Limit order.
-        A background task polls for the fill, then places a Limit TP + Stop SL
-        as an OCO pair. Both exit legs are visible as regular orders.
+        Entry + TP + SL submitted as one server-side OSO strategy.
+        Server places TP/SL automatically on entry fill — no naked position
+        window even if the bot crashes between fill and exit placement.
+        All three order IDs are returned immediately.
         """
         action = "Buy" if side == "BUY" else "Sell"
         reverse_action = "Sell" if side == "BUY" else "Buy"
         symbol = contract.name or contract.symbol
 
-        tp_id = self._allocate_local_id()
-        sl_id = self._allocate_local_id()
-
         try:
-            result = await self._rest.place_order(
+            result = await self._rest.place_oso(
                 account_id=self._account_id,
                 account_spec=self._account_spec,
                 symbol=symbol,
@@ -581,9 +564,26 @@ class TradovateAdapter(BrokerAdapter):
                 order_qty=qty,
                 order_type="Limit",
                 price=entry_price,
+                bracket1={
+                    "action": reverse_action,
+                    "orderType": "Limit",
+                    "price": tp_price,
+                },
+                bracket2={
+                    "action": reverse_action,
+                    "orderType": "Stop",
+                    "stopPrice": sl_price,
+                },
             )
 
-            entry_id = result.get("orderId", result.get("id"))
+            failure = result.get("failureReason", "")
+            if failure and failure != "Success":
+                logger.error("PlaceOSO rejected: %s — %s", failure, result.get("failureText", ""))
+                return BracketOrderResult(success=False, error=f"{failure}: {result.get('failureText', '')}")
+
+            entry_id = result.get("orderId")
+            tp_id = result.get("oso1Id")
+            sl_id = result.get("oso2Id")
             bracket_key = str(entry_id)
 
             cbs = {
@@ -592,35 +592,38 @@ class TradovateAdapter(BrokerAdapter):
                 "on_sl_fill": on_sl_fill,
                 "on_status_change": on_status_change,
                 "_entry_id": entry_id,
-                "_tp_id": None,
-                "_sl_id": None,
-                "_oco_placed": False,
-                "_symbol": symbol,
-                "_reverse_action": reverse_action,
-                "_qty": qty,
-                "_tp_price": tp_price,
-                "_sl_price": sl_price,
+                "_tp_id": tp_id,
+                "_sl_id": sl_id,
+                "_fill_handled": False,
             }
             self._order_callbacks[bracket_key] = cbs
 
             asyncio.ensure_future(self._poll_entry_fill(bracket_key))
 
+            logger.info(
+                "OSO bracket placed: entry=%s TP=%s SL=%s for %s",
+                entry_id, tp_id, sl_id, symbol,
+            )
+
+            if on_exit_ids and tp_id and sl_id:
+                on_exit_ids(str(tp_id), str(sl_id))
+
             return BracketOrderResult(
                 success=True,
                 entry_order_id=str(entry_id),
-                tp_order_id=tp_id,
-                sl_order_id=sl_id,
+                tp_order_id=str(tp_id) if tp_id else "",
+                sl_order_id=str(sl_id) if sl_id else "",
             )
 
         except Exception as e:
-            logger.error("Bracket entry placement failed: %s", e)
+            logger.error("OSO bracket placement failed: %s", e)
             return BracketOrderResult(
                 success=False,
                 error=str(e),
             )
 
     async def _poll_entry_fill(self, bracket_key: str, timeout: float = 300) -> None:
-        """Poll REST for entry fill, then place OCO exits."""
+        """Backup poll for entry fill detection (WS is primary)."""
         cbs = self._order_callbacks.get(bracket_key)
         if not cbs:
             return
@@ -633,12 +636,13 @@ class TradovateAdapter(BrokerAdapter):
                 order = await self._rest._get("/order/item", {"id": entry_id})
                 status = order.get("ordStatus", "")
                 if status == "Filled":
-                    logger.info("Entry %s filled, placing OCO exits", entry_id)
-                    cbs["on_entry_fill"](order)
-                    await self._place_exit_oco(bracket_key)
+                    if not cbs.get("_fill_handled"):
+                        cbs["_fill_handled"] = True
+                        logger.info("Entry %s filled (poll backup)", entry_id)
+                        cbs["on_entry_fill"](order)
                     return
                 if status in ("Cancelled", "Rejected"):
-                    logger.warning("Entry %s %s, skipping OCO", entry_id, status)
+                    logger.warning("Entry %s %s", entry_id, status)
                     cbs["on_status_change"](order)
                     return
             except Exception as e:

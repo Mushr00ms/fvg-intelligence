@@ -995,14 +995,14 @@ def _compute_backtest_percentiles(active_id: str) -> dict:
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    # Find WF family: strip year suffixes to match siblings.
-    # E.g., "mixed-best-ev-wf-2020-2025-slotbl-non3" matches
-    #        "wf-2020-test-2021-slotbl-non3" etc. via shared suffix.
-    # Simpler approach: collect all runs from the manifest (they're
-    # already curated as the WF series).
-    run_ids = [r["run_id"] for r in manifest.get("runs", [])]
-    if not run_ids:
+    all_runs = manifest.get("runs", [])
+    if not all_runs:
         return {}
+
+    # Filter runs whose strategy_id matches active_id; fall back to all runs
+    # if none match (backward compat for manifests without strategy_id).
+    matched = [r["run_id"] for r in all_runs if r.get("strategy_id") == active_id]
+    run_ids = matched if matched else [r["run_id"] for r in all_runs]
 
     all_daily = []
     for run_id in run_ids:

@@ -39,6 +39,7 @@ class BotConfig:
     # Only non-secret config lives here; creds fetched at runtime via IAM role.
     tradovate_environment: str = "demo"  # "demo" | "live"
     tradovate_app_version: str = "1.0"   # Sent in auth request
+    tradovate_account_spec: str = ""     # e.g. "DEMO12345" — fail-fast if set and not found
 
     # Contract
     ticker: str = "NQ"

@@ -76,6 +76,13 @@ class OrderManager:
             return self._adapter.is_connected
         return self._conn.is_connected if self._conn else False
 
+    @property
+    def _is_exec_connected(self):
+        """Execution-side connectivity for cancel/flatten (ignores data adapter state)."""
+        if self._use_adapter:
+            return getattr(self._adapter, 'is_exec_connected', self._adapter.is_connected)
+        return self._conn.is_connected if self._conn else False
+
     async def place_bracket(self, order_group, daily_state):
         """Place a bracket order. Increments trade_count."""
         og = await self._place_bracket_internal(order_group, daily_state)
@@ -140,6 +147,7 @@ class OrderManager:
             on_tp_fill=lambda order: self._on_tp_fill_adapter(order, og, daily_state),
             on_sl_fill=lambda order: self._on_sl_fill_adapter(order, og, daily_state),
             on_status_change=lambda order: self._on_status_adapter(order, og, daily_state),
+            on_exit_ids=lambda tp_id, sl_id: self._on_exit_ids_resolved(tp_id, sl_id, og, daily_state),
         )
 
         if not result.success:
@@ -162,6 +170,12 @@ class OrderManager:
             broker_entry_id=og.broker_entry_order_id,
         )
         return og
+
+    def _on_exit_ids_resolved(self, tp_id, sl_id, og, daily_state):
+        """Persist real Tradovate TP/SL order IDs back to state."""
+        og.broker_tp_order_id = tp_id
+        og.broker_sl_order_id = sl_id
+        self._state_mgr.save(daily_state)
 
     def _on_entry_fill_adapter(self, order, og, daily_state):
         """Handle entry fill from adapter (Tradovate/split mode)."""
@@ -335,7 +349,7 @@ class OrderManager:
                              state=og.state, filled=og.filled_qty)
             return
 
-        if not self._config.dry_run and self._is_broker_connected:
+        if not self._config.dry_run and self._is_exec_connected:
             if og.broker_entry_order_id:
                 await self._cancel_single_order(og.broker_entry_order_id)
 
@@ -550,7 +564,7 @@ class OrderManager:
             self._state_mgr.save(daily_state)
 
     async def cancel_order_group(self, og, daily_state, reason=CLOSE_CANCEL):
-        if not self._config.dry_run and self._is_broker_connected:
+        if not self._config.dry_run and self._is_exec_connected:
             for broker_id in (og.broker_entry_order_id, og.broker_tp_order_id, og.broker_sl_order_id):
                 if broker_id:
                     await self._cancel_single_order(broker_id)
@@ -592,7 +606,7 @@ class OrderManager:
     async def _flatten_single_position(self, og, daily_state, reason):
         qty = og.filled_qty or og.target_qty
 
-        if not self._config.dry_run and self._is_broker_connected:
+        if not self._config.dry_run and self._is_exec_connected:
             # Cancel bracket exits before flattening
             if self._use_adapter:
                 await self._adapter.cancel_bracket_exits(og.broker_entry_order_id)

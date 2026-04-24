@@ -233,8 +233,12 @@ class BotEngine:
             if self.config.margin_management_enabled:
                 from bot.risk.margin_tracker import MarginTracker
                 from bot.risk.margin_priority import MarginPriorityManager
+                if self.config.execution_backend in ("ib_data_tradovate_exec", "tradovate"):
+                    margin_conn = self.broker
+                else:
+                    margin_conn = self.ib_conn or self.broker
                 self.margin_tracker = MarginTracker(
-                    self.ib_conn or self.broker, self._contract, self.logger, self.config,
+                    margin_conn, self._contract, self.logger, self.config,
                     clock=self.clock,
                 )
                 await self.margin_tracker.initialize()
@@ -263,6 +267,9 @@ class BotEngine:
                 self.daily_state = self.state_mgr.reconcile_with_ib(
                     self.daily_state, ib_orders, ib_positions
                 )
+
+                # Recover stale placeholder TP/SL IDs and detect naked positions
+                await self._recover_bracket_ids(ib_orders)
 
                 # Reseed margin tracker for orders that survived reconciliation.
                 # _reserved_margin starts at 0 on every boot; without this, the
@@ -309,7 +316,9 @@ class BotEngine:
             await self.clock.validate_with_broker(self.broker)
 
         # 6. Subscribe to bar data
-        if not self.config.dry_run and self.broker.is_connected:
+        # Pure Tradovate mode has no IB connection for bar/tick subscriptions;
+        # _subscribe_bars/_subscribe_ticks require self.ib_conn.ib.
+        if not self.config.dry_run and self.broker.is_connected and self.ib_conn is not None:
             await self._subscribe_bars()
             self._seed_recent_bars()
             self._subscribe_ticks()
@@ -978,6 +987,63 @@ class BotEngine:
             "backfill_process", action="done",
             processed=processed, skipped_ordered=skipped,
         )
+
+    async def _recover_bracket_ids(self, broker_orders):
+        """Detect stale placeholder TP/SL IDs and naked positions after restart.
+
+        For each open position with placeholder exit IDs (tv_*), tries to match
+        against live broker orders by price. If no exits found, flattens immediately.
+        """
+        if not self.daily_state or not self.order_mgr:
+            return
+
+        for og in list(self.daily_state.open_positions):
+            tp_stale = og.broker_tp_order_id and og.broker_tp_order_id.startswith("tv_")
+            sl_stale = og.broker_sl_order_id and og.broker_sl_order_id.startswith("tv_")
+            if not tp_stale and not sl_stale:
+                continue
+
+            tp_match = None
+            sl_match = None
+            for order in broker_orders:
+                oid = str(getattr(order, 'order_id', '') or getattr(order, 'orderId', ''))
+                price = getattr(order, 'price', 0) or 0
+                stop_price = getattr(order, 'stop_price', 0) or getattr(order, 'stopPrice', 0) or 0
+
+                if tp_stale and price and abs(price - og.target_price) < 0.01:
+                    tp_match = oid
+                if sl_stale and stop_price and abs(stop_price - og.stop_price) < 0.01:
+                    sl_match = oid
+
+            updated = False
+            if tp_match:
+                og.broker_tp_order_id = tp_match
+                updated = True
+            if sl_match:
+                og.broker_sl_order_id = sl_match
+                updated = True
+
+            if updated:
+                self.logger.log(
+                    "bracket_ids_recovered",
+                    group_id=og.group_id,
+                    tp_id=og.broker_tp_order_id,
+                    sl_id=og.broker_sl_order_id,
+                )
+                self.state_mgr.save(self.daily_state)
+            elif tp_stale or sl_stale:
+                self.logger.log(
+                    "naked_position_detected",
+                    group_id=og.group_id,
+                    side=og.side,
+                    entry_price=og.entry_price,
+                    tp_id=og.broker_tp_order_id,
+                    sl_id=og.broker_sl_order_id,
+                    action="flatten",
+                )
+                await self.order_mgr.flatten_all(self.daily_state, "NAKED_RECOVERY")
+                self.state_mgr.save(self.daily_state, force=True)
+                break
 
     async def _on_reconnect(self):
         """Re-subscribe bars/ticks and backfill FVGs after IB reconnect."""

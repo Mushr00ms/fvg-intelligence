@@ -49,6 +49,15 @@ class SplitAdapter(BrokerAdapter):
         return self._data.is_connected and self._exec.is_connected
 
     @property
+    def is_exec_connected(self) -> bool:
+        """True if the execution adapter (Tradovate) is connected.
+
+        Cancel/flatten must use this — NOT is_connected — so that a data-only
+        disconnect doesn't prevent protective broker actions on live positions.
+        """
+        return self._exec.is_connected
+
+    @property
     def disconnect_seconds(self) -> float:
         return max(self._data.disconnect_seconds, self._exec.disconnect_seconds)
 
@@ -66,6 +75,17 @@ class SplitAdapter(BrokerAdapter):
     ) -> ContractInfo:
         self._data_contract = await self._data.resolve_contract(symbol, exchange, expiry_hint)
         self._exec_contract = await self._exec.resolve_contract(symbol, exchange, expiry_hint)
+
+        # Enforce contract parity: both adapters must resolve to the same month
+        data_exp = self._data_contract.expiry[:6] if self._data_contract.expiry else ""
+        exec_exp = self._exec_contract.expiry[:6] if self._exec_contract.expiry else ""
+        if data_exp and exec_exp and data_exp != exec_exp:
+            raise RuntimeError(
+                f"Contract month mismatch: IB data={self._data_contract.expiry} "
+                f"vs Tradovate exec={self._exec_contract.expiry}. "
+                f"Cannot trade on mismatched contracts near rollover."
+            )
+
         logger.info(
             "Contracts resolved: data=%s (IB %s) exec=%s (Tradovate %s)",
             self._data_contract.symbol, self._data_contract.broker_contract_id,
@@ -120,11 +140,13 @@ class SplitAdapter(BrokerAdapter):
         entry_price: float, tp_price: float, sl_price: float,
         on_entry_fill: Callable, on_tp_fill: Callable,
         on_sl_fill: Callable, on_status_change: Callable,
+        on_exit_ids: Optional[Callable] = None,
     ) -> BracketOrderResult:
         return await self._exec.place_bracket_order(
             self._exec_contract or contract, side, qty,
             entry_price, tp_price, sl_price,
             on_entry_fill, on_tp_fill, on_sl_fill, on_status_change,
+            on_exit_ids=on_exit_ids,
         )
 
     async def cancel_order(self, order_id: str) -> None:

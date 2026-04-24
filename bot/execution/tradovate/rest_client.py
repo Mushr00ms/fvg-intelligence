@@ -213,6 +213,45 @@ class TradovateRestClient:
 
         return await self._post("/orderStrategy/startOrderStrategy", body)
 
+    async def place_oso(
+        self,
+        account_id: int,
+        account_spec: str,
+        symbol: str,
+        action: str,
+        order_qty: int,
+        order_type: str,
+        price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+        bracket1: Optional[Dict] = None,
+        bracket2: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """Place an OSO (Order-Sends-Order) bracket atomically.
+
+        Server places entry, then sends bracket1 + bracket2 on fill.
+        If both brackets are specified they are linked as OCO.
+        Response: {orderId, oso1Id, oso2Id}.
+        """
+        body: Dict[str, Any] = {
+            "accountSpec": account_spec,
+            "accountId": account_id,
+            "action": action,
+            "symbol": symbol,
+            "orderQty": order_qty,
+            "orderType": order_type,
+            "isAutomated": True,
+        }
+        if price is not None:
+            body["price"] = price
+        if stop_price is not None:
+            body["stopPrice"] = stop_price
+        if bracket1 is not None:
+            body["bracket1"] = bracket1
+        if bracket2 is not None:
+            body["bracket2"] = bracket2
+
+        return await self._post("/order/placeOSO", body)
+
     async def cancel_order(self, order_id: int) -> Dict[str, Any]:
         """Cancel an order by its ID."""
         return await self._post("/order/cancelOrder", {"orderId": order_id})

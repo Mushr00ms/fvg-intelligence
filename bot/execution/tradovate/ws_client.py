@@ -40,12 +40,13 @@ class TradovateWebSocket:
     RECONNECT_MIN_DELAY = 1.0
     RECONNECT_MAX_DELAY = 30.0
 
-    def __init__(self, name: str = "ws"):
+    def __init__(self, name: str = "ws", token_getter: Optional[Callable[[], str]] = None):
         self._name = name
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._url: Optional[str] = None
         self._access_token: Optional[str] = None
+        self._token_getter: Optional[Callable[[], str]] = token_getter
 
         # Request tracking
         self._next_id = 1
@@ -380,12 +381,13 @@ class TradovateWebSocket:
                 if not (msg.type == aiohttp.WSMsgType.TEXT and msg.data.startswith("o")):
                     raise ConnectionError("No open frame")
 
-                # Re-authenticate
+                # Re-authenticate with fresh token if available
                 self._last_message_time = time.time()
                 self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
+                token = self._token_getter() if self._token_getter else self._access_token
                 auth_id = self._allocate_id()
-                await self._ws.send_str(f"authorize\n{auth_id}\n\n{self._access_token}")
+                await self._ws.send_str(f"authorize\n{auth_id}\n\n{token}")
                 auth_resp = await self._read_auth_response(auth_id, timeout=10.0)
                 if auth_resp.get("s") != 200:
                     raise ConnectionError(f"Auth failed: {auth_resp}")
