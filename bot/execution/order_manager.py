@@ -76,6 +76,13 @@ class OrderManager:
             return self._adapter.is_connected
         return self._conn.is_connected if self._conn else False
 
+    @property
+    def _is_exec_connected(self):
+        """Execution-side connectivity for cancel/flatten (ignores data adapter state)."""
+        if self._use_adapter:
+            return getattr(self._adapter, 'is_exec_connected', self._adapter.is_connected)
+        return self._conn.is_connected if self._conn else False
+
     async def place_bracket(self, order_group, daily_state):
         """Place a bracket order. Increments trade_count."""
         og = await self._place_bracket_internal(order_group, daily_state)
@@ -140,6 +147,7 @@ class OrderManager:
             on_tp_fill=lambda order: self._on_tp_fill_adapter(order, og, daily_state),
             on_sl_fill=lambda order: self._on_sl_fill_adapter(order, og, daily_state),
             on_status_change=lambda order: self._on_status_adapter(order, og, daily_state),
+            on_exit_ids=lambda tp_id, sl_id: self._on_exit_ids_resolved(tp_id, sl_id, og, daily_state),
         )
 
         if not result.success:
@@ -163,11 +171,52 @@ class OrderManager:
         )
         return og
 
+    def rehydrate_bracket(self, og, daily_state):
+        """Re-register adapter callbacks for an order restored from persisted state."""
+        if not self._use_adapter:
+            return
+        register = getattr(self._adapter, 'register_order_callbacks', None)
+        if not register:
+            return
+        is_open = og in daily_state.open_positions
+        register(
+            entry_id=og.broker_entry_order_id,
+            tp_id=og.broker_tp_order_id,
+            sl_id=og.broker_sl_order_id,
+            on_entry_fill=lambda order: self._on_entry_fill_adapter(order, og, daily_state),
+            on_tp_fill=lambda order: self._on_tp_fill_adapter(order, og, daily_state),
+            on_sl_fill=lambda order: self._on_sl_fill_adapter(order, og, daily_state),
+            on_status_change=lambda order: self._on_status_adapter(order, og, daily_state),
+            target_qty=og.target_qty,
+            filled_qty=og.filled_qty or 0,
+            is_open=is_open,
+        )
+
+    def _on_exit_ids_resolved(self, tp_id, sl_id, og, daily_state):
+        """Persist real Tradovate TP/SL order IDs back to state."""
+        og.broker_tp_order_id = tp_id
+        og.broker_sl_order_id = sl_id
+        self._state_mgr.save(daily_state)
+
     def _on_entry_fill_adapter(self, order, og, daily_state):
-        """Handle entry fill from adapter (Tradovate/split mode)."""
-        og.filled_qty = og.target_qty
+        """Handle entry fill from adapter (Tradovate/split mode).
+
+        Supports partial fills: if filledQty < target_qty, routes to the
+        partial fill handler (timer + child qty adjustment) instead of
+        moving directly to OPEN.
+        """
+        broker_qty = order.get("filledQty", 0) if isinstance(order, dict) else 0
+        filled = broker_qty if broker_qty > 0 else og.target_qty
+        broker_price = order.get("avgFillPrice", 0) if isinstance(order, dict) else 0
+        avg_price = broker_price if broker_price > 0 else og.entry_price
+
+        if 0 < filled < og.target_qty:
+            self._handle_partial_fill_adapter(order, og, daily_state, filled, avg_price)
+            return
+
+        og.filled_qty = filled
         og.filled_at = self._now_iso()
-        og.actual_entry_price = og.entry_price
+        og.actual_entry_price = avg_price
         og.entry_commission = 0.0
         daily_state.move_to_open(og.group_id)
         self._notify_order_resolved(released_qty=og.target_qty)
@@ -175,10 +224,35 @@ class OrderManager:
         self._logger.log(
             "order_filled", group_id=og.group_id, setup=og.setup,
             side=og.side, qty=og.filled_qty, expected_price=og.entry_price,
-            avg_price=og.entry_price, slippage_pts=0,
+            avg_price=avg_price, slippage_pts=round(abs(avg_price - og.entry_price), 2),
             risk_pts=og.risk_pts, target_price=og.target_price,
             stop_price=og.stop_price, n_value=og.n_value,
         )
+
+    def _handle_partial_fill_adapter(self, order, og, daily_state, filled_qty, avg_price):
+        """Handle partial entry fill in adapter mode (mirrors IB _handle_partial_fill)."""
+        prior_filled = og.filled_qty or 0
+        og.filled_qty = filled_qty
+        og.actual_entry_price = avg_price
+        og.state = "PARTIAL"
+        og.partial_fill_timer_start = og.partial_fill_timer_start or self._now_iso()
+
+        new_increment = filled_qty - prior_filled
+        if new_increment > 0:
+            self._notify_order_resolved(released_qty=new_increment)
+
+        self._logger.log("partial_fill", group_id=og.group_id,
+                         filled=filled_qty, target=og.target_qty,
+                         remaining=og.target_qty - filled_qty,
+                         mode="adapter")
+
+        if og.group_id not in self._partial_timers:
+            timeout = self._config.partial_fill_timeout
+            task = asyncio.ensure_future(
+                self._partial_fill_timeout(og.group_id, daily_state, timeout))
+            self._partial_timers[og.group_id] = task
+
+        self._state_mgr.save(daily_state)
 
     def _on_tp_fill_adapter(self, order, og, daily_state):
         """Handle TP fill from adapter."""
@@ -335,7 +409,7 @@ class OrderManager:
                              state=og.state, filled=og.filled_qty)
             return
 
-        if not self._config.dry_run and self._is_broker_connected:
+        if not self._config.dry_run and self._is_exec_connected:
             if og.broker_entry_order_id:
                 await self._cancel_single_order(og.broker_entry_order_id)
 
@@ -550,7 +624,7 @@ class OrderManager:
             self._state_mgr.save(daily_state)
 
     async def cancel_order_group(self, og, daily_state, reason=CLOSE_CANCEL):
-        if not self._config.dry_run and self._is_broker_connected:
+        if not self._config.dry_run and self._is_exec_connected:
             for broker_id in (og.broker_entry_order_id, og.broker_tp_order_id, og.broker_sl_order_id):
                 if broker_id:
                     await self._cancel_single_order(broker_id)
@@ -559,9 +633,26 @@ class OrderManager:
         if timer and not timer.done():
             timer.cancel()
 
-        unreleased = max(0, og.target_qty - (og.filled_qty or 0))
+        # If partially filled, market-flatten the filled portion before closing
+        filled = og.filled_qty or 0
+        if filled > 0 and not self._config.dry_run and self._is_exec_connected:
+            reverse_side = "SELL" if og.side == "BUY" else "BUY"
+            if self._use_adapter:
+                # Cancel manual protective exits first
+                if hasattr(self._adapter, 'cancel_bracket_exits'):
+                    await self._adapter.cancel_bracket_exits(og.broker_entry_order_id)
+                    await asyncio.sleep(0.3)
+                from bot.execution.broker_adapter import ContractInfo
+                ci = ContractInfo(symbol=self._config.ticker, broker_contract_id="",
+                                  expiry="", exchange=self._config.exchange)
+                await self._adapter.place_market_order(ci, reverse_side, filled)
+                self._logger.log("partial_fill_flattened", group_id=og.group_id,
+                                 qty=filled, reason=reason)
+
+        unreleased = max(0, og.target_qty - filled)
         daily_state.move_to_closed(og.group_id, reason)
-        self._logger.log("order_cancelled", group_id=og.group_id, reason=reason)
+        self._logger.log("order_cancelled", group_id=og.group_id, reason=reason,
+                         flattened_qty=filled)
         self._notify_order_resolved(released_qty=unreleased)
 
     async def cancel_all_pending(self, daily_state, reason=CLOSE_EOD):
@@ -592,7 +683,7 @@ class OrderManager:
     async def _flatten_single_position(self, og, daily_state, reason):
         qty = og.filled_qty or og.target_qty
 
-        if not self._config.dry_run and self._is_broker_connected:
+        if not self._config.dry_run and self._is_exec_connected:
             # Cancel bracket exits before flattening
             if self._use_adapter:
                 await self._adapter.cancel_bracket_exits(og.broker_entry_order_id)

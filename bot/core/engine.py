@@ -233,8 +233,12 @@ class BotEngine:
             if self.config.margin_management_enabled:
                 from bot.risk.margin_tracker import MarginTracker
                 from bot.risk.margin_priority import MarginPriorityManager
+                if self.config.execution_backend in ("ib_data_tradovate_exec", "tradovate"):
+                    margin_conn = self.broker
+                else:
+                    margin_conn = self.ib_conn or self.broker
                 self.margin_tracker = MarginTracker(
-                    self.ib_conn or self.broker, self._contract, self.logger, self.config,
+                    margin_conn, self._contract, self.logger, self.config,
                     clock=self.clock,
                 )
                 await self.margin_tracker.initialize()
@@ -263,6 +267,12 @@ class BotEngine:
                 self.daily_state = self.state_mgr.reconcile_with_ib(
                     self.daily_state, ib_orders, ib_positions
                 )
+
+                # Recover stale placeholder TP/SL IDs and detect naked positions
+                await self._recover_bracket_ids(ib_orders)
+
+                # Re-register WS callbacks for surviving orders so fills aren't dropped
+                await self._rehydrate_callbacks()
 
                 # Reseed margin tracker for orders that survived reconciliation.
                 # _reserved_margin starts at 0 on every boot; without this, the
@@ -309,7 +319,9 @@ class BotEngine:
             await self.clock.validate_with_broker(self.broker)
 
         # 6. Subscribe to bar data
-        if not self.config.dry_run and self.broker.is_connected:
+        # Pure Tradovate mode has no IB connection for bar/tick subscriptions;
+        # _subscribe_bars/_subscribe_ticks require self.ib_conn.ib.
+        if not self.config.dry_run and self.broker.is_connected and self.ib_conn is not None:
             await self._subscribe_bars()
             self._seed_recent_bars()
             self._subscribe_ticks()
@@ -328,8 +340,11 @@ class BotEngine:
             if self.time_gates.is_session_active():
                 self._session_seeded = True
 
-            # 6c. Register reconnect handler (re-subscribe bars if IB drops)
+            # 6c. Register reconnect handlers
             self.broker.on_reconnect(self._on_reconnect)
+            on_exec_reconnect = getattr(self.broker, 'on_exec_reconnect', None)
+            if on_exec_reconnect:
+                on_exec_reconnect(self._on_exec_reconnect)
 
         # 7. Schedule EOD actions
         self._schedule_eod()
@@ -979,6 +994,90 @@ class BotEngine:
             processed=processed, skipped_ordered=skipped,
         )
 
+    async def _recover_bracket_ids(self, broker_orders):
+        """Detect stale placeholder TP/SL IDs and naked positions after restart.
+
+        For each open position with placeholder exit IDs (tv_*), tries to match
+        against live broker orders by price. If no exits found, flattens immediately.
+        """
+        if not self.daily_state or not self.order_mgr:
+            return
+
+        for og in list(self.daily_state.open_positions):
+            tp_stale = og.broker_tp_order_id and og.broker_tp_order_id.startswith("tv_")
+            sl_stale = og.broker_sl_order_id and og.broker_sl_order_id.startswith("tv_")
+            if not tp_stale and not sl_stale:
+                continue
+
+            tp_match = None
+            sl_match = None
+            for order in broker_orders:
+                oid = str(getattr(order, 'order_id', '') or getattr(order, 'orderId', ''))
+                price = getattr(order, 'price', 0) or 0
+                stop_price = getattr(order, 'stop_price', 0) or getattr(order, 'stopPrice', 0) or 0
+
+                if tp_stale and price and abs(price - og.target_price) < 0.01:
+                    tp_match = oid
+                if sl_stale and stop_price and abs(stop_price - og.stop_price) < 0.01:
+                    sl_match = oid
+
+            updated = False
+            if tp_match:
+                og.broker_tp_order_id = tp_match
+                updated = True
+            if sl_match:
+                og.broker_sl_order_id = sl_match
+                updated = True
+
+            if updated:
+                self.logger.log(
+                    "bracket_ids_recovered",
+                    group_id=og.group_id,
+                    tp_id=og.broker_tp_order_id,
+                    sl_id=og.broker_sl_order_id,
+                )
+                self.state_mgr.save(self.daily_state)
+            elif tp_stale or sl_stale:
+                self.logger.log(
+                    "naked_position_detected",
+                    group_id=og.group_id,
+                    side=og.side,
+                    entry_price=og.entry_price,
+                    tp_id=og.broker_tp_order_id,
+                    sl_id=og.broker_sl_order_id,
+                    action="flatten",
+                )
+                await self.order_mgr.flatten_all(self.daily_state, "NAKED_RECOVERY")
+                self.state_mgr.save(self.daily_state, force=True)
+                break
+
+    async def _rehydrate_callbacks(self):
+        """Re-register WS fill callbacks for orders restored from persisted state.
+
+        Without this, TP/SL fills arriving via WS are silently dropped because
+        _order_callbacks is empty after restart. That leaves stale local state
+        which can trigger a reverse market order at EOD flatten.
+        """
+        if not self.order_mgr or not self.daily_state:
+            return
+        count = 0
+        for og in list(self.daily_state.open_positions) + list(self.daily_state.pending_orders):
+            if og.broker_entry_order_id and not og.broker_entry_order_id.startswith("tv_"):
+                self.order_mgr.rehydrate_bracket(og, self.daily_state)
+                count += 1
+        if count > 0:
+            self.logger.log("callbacks_rehydrated", count=count)
+
+    async def _on_exec_reconnect(self):
+        """Handle execution-side (Tradovate) reconnect — re-sync orders only."""
+        self._disconnect_flatten_done = False
+        self.logger.log("exec_reconnect")
+        try:
+            if self.order_mgr and self.daily_state:
+                await self._rehydrate_callbacks()
+        except Exception as e:
+            self.logger.log("exec_reconnect_error", error=str(e))
+
     async def _on_reconnect(self):
         """Re-subscribe bars/ticks and backfill FVGs after IB reconnect."""
         self._disconnect_flatten_done = False  # Reset for next potential disconnect
@@ -1290,12 +1389,23 @@ class BotEngine:
                             entry=order.entry_price,
                             reason=order.suspend_reason,
                         )
-                        # Still save state and link FVG (done below), but skip DB insert
                         fvg.orders_placed.append(order.group_id)
                         self.state_mgr.save(self.daily_state)
                         return
+                    if margin_result == "REJECTED":
+                        self.logger.log(
+                            "setup_rejected", fvg_id=fvg.fvg_id,
+                            gate="placement", reason="broker rejected",
+                        )
+                        continue
                 else:
-                    await self.order_mgr.place_bracket(order, self.daily_state)
+                    og = await self.order_mgr.place_bracket(order, self.daily_state)
+                    if og.state == "CLOSED":
+                        self.logger.log(
+                            "setup_rejected", fvg_id=fvg.fvg_id,
+                            gate="placement", reason="broker rejected",
+                        )
+                        continue
             elif self.order_mgr and not self.broker.is_connected:
                 self.logger.log(
                     "setup_rejected", fvg_id=fvg.fvg_id,

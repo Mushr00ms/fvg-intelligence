@@ -284,6 +284,7 @@ class IBAdapter(BrokerAdapter):
         on_tp_fill: Callable,
         on_sl_fill: Callable,
         on_status_change: Callable,
+        on_exit_ids: Optional[Callable] = None,
     ) -> BracketOrderResult:
         from ib_async import LimitOrder, StopOrder
 

@@ -155,10 +155,10 @@ class TestStateManager:
     """Tests for state persistence."""
 
     def test_save_and_load(self, tmp_dir):
-        from datetime import date as dt_date
         mgr = StateManager(tmp_dir)
+        today = mgr._now().strftime("%Y-%m-%d")
         state = DailyState(
-            date=dt_date.today().isoformat(), start_balance=76000,
+            date=today, start_balance=76000,
             realized_pnl=500, trade_count=2,
         )
         mgr.save(state, force=True)

@@ -206,8 +206,64 @@ class TradovateAuth:
             return
         self._renewal_task = asyncio.ensure_future(self._renewal_loop())
 
+    async def renew_token(self) -> TokenInfo:
+        """Renew the current access token without starting a new session.
+
+        Uses /auth/renewAccessToken which extends the existing session.
+        Falls back to full re-auth if renewal fails.
+        """
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
+
+        url = f"{self._creds.base_url}/auth/renewAccessToken"
+        headers = {
+            "Authorization": f"Bearer {self._token.access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        async with self._session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.warning("Token renewal returned HTTP %d, falling back to re-auth", resp.status)
+                return await self.authenticate()
+            data = await resp.json()
+
+        if data.get("errorText"):
+            logger.warning("Token renewal error: %s, falling back to re-auth", data["errorText"])
+            return await self.authenticate()
+
+        new_token = data.get("accessToken", "")
+        if not new_token:
+            logger.warning("Token renewal returned no accessToken, falling back to re-auth")
+            return await self.authenticate()
+
+        expiration_str = data.get("expirationTime", "")
+        if expiration_str:
+            from datetime import datetime, timezone
+            try:
+                exp_dt = datetime.fromisoformat(expiration_str.replace("Z", "+00:00"))
+                exp_unix = exp_dt.timestamp()
+            except (ValueError, TypeError):
+                exp_unix = time.time() + 86400
+        else:
+            exp_unix = time.time() + 86400
+
+        self._token = TokenInfo(
+            access_token=new_token,
+            md_access_token=self._token.md_access_token,
+            expiration_time=exp_unix,
+            user_id=data.get("userId", self._token.user_id),
+            name=data.get("name", self._token.name),
+        )
+
+        logger.info(
+            "Tradovate token renewed: expires_in=%.0fs",
+            self._token.seconds_until_expiry,
+        )
+        return self._token
+
     async def _renewal_loop(self) -> None:
-        """Background loop that re-authenticates before token expires."""
+        """Background loop that renews token before it expires."""
         while True:
             try:
                 if self._token is None:
@@ -220,7 +276,7 @@ class TradovateAuth:
 
                 logger.info("Renewing Tradovate token (expires in %.0fs)",
                             self._token.seconds_until_expiry)
-                await self.authenticate()
+                await self.renew_token()
             except asyncio.CancelledError:
                 return
             except Exception as e:

@@ -521,9 +521,20 @@ class TestOrderEventDispatch:
             "_entry_id": 100,
             "_tp_id": 101,
             "_sl_id": 102,
+            "_fill_handled": False,
+            "_target_qty": 1,
+            "_manual_tp_id": None,
+            "_manual_sl_id": None,
         }
 
-        adapter._dispatch_order_event({"id": 100, "ordStatus": "Filled"})
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            adapter._dispatch_order_event({"id": 100, "ordStatus": "Filled"})
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
 
         assert len(fills["entry"]) == 1
         assert len(fills["tp"]) == 0
@@ -540,6 +551,8 @@ class TestOrderEventDispatch:
             "on_sl_fill": lambda o: fills["sl"].append(o),
             "on_status_change": lambda o: None,
             "_entry_id": 100, "_tp_id": 101, "_sl_id": 102,
+            "_fill_handled": True, "_target_qty": 1,
+            "_manual_tp_id": None, "_manual_sl_id": None,
         }
 
         adapter._dispatch_order_event({"id": 101, "ordStatus": "Filled"})
@@ -558,6 +571,8 @@ class TestOrderEventDispatch:
             "on_sl_fill": lambda o: fills["sl"].append(o),
             "on_status_change": lambda o: fills["status"].append(o),
             "_entry_id": 100, "_tp_id": 101, "_sl_id": 102,
+            "_fill_handled": True, "_target_qty": 1,
+            "_manual_tp_id": None, "_manual_sl_id": None,
         }
 
         adapter._dispatch_order_event({"id": 999, "ordStatus": "Filled"})
@@ -575,6 +590,8 @@ class TestOrderEventDispatch:
             "on_sl_fill": lambda o: None,
             "on_status_change": lambda o: None,
             "_entry_id": 100, "_tp_id": 101, "_sl_id": 102,
+            "_fill_handled": True, "_target_qty": 1,
+            "_manual_tp_id": None, "_manual_sl_id": None,
         }
 
         # Should not raise

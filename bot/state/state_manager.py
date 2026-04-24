@@ -169,13 +169,43 @@ class StateManager:
         for order in ib_orders:
             if hasattr(order, "orderId"):
                 ib_order_ids.add(str(order.orderId))
+            elif hasattr(order, "order_id"):
+                ib_order_ids.add(str(order.order_id))
 
-        # Check pending orders against IB
+        # Check pending orders against broker open orders AND positions.
+        # With Tradovate OSO, after entry fills only TP/SL remain as working
+        # orders — the entry itself disappears. A pending order whose entry
+        # filled while offline must be promoted to OPEN, not orphaned.
         orphaned = []
+        promoted = []
         for og in daily_state.pending_orders:
-            # If our entry order ID is set but not found in IB, it was never placed
-            if og.broker_entry_order_id and og.broker_entry_order_id not in ib_order_ids:
+            if not og.broker_entry_order_id:
+                continue
+            if og.broker_entry_order_id in ib_order_ids:
+                continue
+            # Entry not in working orders — either never placed, or already filled.
+            # Check if TP or SL are still working (proves entry filled + exits active).
+            tp_alive = og.broker_tp_order_id and og.broker_tp_order_id in ib_order_ids
+            sl_alive = og.broker_sl_order_id and og.broker_sl_order_id in ib_order_ids
+            if tp_alive or sl_alive:
+                promoted.append(og.group_id)
+            else:
                 orphaned.append(og.group_id)
+
+        for gid in promoted:
+            og = next((o for o in daily_state.pending_orders if o.group_id == gid), None)
+            if og:
+                og.filled_qty = og.target_qty
+                og.filled_at = og.submitted_at
+                og.actual_entry_price = og.entry_price
+                daily_state.move_to_open(gid)
+                if self._logger:
+                    self._logger.log(
+                        "reconciliation",
+                        action="promoted_to_open",
+                        group_id=gid,
+                        note="entry filled while offline, TP/SL still working",
+                    )
 
         for gid in orphaned:
             daily_state.move_to_closed(gid, "RECONCILE_ORPHAN")
@@ -192,9 +222,14 @@ class StateManager:
         # has any quantity at IB.
         ib_net_position = 0
         for pos in ib_positions:
-            # ib_positions is a list of Position objects with .position (signed qty)
+            # Support both raw IB Position (.position) and PositionSnapshot (.quantity/.side)
             if hasattr(pos, 'position'):
                 ib_net_position += int(pos.position)
+            elif hasattr(pos, 'quantity'):
+                signed = int(pos.quantity)
+                if hasattr(pos, 'side') and pos.side == "SELL":
+                    signed = -signed
+                ib_net_position += signed
 
         # Count what our state thinks we hold
         state_net_position = 0
@@ -225,12 +260,31 @@ class StateManager:
                 closed_qty += og.filled_qty or og.target_qty
 
         for gid in stale_positions:
-            daily_state.move_to_closed(gid, "RECONCILE_IB_CLOSED")
+            og = next((o for o in daily_state.open_positions if o.group_id == gid), None)
+            est_pnl = 0.0
+            exit_type = "unknown"
+            if og:
+                tp_alive = og.broker_tp_order_id and og.broker_tp_order_id in ib_order_ids
+                sl_alive = og.broker_sl_order_id and og.broker_sl_order_id in ib_order_ids
+                qty = og.filled_qty or og.target_qty
+                if not tp_alive and sl_alive:
+                    exit_type = "TP"
+                    og.actual_exit_price = og.target_price
+                    pts = (og.target_price - og.entry_price) if og.side == "BUY" else (og.entry_price - og.target_price)
+                    est_pnl = round(pts * qty * 20, 2)
+                elif not sl_alive and tp_alive:
+                    exit_type = "SL"
+                    og.actual_exit_price = og.stop_price
+                    pts = (og.stop_price - og.entry_price) if og.side == "BUY" else (og.entry_price - og.stop_price)
+                    est_pnl = round(pts * qty * 20, 2)
+            daily_state.move_to_closed(gid, "RECONCILE_IB_CLOSED", est_pnl)
             if self._logger:
                 self._logger.log(
                     "reconciliation",
                     action="position_closed_at_ib",
                     group_id=gid,
+                    exit_type=exit_type,
+                    est_pnl=est_pnl,
                     note="TP/SL likely filled while bot was offline",
                 )
 

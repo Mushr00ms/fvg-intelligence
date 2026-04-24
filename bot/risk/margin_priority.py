@@ -47,7 +47,9 @@ class MarginPriorityManager:
                     per_contract=round(self._margin.margin_per_contract, 2),
                 )
                 proposed_order.target_qty = max(1, max_qty)
-            await self._order_mgr.place_bracket(proposed_order, daily_state)
+            og = await self._order_mgr.place_bracket(proposed_order, daily_state)
+            if og.state == "CLOSED":
+                return "REJECTED"
             self._margin.reserve(proposed_order.target_qty)
             return "PLACED"
 
@@ -122,7 +124,9 @@ class MarginPriorityManager:
             return "SUSPENDED"
 
         proposed_order.target_qty = min(proposed_order.target_qty, max(1, max_qty))
-        await self._order_mgr.place_bracket(proposed_order, daily_state)
+        og = await self._order_mgr.place_bracket(proposed_order, daily_state)
+        if og.state == "CLOSED":
+            return "REJECTED"
         self._margin.reserve(proposed_order.target_qty)
 
         self._logger.log(
