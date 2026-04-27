@@ -40,7 +40,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 KLINES_DIR = Path("/home/cr0wn/binance_data/official_klines")
-DEFAULT_STRATEGY_PATH = _ROOT / "logic/strategies/btc-5min-5xlev-ev007-s30-both.json"
+DEFAULT_STRATEGY_PATH = _ROOT / "bot/strategies/btc-5min-5xlev-ev007-s30-both.json"
 OUT_DIR = _ROOT / "scripts/btc_sweep_results"
 
 KCOLS = ["open_time", "open", "high", "low", "close", "volume",

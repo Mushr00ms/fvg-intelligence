@@ -1,7 +1,7 @@
 """
 strategy_loader.py — Load the active trading strategy and build a lookup table.
 
-Reads from logic/strategies/ (the strategy builder's output).
+Reads from bot/strategies/ (the strategy builder's output).
 Supports hot-reload: checks file mtime every 60s and swaps the lookup atomically.
 """
 

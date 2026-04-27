@@ -2,7 +2,7 @@
 strategy_store.py — Save/load trading strategies as JSON for the bot and dashboard.
 
 Store layout:
-    logic/strategies/
+    bot/strategies/
         manifest.json          # index of all strategies + active_strategy pointer
         {id}.json              # individual strategy file
 """
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 
 _DEFAULT_STORE_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "strategies")
+    os.path.join(os.path.dirname(__file__), "..", "..", "bot", "strategies")
 )
 
 # Valid R:R target values — any positive float (optimizer may produce values outside 1.0-3.0)

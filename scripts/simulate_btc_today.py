@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from crypto_bot.fvg import parse_ts, hourly_period
 
-STRATEGY = "logic/strategies/btc-5min-locked-ev007-s30-both.json"
+STRATEGY = "bot/strategies/btc-5min-locked-ev007-s30-both.json"
 CAPITAL = 50_000
 RISK_PCT = 0.0007
 LEVERAGE = 1.0

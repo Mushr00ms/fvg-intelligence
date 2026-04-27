@@ -21,8 +21,8 @@ identity fields, source dataset, cells and stats change.
 Usage:
     python3 scripts/build_nq_strategy_from_window.py \
         --parquet logic/fvg_cache/fvg_results_5min_<hash>.parquet \
-        --source-strategy logic/strategies/mixed-best-ev-v3-touch-moderate.json \
-        --out logic/strategies/mixed-best-ev-wf-2020-2024.json \
+        --source-strategy bot/strategies/mixed-best-ev-v3-touch-moderate.json \
+        --out bot/strategies/mixed-best-ev-wf-2020-2024.json \
         --strategy-id mixed-best-ev-wf-2020-2024 \
         --strategy-name "Mixed Best EV WF 2020-2024" \
         --source-dataset rr_nq_5min_2020_2024_30min
@@ -115,7 +115,7 @@ def count_trading_days(parquet_path: str) -> int:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--parquet", default=None, help="FVG parquet path (default: newest in fvg_cache)")
-    p.add_argument("--source-strategy", default=os.path.join(_ROOT, "logic", "strategies", "mixed-best-ev-v3-touch-moderate.json"))
+    p.add_argument("--source-strategy", default=os.path.join(_ROOT, "bot", "strategies", "mixed-best-ev-v3-touch-moderate.json"))
     p.add_argument("--out", required=True)
     p.add_argument("--strategy-id", required=True)
     p.add_argument("--strategy-name", required=True)

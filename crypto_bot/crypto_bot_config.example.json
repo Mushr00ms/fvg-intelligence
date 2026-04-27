@@ -1,7 +1,7 @@
 {
   "execution_mode": "dry_run",
   "symbol": "BTCUSDC",
-  "strategy_path": "logic/strategies/btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15.json",
+  "strategy_path": "bot/strategies/btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15.json",
   "state_dir": "crypto_bot/state",
   "log_dir": "crypto_bot/logs",
   "api_key": "",

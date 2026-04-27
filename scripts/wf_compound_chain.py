@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse, json, os, subprocess, sys, tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STRAT = os.path.join(_ROOT, "logic", "strategies")
+_STRAT = os.path.join(_ROOT, "bot", "strategies")
 
 # (label, start, end, strategy_filename)
 def build_legs(suffix: str, end_2026: str):

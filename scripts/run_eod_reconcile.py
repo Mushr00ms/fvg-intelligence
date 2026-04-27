@@ -223,7 +223,7 @@ async def run_reconciliation(target_date=None, skip_download=False):
     config = load_bot_config(default_config_path())
     log_dir = config.log_dir or os.path.join(ROOT, "bot", "logs")
     state_dir = config.state_dir or os.path.join(ROOT, "bot", "bot_state")
-    strategy_dir = config.strategy_dir or os.path.join(ROOT, "logic", "strategies")
+    strategy_dir = config.strategy_dir or os.path.join(ROOT, "bot", "strategies")
     data_dir = os.path.join(ROOT, "bot", "data")
     os.makedirs(data_dir, exist_ok=True)
 

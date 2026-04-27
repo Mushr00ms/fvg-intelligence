@@ -458,7 +458,7 @@ def main():
             f"2025 replay DD {result['max_dd_pct']:.1f}%, Sharpe {result['sharpe']:.3f}."
         )
         strategy = build_strategy_export(export_id, export_name, export_description, export_spec)
-        strategy_dir = os.path.join(_ROOT, "logic", "strategies")
+        strategy_dir = os.path.join(_ROOT, "bot", "strategies")
         strategy_id = save_strategy(strategy, strategy_dir)
         print(f"Exported strategy to {os.path.join(strategy_dir, f'{strategy_id}.json')}")
         if args.set_active:

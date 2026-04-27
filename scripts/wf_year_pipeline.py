@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STRATEGIES = os.path.join(_ROOT, "logic", "strategies")
+_STRATEGIES = os.path.join(_ROOT, "bot", "strategies")
 _TMP = "/tmp"
 
 sys.path.insert(0, _ROOT)

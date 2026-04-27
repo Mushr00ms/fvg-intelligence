@@ -1796,7 +1796,7 @@ def load_databento_bars(symbol, start_date, end_date):
 
 def main():
     parser = argparse.ArgumentParser(description="FVG Strategy Backtester")
-    parser.add_argument("--strategy", help="Strategy ID from logic/strategies/")
+    parser.add_argument("--strategy", help="Strategy ID from bot/strategies/")
     parser.add_argument("--strategy-file", help="Path to strategy JSON file")
     parser.add_argument("--data-source", default="ib", choices=["ib", "databento"],
                         help="Data source: 'ib' (1-sec parquet) or 'databento' (1-min)")

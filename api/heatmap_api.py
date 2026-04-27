@@ -947,13 +947,13 @@ def api_bot_cell_performance():
         # Enrich with strategy baseline win rate
         try:
             strat_path = os.path.join(
-                _REPO_ROOT, "logic", "strategies", "manifest.json")
+                _REPO_ROOT, "bot", "strategies", "manifest.json")
             with open(strat_path) as f:
                 manifest = json.load(f)
                 active_id = manifest.get("active_strategy") or manifest.get("active")
             if active_id:
                 with open(os.path.join(
-                        _REPO_ROOT, "logic", "strategies", f"{active_id}.json")) as f:
+                        _REPO_ROOT, "bot", "strategies", f"{active_id}.json")) as f:
                     strat = json.load(f)
                 baseline = {
                     (c["time_period"], c["risk_range"], c["setup"]): c["win_rate"]
@@ -1119,13 +1119,13 @@ def api_bot_period_pnl():
         # Compute cell-weighted baseline WR for each period
         try:
             strat_path = os.path.join(
-                _REPO_ROOT, "logic", "strategies", "manifest.json")
+                _REPO_ROOT, "bot", "strategies", "manifest.json")
             with open(strat_path) as f:
                 manifest = json.load(f)
                 active_id = manifest.get("active_strategy") or manifest.get("active")
             if active_id:
                 with open(os.path.join(
-                        _REPO_ROOT, "logic", "strategies", f"{active_id}.json")) as f:
+                        _REPO_ROOT, "bot", "strategies", f"{active_id}.json")) as f:
                     strat = json.load(f)
                 baseline = {
                     (c["time_period"], c["risk_range"], c["setup"]): c["win_rate"]

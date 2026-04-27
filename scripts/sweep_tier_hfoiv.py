@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-STRAT_DIR = ROOT / "logic" / "strategies"
+STRAT_DIR = ROOT / "bot" / "strategies"
 
 # Walk-forward strategy mapping: each year uses strategy trained on prior data only
 YEAR_CONFIG = {

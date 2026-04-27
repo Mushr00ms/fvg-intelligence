@@ -28,7 +28,7 @@ from scripts.walkforward_btc_risk_tiers import (
     split_years,
 )
 
-OUT_DIR = ROOT / "logic" / "strategies"
+OUT_DIR = ROOT / "bot" / "strategies"
 
 
 def _pruned_cells(val_stats: dict, prune_min_trades: int | None) -> set:

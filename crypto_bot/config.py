@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 class CryptoBotConfig:
     execution_mode: str = "dry_run"  # dry_run | live
     symbol: str = "BTCUSDC"
-    strategy_path: str = "logic/strategies/btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15.json"
+    strategy_path: str = "bot/strategies/btc-5min-wf-train2024-prune2025-ev007-s200-mitonly-p15.json"
     state_dir: str = "crypto_bot/state"
     log_dir: str = "crypto_bot/logs"
 
