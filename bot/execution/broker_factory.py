@@ -36,7 +36,7 @@ def create_broker_adapter(config, logger=None, clock=None) -> BrokerAdapter:
         from bot.execution.split_adapter import SplitAdapter
         data = IBAdapter(config, bot_logger=logger, clock=clock)
         exec_ = TradovateAdapter(config, bot_logger=logger, clock=clock)
-        return SplitAdapter(data_adapter=data, exec_adapter=exec_)
+        return SplitAdapter(data_adapter=data, exec_adapter=exec_, bot_logger=logger)
 
     else:
         raise ValueError(

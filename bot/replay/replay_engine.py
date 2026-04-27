@@ -259,11 +259,6 @@ class ReplayEngine:
                 if not result.passed:
                     continue
 
-                # Drawdown scaling
-                dd_mult = self.risk_gates.drawdown_multiplier(state)
-                if dd_mult < 1.0:
-                    order.target_qty = max(1, int(order.target_qty * dd_mult))
-
                 # Margin cap
                 margin_per = self.config.margin_fallback_per_contract
                 buffer = self.config.margin_buffer_pct

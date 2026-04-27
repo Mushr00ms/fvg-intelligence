@@ -191,6 +191,15 @@ class TradovateAdapter(BrokerAdapter):
         self._order_ws.on_reconnect(self._on_order_ws_reconnect)
         self._md_ws.on_reconnect(self._on_md_ws_reconnect)
 
+        if self._bot_logger:
+            self._bot_logger.log(
+                "tradovate_connected",
+                environment=env,
+                account=self._account_spec,
+                order_ws="connected",
+                market_data_ws="connected",
+            )
+
     async def disconnect(self) -> None:
         await self._order_ws.disconnect()
         await self._md_ws.disconnect()
@@ -209,6 +218,16 @@ class TradovateAdapter(BrokerAdapter):
             self._order_ws.disconnect_seconds,
             self._md_ws.disconnect_seconds,
         )
+
+    def connection_status(self) -> dict:
+        """Return connection status for logging and alerts."""
+        return {
+            "execution": {
+                "broker": "Tradovate",
+                "connected": self.is_connected,
+                "disconnect_seconds": self.disconnect_seconds,
+            },
+        }
 
     def on_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._reconnect_callbacks.append(callback)
@@ -485,15 +504,25 @@ class TradovateAdapter(BrokerAdapter):
 
         contract = await self._rest.find_contract(name)
 
-        # Get product details for tick size and point value
-        product_id = contract.get("contractMaturityId") or contract.get("productId")
         tick_size = self._config.tick_size
         point_value = self._config.point_value
+        contract_id = str(contract["id"])
+        expiry = contract.get("expirationDate", "")
+
+        if self._bot_logger:
+            self._bot_logger.log(
+                "contract_resolved",
+                source="tradovate",
+                symbol=symbol,
+                name=name,
+                expiry=expiry,
+                contractId=contract_id,
+            )
 
         return ContractInfo(
             symbol=symbol,
-            broker_contract_id=str(contract["id"]),
-            expiry=contract.get("expirationDate", ""),
+            broker_contract_id=contract_id,
+            expiry=expiry,
             exchange=exchange,
             tick_size=tick_size,
             point_value=point_value,

@@ -67,6 +67,8 @@ class TradovateWebSocket:
         self._is_connected = False
         self._disconnect_time: float = 0.0
         self._should_run = False
+        self._last_close_code: Optional[int] = None
+        self._last_close_reason: str = ""
 
     @property
     def is_connected(self) -> bool:
@@ -252,7 +254,15 @@ class TradovateWebSocket:
             if msg.type != aiohttp.WSMsgType.TEXT:
                 continue
             data = msg.data
-            if not data or data[0] != "a":
+            if not data:
+                continue
+            if data[0] == "c":
+                self._handle_text_frame(data)
+                raise ConnectionError(
+                    f"[{self._name}] Closed during auth: "
+                    f"code={self._last_close_code} reason={self._last_close_reason or 'unknown'}"
+                )
+            if data[0] != "a":
                 continue
             try:
                 items = json.loads(data[1:])
@@ -276,7 +286,9 @@ class TradovateWebSocket:
                 self._last_message_time = time.time()
 
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    self._handle_text_frame(msg.data)
+                    keep_running = self._handle_text_frame(msg.data)
+                    if not keep_running:
+                        break
                 elif msg.type == aiohttp.WSMsgType.CLOSED:
                     break
                 elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -288,23 +300,25 @@ class TradovateWebSocket:
         except Exception as e:
             logger.error("[%s] Receive loop error: %s", self._name, e)
 
-        # Connection lost
+        # Connection lost — cancel heartbeat before reconnecting
         self._is_connected = False
         self._disconnect_time = time.time()
+
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
 
         if self._should_run:
             asyncio.ensure_future(self._reconnect_loop())
 
-    def _handle_text_frame(self, data: str) -> None:
+    def _handle_text_frame(self, data: str) -> bool:
         """Parse Tradovate text frame by prefix character."""
         if not data:
-            return
+            return True
 
         prefix = data[0]
 
         if prefix == "h":
-            # Heartbeat — no action needed, _last_message_time already updated
-            return
+            return True
 
         if prefix == "a":
             # Data array
@@ -312,20 +326,49 @@ class TradovateWebSocket:
                 items = json.loads(data[1:])
             except json.JSONDecodeError:
                 logger.warning("[%s] Failed to parse data frame: %s", self._name, data[:100])
-                return
+                return True
 
             for item in items:
                 self._dispatch_item(item)
-            return
+            return True
 
         if prefix == "c":
-            # Close frame
-            logger.info("[%s] Received close frame", self._name)
+            code, reason = self._parse_close_frame(data)
+            self._last_close_code = code
+            self._last_close_reason = reason
+            if code is None and not reason:
+                logger.info("[%s] Received close frame", self._name)
+            else:
+                logger.warning(
+                    "[%s] Received close frame: code=%s reason=%s",
+                    self._name,
+                    code if code is not None else "unknown",
+                    reason or "unknown",
+                )
             self._is_connected = False
-            return
+            return False
 
         # Unknown prefix
         logger.debug("[%s] Unknown frame prefix '%s': %s", self._name, prefix, data[:100])
+        return True
+
+    def _parse_close_frame(self, data: str) -> tuple[Optional[int], str]:
+        """Parse Tradovate SockJS-style close frames: c[code, "reason"]."""
+        payload = data[1:].strip()
+        if not payload:
+            return None, ""
+
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None, payload
+
+        if not isinstance(parsed, list):
+            return None, str(parsed)
+
+        code = parsed[0] if parsed and isinstance(parsed[0], int) else None
+        reason = str(parsed[1]) if len(parsed) > 1 and parsed[1] is not None else ""
+        return code, reason
 
     def _dispatch_item(self, item: Dict) -> None:
         """Route an incoming data item to pending requests and listeners."""
@@ -351,14 +394,22 @@ class TradovateWebSocket:
         try:
             while self._should_run:
                 await asyncio.sleep(self.HEARTBEAT_INTERVAL)
-                if self._ws and not self._ws.closed:
-                    elapsed = time.time() - self._last_message_time
-                    if elapsed >= self.HEARTBEAT_INTERVAL:
+                if not self._ws or self._ws.closed:
+                    break
+                elapsed = time.time() - self._last_message_time
+                if elapsed >= self.HEARTBEAT_INTERVAL:
+                    try:
                         await self._ws.send_str("[]")
+                    except Exception as e:
+                        logger.warning("[%s] Heartbeat send failed: %s", self._name, e)
+                        try:
+                            if self._ws and not self._ws.closed:
+                                await self._ws.close()
+                        except Exception:
+                            pass
+                        break
         except asyncio.CancelledError:
             return
-        except Exception as e:
-            logger.error("[%s] Heartbeat error: %s", self._name, e)
 
     # ── Reconnection ────────────────────────────────────────────────────
 
@@ -383,6 +434,8 @@ class TradovateWebSocket:
 
                 # Re-authenticate with fresh token if available
                 self._last_message_time = time.time()
+                if self._heartbeat_task and not self._heartbeat_task.done():
+                    self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
                 token = self._token_getter() if self._token_getter else self._access_token

@@ -21,7 +21,7 @@ Usage (backtester):
             gate.update(bar_minutes, bar.imbalance)
         # At trade entry:
         mult, info = gate.get_size_multiplier(entry_minutes)
-        contracts = max(1, floor(base_qty * dd_mult * mult))
+        contracts = max(1, floor(base_qty * mult))
 
 Usage (live engine):
     Same gate object, fed by tick accumulator building 5-min imbalance bars.

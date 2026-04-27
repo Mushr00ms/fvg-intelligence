@@ -1312,20 +1312,6 @@ class BotEngine:
                 )
                 continue
 
-            # Drawdown scaling — reduce size on bad days, never block
-            dd_mult = self.risk_gates.drawdown_multiplier(self.daily_state)
-            if dd_mult < 1.0:
-                scaled_qty = max(1, int(order.target_qty * dd_mult))
-                self.logger.log(
-                    "dd_scale",
-                    group_id=order.group_id,
-                    original_qty=order.target_qty,
-                    scaled_qty=scaled_qty,
-                    multiplier=dd_mult,
-                    daily_pnl=round(self.daily_state.realized_pnl, 2),
-                )
-                order.target_qty = scaled_qty
-
             # HFOIV gate — reduce size when imbalance volatility is elevated
             hfoiv_mult = 1.0
             hfoiv_info = {}

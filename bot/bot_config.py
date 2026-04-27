@@ -62,8 +62,6 @@ class BotConfig:
     max_concurrent: int = 3         # Max open positions at any time
     max_daily_trades: int = 15      # Max trades per session
     kill_switch_pct: float = -0.10  # -10% daily loss = emergency halt (catastrophic only)
-    dd_scale_tier1_pct: float = -0.02  # -2% daily → 50% size
-    dd_scale_tier2_pct: float = -0.04  # -4% daily → 25% size
     max_cumulative_risk_pct: float = 0.05  # 5% max cumulative open risk
     point_value: float = 20.0       # NQ = $20/point
     tick_size: float = 0.25         # NQ tick size

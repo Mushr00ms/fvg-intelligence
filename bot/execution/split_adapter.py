@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 class SplitAdapter(BrokerAdapter):
     """IB data + Tradovate execution composite adapter."""
 
-    def __init__(self, data_adapter: BrokerAdapter, exec_adapter: BrokerAdapter):
+    def __init__(self, data_adapter: BrokerAdapter, exec_adapter: BrokerAdapter, bot_logger=None):
         self._data = data_adapter
         self._exec = exec_adapter
+        self._bot_logger = bot_logger
         self._data_contract: Optional[ContractInfo] = None
         self._exec_contract: Optional[ContractInfo] = None
 
@@ -61,6 +62,21 @@ class SplitAdapter(BrokerAdapter):
     def disconnect_seconds(self) -> float:
         return max(self._data.disconnect_seconds, self._exec.disconnect_seconds)
 
+    def connection_status(self) -> dict:
+        """Return per-leg connection status for logging and alerts."""
+        return {
+            "data": {
+                "broker": "IBKR",
+                "connected": self._data.is_connected,
+                "disconnect_seconds": self._data.disconnect_seconds,
+            },
+            "execution": {
+                "broker": "Tradovate",
+                "connected": self._exec.is_connected,
+                "disconnect_seconds": self._exec.disconnect_seconds,
+            },
+        }
+
     def on_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._data.on_reconnect(callback)
 
@@ -76,25 +92,39 @@ class SplitAdapter(BrokerAdapter):
         exchange: str,
         expiry_hint: Optional[datetime] = None,
     ) -> ContractInfo:
+        # IB is the source of truth — it provides market data
         self._data_contract = await self._data.resolve_contract(symbol, exchange, expiry_hint)
-        self._exec_contract = await self._exec.resolve_contract(symbol, exchange, expiry_hint)
 
-        # Enforce contract parity: both adapters must resolve to the same month
-        data_exp = self._data_contract.expiry[:6] if self._data_contract.expiry else ""
+        # Drive Tradovate resolution from IB's resolved expiry so both
+        # adapters are guaranteed to trade the same contract month
+        ib_expiry = self._data_contract.expiry
+        tv_hint = _parse_expiry_hint(ib_expiry) if ib_expiry else expiry_hint
+        self._exec_contract = await self._exec.resolve_contract(symbol, exchange, tv_hint)
+
+        # Sanity check — should never diverge since Tradovate was driven by IB
+        data_exp = ib_expiry[:6] if ib_expiry else ""
         exec_exp = self._exec_contract.expiry[:6] if self._exec_contract.expiry else ""
         if data_exp and exec_exp and data_exp != exec_exp:
             raise RuntimeError(
-                f"Contract month mismatch: IB data={self._data_contract.expiry} "
+                f"Contract month mismatch: IB data={ib_expiry} "
                 f"vs Tradovate exec={self._exec_contract.expiry}. "
                 f"Cannot trade on mismatched contracts near rollover."
             )
 
-        logger.info(
-            "Contracts resolved: data=%s (IB %s) exec=%s (Tradovate %s)",
-            self._data_contract.symbol, self._data_contract.broker_contract_id,
-            self._exec_contract.name, self._exec_contract.broker_contract_id,
-        )
-        return self._exec_contract
+        if self._bot_logger:
+            self._bot_logger.log(
+                "split_contracts_resolved",
+                source="split",
+                source_of_truth="IBKR",
+                ib_symbol=self._data_contract.symbol,
+                ib_expiry=ib_expiry,
+                ib_conId=self._data_contract.broker_contract_id,
+                tv_name=self._exec_contract.name,
+                tv_expiry=self._exec_contract.expiry,
+                tv_contractId=self._exec_contract.broker_contract_id,
+            )
+
+        return self._data_contract
 
     @property
     def data_contract(self) -> Optional[ContractInfo]:
@@ -193,3 +223,14 @@ class SplitAdapter(BrokerAdapter):
 
     def allocate_order_ids(self, count: int) -> List[str]:
         return self._exec.allocate_order_ids(count)
+
+
+def _parse_expiry_hint(ib_expiry: str) -> datetime:
+    """Convert IB expiry string (YYYYMM or YYYYMMDD) to a datetime hint.
+
+    Returns the 1st of the expiry month — safely before any quarterly expiry
+    so the Tradovate adapter resolves to the same contract.
+    """
+    year = int(ib_expiry[:4])
+    month = int(ib_expiry[4:6])
+    return datetime(year, month, 1)

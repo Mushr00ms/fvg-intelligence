@@ -70,26 +70,6 @@ class TestRiskGates:
         assert result.passed is False
         assert result.gate == "emergency_halt"
 
-    def test_drawdown_multiplier_full_size(self):
-        gates = RiskGates(_make_config())
-        state = _make_state(balance=100000, pnl=-1500)  # -1.5%, above -2%
-        assert gates.drawdown_multiplier(state) == 1.0
-
-    def test_drawdown_multiplier_half_size(self):
-        gates = RiskGates(_make_config())
-        state = _make_state(balance=100000, pnl=-2500)  # -2.5%, between -2% and -4%
-        assert gates.drawdown_multiplier(state) == 0.50
-
-    def test_drawdown_multiplier_quarter_size(self):
-        gates = RiskGates(_make_config())
-        state = _make_state(balance=100000, pnl=-5000)  # -5%, below -4%
-        assert gates.drawdown_multiplier(state) == 0.25
-
-    def test_drawdown_multiplier_no_pnl(self):
-        gates = RiskGates(_make_config())
-        state = _make_state(balance=100000, pnl=500)  # positive day
-        assert gates.drawdown_multiplier(state) == 1.0
-
     def test_daily_trade_limit(self):
         gates = RiskGates(_make_config())
         state = _make_state(trades=15)
