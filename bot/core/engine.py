@@ -92,7 +92,11 @@ class BotEngine:
             print("CRITICAL: NTP sync failed on startup — clock untrusted. "
                   "New trade entries will be BLOCKED until NTP succeeds.", file=sys.stderr)
 
-        self.logger = BotLogger(config.log_dir, clock=self.clock)
+        self.logger = BotLogger(
+            config.log_dir,
+            clock=self.clock,
+            execution_backend=config.execution_backend,
+        )
         self.state_mgr = StateManager(config.state_dir, self.logger, clock=self.clock)
         self.strategy = StrategyLoader(config.strategy_dir, self.logger)
         self.risk_gates = RiskGates(config)
@@ -126,6 +130,8 @@ class BotEngine:
         self._eod_flatten_done = False
         self._eod_cleanup_done = False
         self._session_seeded = False  # True after bars re-seeded at session open
+        self._last_exec_reconnect_log_ts = 0.0
+        self._suppressed_exec_reconnects = 0
 
     async def run(self):
         """Main entry point. Runs the bot until session end or kill switch."""
@@ -232,7 +238,6 @@ class BotEngine:
             # 4b. Initialize margin management
             if self.config.margin_management_enabled:
                 from bot.risk.margin_tracker import MarginTracker
-                from bot.risk.margin_priority import MarginPriorityManager
                 if self.config.execution_backend in ("ib_data_tradovate_exec", "tradovate"):
                     margin_conn = self.broker
                 else:
@@ -242,11 +247,19 @@ class BotEngine:
                     clock=self.clock,
                 )
                 await self.margin_tracker.initialize()
-                self.margin_priority = MarginPriorityManager(
-                    self.margin_tracker, self.order_mgr,
-                    self.risk_gates, self.time_gates,
-                    self.logger, self.config, clock=self.clock,
-                )
+
+                # Margin priority (suspension/reactivation) only for IB where
+                # margins are high enough to require intelligent allocation.
+                # Tradovate day-trade margin is ~$1k/contract — suspension adds
+                # complexity with no benefit and can false-trigger on stale state.
+                if self.config.execution_backend not in ("ib_data_tradovate_exec", "tradovate"):
+                    from bot.risk.margin_priority import MarginPriorityManager
+                    self.margin_priority = MarginPriorityManager(
+                        self.margin_tracker, self.order_mgr,
+                        self.risk_gates, self.time_gates,
+                        self.logger, self.config, clock=self.clock,
+                    )
+
                 # Register margin re-evaluation callback on order resolution
                 self.order_mgr._on_order_resolved = self._on_order_resolved
 
@@ -445,7 +458,7 @@ class BotEngine:
             # callbacks during asyncio.sleep via nest_asyncio patching
             await asyncio.sleep(0.1)
 
-    async def _check_disconnect_timeout(self):
+    async def _check_disconnect_timeout_legacy_unused(self):
         """Flatten all positions if IB has been disconnected beyond max_disconnect_minutes.
 
         Fires once per disconnect event (reset on reconnect by _on_reconnect).
@@ -457,11 +470,21 @@ class BotEngine:
             return
 
         max_seconds = self.config.max_disconnect_minutes * 60
-        disc_secs = self.broker.disconnect_seconds
+        status = self._broker_connection_status()
+        disc_secs = max(
+            (leg.get("disconnect_seconds") or 0)
+            for leg in status.values()
+        ) if status else self.broker.disconnect_seconds
+        disconnected = {
+            name: leg for name, leg in status.items()
+            if not leg.get("connected", False)
+        }
         if disc_secs >= max_seconds:
             self._disconnect_flatten_done = True
+            source = self._format_connection_source(disconnected)
             self.logger.log(
                 "disconnect_timeout_flatten",
+                source=source,
                 disconnect_seconds=round(disc_secs),
                 threshold_minutes=self.config.max_disconnect_minutes,
             )
@@ -472,6 +495,62 @@ class BotEngine:
                 await self.telegram.alert_connection_lost(
                     f"IB disconnected for {round(disc_secs)}s — all positions flattened"
                 )
+
+    async def _check_disconnect_timeout(self):
+        """Flatten after broker disconnect timeout, with per-leg source reporting."""
+        if self._disconnect_flatten_done:
+            return
+        if self.config.dry_run or not self.broker:
+            return
+
+        max_seconds = self.config.max_disconnect_minutes * 60
+        status = self._broker_connection_status()
+        disc_secs = max(
+            (leg.get("disconnect_seconds") or 0)
+            for leg in status.values()
+        ) if status else self.broker.disconnect_seconds
+        disconnected = {
+            name: leg for name, leg in status.items()
+            if not leg.get("connected", False)
+        }
+        if disc_secs < max_seconds:
+            return
+
+        self._disconnect_flatten_done = True
+        source = self._format_connection_source(disconnected)
+        self.logger.log(
+            "disconnect_timeout_flatten",
+            source=source,
+            disconnect_seconds=round(disc_secs),
+            threshold_minutes=self.config.max_disconnect_minutes,
+        )
+        if self.order_mgr and self.daily_state:
+            await self.order_mgr.flatten_all(self.daily_state, "DISCONNECT_TIMEOUT")
+            self.state_mgr.save(self.daily_state, force=True)
+        if self.telegram.enabled:
+            await self.telegram.alert_connection_lost(
+                round(disc_secs),
+                source=f"{source} disconnected - all positions flattened",
+            )
+
+    def _broker_connection_status(self):
+        status_fn = getattr(self.broker, "connection_status", None)
+        if callable(status_fn):
+            try:
+                return status_fn()
+            except Exception:
+                return {}
+        return {}
+
+    @staticmethod
+    def _format_connection_source(disconnected):
+        if not disconnected:
+            return "Unknown"
+        parts = []
+        for name, leg in disconnected.items():
+            broker = leg.get("broker") or name
+            parts.append(f"{broker} {name}")
+        return ", ".join(parts)
 
     async def _check_eod_actions(self):
         """Fire EOD actions based on NTP-corrected wall clock time."""
@@ -1071,7 +1150,17 @@ class BotEngine:
     async def _on_exec_reconnect(self):
         """Handle execution-side (Tradovate) reconnect — re-sync orders only."""
         self._disconnect_flatten_done = False
-        self.logger.log("exec_reconnect")
+        now_ts = self.clock.now().timestamp()
+        if now_ts - self._last_exec_reconnect_log_ts >= 300:
+            suppressed = self._suppressed_exec_reconnects
+            self._suppressed_exec_reconnects = 0
+            self._last_exec_reconnect_log_ts = now_ts
+            payload = {"source": "Tradovate order/account websocket"}
+            if suppressed:
+                payload["suppressed"] = suppressed
+            self.logger.log("exec_reconnect", **payload)
+        else:
+            self._suppressed_exec_reconnects += 1
         try:
             if self.order_mgr and self.daily_state:
                 await self._rehydrate_callbacks()

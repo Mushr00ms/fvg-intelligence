@@ -15,7 +15,7 @@ class BotConfig:
     """Complete bot configuration."""
 
     # Execution backend
-    execution_backend: str = "ib"   # "ib" | "binance_um" | "tradovate"
+    execution_backend: str = "ib"   # "ib" | "binance_um" | "tradovate" | "ib_data_tradovate_exec"
 
     # IB Connection
     ib_host: str = "127.0.0.1"
@@ -139,7 +139,13 @@ class BotConfig:
         if self.execution_backend not in {"ib", "binance_um", "tradovate", "ib_data_tradovate_exec"}:
             raise ValueError(
                 f"Unsupported execution_backend={self.execution_backend!r}; "
-                "expected 'ib', 'tradovate', or 'ib_data_tradovate_exec'"
+                "expected 'ib', 'binance_um', 'tradovate', or 'ib_data_tradovate_exec'"
+            )
+        self.tradovate_environment = (self.tradovate_environment or "demo").lower()
+        if self.tradovate_environment not in {"demo", "live"}:
+            raise ValueError(
+                f"Unsupported tradovate_environment={self.tradovate_environment!r}; "
+                "expected 'demo' or 'live'"
             )
 
         # WSL2: auto-detect Windows host IP if ib_host is still localhost
@@ -222,6 +228,9 @@ _ENV_MAP = {
     "BOT_BINANCE_POSITION_MODE": ("binance_position_mode", str),
     "BOT_BINANCE_DEFAULT_LEVERAGE": ("binance_default_leverage", int),
     "BOT_BINANCE_USER_STREAM_KEEPALIVE": ("binance_user_stream_keepalive", int),
+    "BOT_TRADOVATE_ENVIRONMENT": ("tradovate_environment", str),
+    "BOT_TRADOVATE_APP_VERSION": ("tradovate_app_version", str),
+    "BOT_TRADOVATE_ACCOUNT_SPEC": ("tradovate_account_spec", str),
     "BOT_STRATEGY_DIR": ("strategy_dir", str),
     "BOT_STATE_DIR": ("state_dir", str),
     "BOT_LOG_DIR": ("log_dir", str),

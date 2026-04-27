@@ -105,6 +105,21 @@ class IBAdapter(BrokerAdapter):
     def disconnect_seconds(self) -> float:
         return self._conn.disconnect_seconds
 
+    def connection_status(self) -> dict:
+        """Return connection status for logging and alerts."""
+        return {
+            "data": {
+                "broker": "IBKR",
+                "connected": self.is_connected,
+                "disconnect_seconds": self.disconnect_seconds,
+            },
+            "execution": {
+                "broker": "IBKR",
+                "connected": self.is_connected,
+                "disconnect_seconds": self.disconnect_seconds,
+            },
+        }
+
     def on_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._reconnect_callbacks.append(callback)
 

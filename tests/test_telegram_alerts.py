@@ -52,3 +52,20 @@ def test_alert_reconciliation_returns_false_when_delivery_fails(monkeypatch):
         assert unsent[0]["event_type"] == "reconciliation"
     finally:
         os.unlink(path)
+
+
+def test_connection_lost_alert_includes_source(monkeypatch):
+    alerter = TelegramAlerter("token", "chat")
+    sent = []
+
+    async def _capture(message):
+        sent.append(message)
+        return True
+
+    monkeypatch.setattr(alerter, "send", _capture)
+
+    asyncio.run(alerter.alert_connection_lost(5, source="Tradovate execution"))
+
+    assert sent
+    assert "Source: Tradovate execution" in sent[0]
+    assert "Downtime: 5s" in sent[0]

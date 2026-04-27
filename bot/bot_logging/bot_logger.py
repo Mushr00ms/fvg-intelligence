@@ -17,12 +17,13 @@ NY_TZ = pytz.timezone("America/New_York")
 
 class BotLogger:
     def __init__(self, log_dir, clock=None, max_bytes=10 * 1024 * 1024, backup_count=5,
-                 cleanup_days=30):
+                 cleanup_days=30, execution_backend=None):
         self._log_dir = log_dir
         self._clock = clock
         self._max_bytes = max_bytes          # 10 MB default per file
         self._backup_count = backup_count    # Keep 5 rotated backups
         self._cleanup_days = cleanup_days    # Delete logs older than 30 days
+        self._execution_backend = (execution_backend or "").lower()
         os.makedirs(log_dir, exist_ok=True)
         self._current_date = None
         self._current_filepath = None
@@ -123,6 +124,7 @@ class BotLogger:
         event = record["event"]
         # Truncate timestamp to HH:MM:SS for console
         time_part = ts[11:19] if len(ts) > 19 else ts
+        source_marker = self._console_source_marker(record)
 
         # Color coding by event severity
         color = self._console_color(record)
@@ -138,7 +140,7 @@ class BotLogger:
             detail_str = " " + " ".join(parts)
 
         print(
-            f"{color}[{time_part}] {event.upper()}{reset}{detail_str}",
+            f"{color}[{time_part}] [{source_marker}] {event.upper()}{reset}{detail_str}",
             file=self._console,
         )
 
@@ -162,6 +164,28 @@ class BotLogger:
             return f"\033[96m{rendered}\033[0m"
         return rendered
 
+    def _console_source_marker(self, record):
+        """Return a short source marker for console logs."""
+        event = str(record.get("event", "")).lower()
+        explicit = str(
+            record.get("broker")
+            or record.get("source")
+            or record.get("backend")
+            or ""
+        ).lower()
+        if explicit:
+            return _normalize_source_marker(explicit)
+
+        if event in _IBKR_EVENTS:
+            return "IBKR"
+        if event in _TRADOVATE_EVENTS:
+            return "TV"
+        if event in _EXECUTION_EVENTS:
+            return "TV" if self._execution_backend in {"tradovate", "ib_data_tradovate_exec"} else "IBKR"
+        if event in _DATA_EVENTS:
+            return "IBKR" if self._execution_backend in {"ib", "ib_data_tradovate_exec"} else "TV"
+        return "SYS"
+
     def close(self):
         """Close the log file."""
         if self._file:
@@ -178,6 +202,7 @@ _EVENT_COLORS = {
     "connection_restored": "\033[92m",
     "strategy_loaded": "\033[92m",
     "strategy_reloaded": "\033[92m",
+    "tradovate_connected": "\033[92m",
     # Yellow — informational
     "fvg_detected": "\033[93m",
     "crypto_fvg_detected": "\033[93m",
@@ -206,4 +231,75 @@ _EVENT_COLORS = {
     "eod_cancel": "\033[96m",
     "eod_flatten": "\033[96m",
     "eod_exit": "\033[33m",
+}
+
+
+def _normalize_source_marker(source):
+    if source in {"tradovate", "tv", "exec", "execution"}:
+        return "TV"
+    if source in {"ib", "ibkr", "interactive_brokers", "data"}:
+        return "IBKR"
+    if source in {"both", "split", "ib_data_tradovate_exec"}:
+        return "BOTH"
+    return "SYS"
+
+
+_IBKR_EVENTS = {
+    "bars_subscribed",
+    "clock_broker_mismatch",
+    "clock_broker_validated",
+    "connection_lost",
+    "connection_restored",
+    "contract_resolved",
+    "eod_reconcile_download_cached",
+    "eod_reconcile_download_ok",
+    "eod_reconcile_download_retry",
+    "eod_reconcile_tick_error",
+    "eod_reconcile_tick_validation",
+    "ib_reprice",
+    "oca_cancel",
+    "reconnect_attempt",
+    "reconnect_failed",
+    "reconnect_resubscribe",
+    "ticks_subscribe_failed",
+    "ticks_subscribed",
+}
+
+_TRADOVATE_EVENTS = {
+    "exec_reconnect",
+    "exec_reconnect_error",
+    "margin_fetched",
+    "tradovate_connected",
+}
+
+_EXECUTION_EVENTS = {
+    "bracket_ids_recovered",
+    "eod_cancel",
+    "eod_exit",
+    "eod_flatten",
+    "flatten",
+    "margin_reseeded_after_reconcile",
+    "naked_position_detected",
+    "order_cancelled",
+    "order_filled",
+    "order_placed",
+    "order_rejected",
+    "partial_fill",
+    "sl_filled",
+    "suspend_cancel_echo",
+    "suspended_reactivated",
+    "tp_filled",
+}
+
+_DATA_EVENTS = {
+    "backfill_complete",
+    "backfill_process",
+    "fvg_detected",
+    "hfoiv_gate_init",
+    "hfoiv_history_loaded",
+    "mitigation",
+    "setup_accepted",
+    "setup_evaluated",
+    "setup_rejected",
+    "setup_skipped_strategy",
 }

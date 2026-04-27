@@ -119,8 +119,17 @@ class TestWebSocketFrameParsing:
 
     def test_close_frame_sets_disconnected(self):
         ws = self._make_ws()
-        ws._handle_text_frame("c")
+        keep_running = ws._handle_text_frame("c")
         assert ws._is_connected is False
+        assert keep_running is False
+
+    def test_close_frame_records_code_and_reason(self):
+        ws = self._make_ws()
+        keep_running = ws._handle_text_frame('c[3000, "Go away!"]')
+        assert ws._is_connected is False
+        assert keep_running is False
+        assert ws._last_close_code == 3000
+        assert ws._last_close_reason == "Go away!"
 
     def test_empty_frame_ignored(self):
         ws = self._make_ws()
@@ -181,6 +190,15 @@ class TestWebSocketFrameParsing:
 
         ws._handle_text_frame("a" + json.dumps([{"test": 2}]))
         assert len(received) == 1  # No new items
+
+
+class TestTradovateAuthSpecAlignment:
+    """Test auth behavior expected by the local OpenAPI spec."""
+
+    def test_renewal_buffer_is_15_minutes(self):
+        from bot.execution.tradovate.auth import TradovateAuth
+
+        assert TradovateAuth.RENEW_BUFFER_SECONDS == 15 * 60
 
 
 # ══════════════════════════════════════════════════════════════════════════════

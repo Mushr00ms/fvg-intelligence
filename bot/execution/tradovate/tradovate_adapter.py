@@ -73,10 +73,11 @@ def _expiry_to_tradovate_name(symbol: str, expiry: datetime) -> str:
 class TradovateAdapter(BrokerAdapter):
     """Tradovate broker adapter — REST + WebSocket, cloud-native."""
 
-    def __init__(self, config, bot_logger=None, clock=None):
+    def __init__(self, config, bot_logger=None, clock=None, execution_only: bool = False):
         self._config = config
         self._bot_logger = bot_logger
         self._clock = clock
+        self._execution_only = execution_only
 
         # Credentials loaded from AWS SSM Parameter Store at connect() time.
         # Nothing sensitive touches config or disk.
@@ -86,7 +87,7 @@ class TradovateAdapter(BrokerAdapter):
 
         # WebSockets — token getters wired after auth in connect()
         self._order_ws = TradovateWebSocket(name="order")
-        self._md_ws = TradovateWebSocket(name="md")
+        self._md_ws = TradovateWebSocket(name="md") if not execution_only else None
 
         # Account state (populated by user sync)
         self._account_id: Optional[int] = None
@@ -176,20 +177,25 @@ class TradovateAdapter(BrokerAdapter):
 
         # Wire token getters so WS reconnect uses the latest renewed token
         self._order_ws._token_getter = lambda: self._auth.access_token
-        self._md_ws._token_getter = lambda: (
-            self._auth.token.md_access_token or self._auth.access_token
-            if self._auth.token else self._auth.access_token
-        )
+        self._order_ws._token_refresher = self._force_reauth
 
         await self._order_ws.connect(order_url, token.access_token)
-        await self._md_ws.connect(md_url, md_token)
+
+        if self._md_ws:
+            self._md_ws._token_getter = lambda: (
+                self._auth.token.md_access_token or self._auth.access_token
+                if self._auth.token else self._auth.access_token
+            )
+            self._md_ws._token_refresher = self._force_reauth
+            await self._md_ws.connect(md_url, md_token)
 
         # Step 4: Start user sync (positions, orders, accounts)
         await self._start_user_sync()
 
         # Register reconnect handlers
         self._order_ws.on_reconnect(self._on_order_ws_reconnect)
-        self._md_ws.on_reconnect(self._on_md_ws_reconnect)
+        if self._md_ws:
+            self._md_ws.on_reconnect(self._on_md_ws_reconnect)
 
         if self._bot_logger:
             self._bot_logger.log(
@@ -197,23 +203,28 @@ class TradovateAdapter(BrokerAdapter):
                 environment=env,
                 account=self._account_spec,
                 order_ws="connected",
-                market_data_ws="connected",
+                market_data_ws="skipped (execution_only)" if self._execution_only else "connected",
             )
 
     async def disconnect(self) -> None:
         await self._order_ws.disconnect()
-        await self._md_ws.disconnect()
+        if self._md_ws:
+            await self._md_ws.disconnect()
         await self._rest.close()
         await self._auth.close()
 
     @property
     def is_connected(self) -> bool:
+        if self._execution_only:
+            return self._order_ws.is_connected
         return self._order_ws.is_connected and self._md_ws.is_connected
 
     @property
     def disconnect_seconds(self) -> float:
         if self.is_connected:
             return 0.0
+        if self._execution_only:
+            return self._order_ws.disconnect_seconds
         return max(
             self._order_ws.disconnect_seconds,
             self._md_ws.disconnect_seconds,
@@ -233,7 +244,7 @@ class TradovateAdapter(BrokerAdapter):
         self._reconnect_callbacks.append(callback)
 
     async def _on_order_ws_reconnect(self) -> None:
-        await self._start_user_sync()
+        await self._resync_user_data()
         for cb in self._reconnect_callbacks:
             await cb()
 
@@ -242,14 +253,23 @@ class TradovateAdapter(BrokerAdapter):
         for sub in self._bar_subscriptions.values():
             await self._resubscribe_bars(sub)
 
+    async def _force_reauth(self) -> None:
+        """Force full re-authentication. Called by WS reconnect on 401."""
+        logger.info("Forcing Tradovate re-authentication for WS reconnect")
+        await self._auth.authenticate(force=True)
+
     # ── User Sync ───────────────────────────────────────────────────────
 
     async def _start_user_sync(self) -> None:
-        """Subscribe to real-time user data (positions, orders, accounts)."""
+        """Register listener + send sync request. Called once during connect()."""
         self._order_ws.add_listener(
             filter_fn=lambda item: "e" in item or "d" in item,
             callback=self._on_user_sync_event,
         )
+        await self._resync_user_data()
+
+    async def _resync_user_data(self) -> None:
+        """Re-send sync request without adding duplicate listeners."""
         await self._order_ws.request("user/syncrequest", {
             "users": [self._auth.token.user_id],
         })
@@ -537,6 +557,8 @@ class TradovateAdapter(BrokerAdapter):
         bar_size: str,
         on_bar: Callable[[BarData, bool], Any],
     ) -> str:
+        if not self._md_ws:
+            raise RuntimeError("Market data not available in execution_only mode")
         bar_map = {"5 mins": 5, "1 min": 1, "3 mins": 3, "15 mins": 15}
         element_size = bar_map.get(bar_size, 5)
 
@@ -656,12 +678,13 @@ class TradovateAdapter(BrokerAdapter):
             return
         if sub.unsub_listener:
             sub.unsub_listener()
-        try:
-            await self._md_ws.request("md/cancelChart", {
-                "subscriptionId": sub.realtime_id,
-            })
-        except Exception:
-            pass
+        if self._md_ws:
+            try:
+                await self._md_ws.request("md/cancelChart", {
+                    "subscriptionId": sub.realtime_id,
+                })
+            except Exception:
+                pass
 
     async def subscribe_ticks(
         self,
@@ -669,6 +692,8 @@ class TradovateAdapter(BrokerAdapter):
         on_tick: Callable[[TickData], Any],
     ) -> Optional[str]:
         """Subscribe to trade ticks via md/subscribeQuote."""
+        if not self._md_ws:
+            raise RuntimeError("Market data not available in execution_only mode")
         sub_id = f"ticks_{self._next_sub_id}"
         self._next_sub_id += 1
 
@@ -716,12 +741,13 @@ class TradovateAdapter(BrokerAdapter):
         sub = self._bar_subscriptions.pop(subscription_id, None)
         if sub and sub.unsub_listener:
             sub.unsub_listener()
-        try:
-            await self._md_ws.request("md/unsubscribeQuote", {
-                "symbol": sub.contract.name if sub else "",
-            })
-        except Exception:
-            pass
+        if self._md_ws:
+            try:
+                await self._md_ws.request("md/unsubscribeQuote", {
+                    "symbol": sub.contract.name if sub else "",
+                })
+            except Exception:
+                pass
 
     # ── Order Management ────────────────────────────────────────────────
 

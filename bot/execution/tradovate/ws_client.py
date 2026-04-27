@@ -47,6 +47,7 @@ class TradovateWebSocket:
         self._url: Optional[str] = None
         self._access_token: Optional[str] = None
         self._token_getter: Optional[Callable[[], str]] = token_getter
+        self._token_refresher: Optional[Callable] = None
 
         # Request tracking
         self._next_id = 1
@@ -422,6 +423,15 @@ class TradovateWebSocket:
             await asyncio.sleep(delay)
 
             try:
+                # Clean up previous failed attempt
+                if self._heartbeat_task and not self._heartbeat_task.done():
+                    self._heartbeat_task.cancel()
+                if self._ws and not self._ws.closed:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+
                 if self._session is None or self._session.closed:
                     self._session = aiohttp.ClientSession()
 
@@ -434,8 +444,6 @@ class TradovateWebSocket:
 
                 # Re-authenticate with fresh token if available
                 self._last_message_time = time.time()
-                if self._heartbeat_task and not self._heartbeat_task.done():
-                    self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
                 token = self._token_getter() if self._token_getter else self._access_token
@@ -443,6 +451,17 @@ class TradovateWebSocket:
                 await self._ws.send_str(f"authorize\n{auth_id}\n\n{token}")
                 auth_resp = await self._read_auth_response(auth_id, timeout=10.0)
                 if auth_resp.get("s") != 200:
+                    # 401 = expired/invalid token — force refresh before next retry
+                    if auth_resp.get("s") == 401 and self._token_refresher:
+                        try:
+                            result = self._token_refresher()
+                            if asyncio.iscoroutine(result):
+                                await result
+                            logger.info("[%s] Token refreshed after 401, retrying immediately", self._name)
+                            delay = self.RECONNECT_MIN_DELAY
+                            continue
+                        except Exception as refresh_err:
+                            logger.warning("[%s] Token refresh failed: %s", self._name, refresh_err)
                     raise ConnectionError(f"Auth failed: {auth_resp}")
 
                 self._is_connected = True

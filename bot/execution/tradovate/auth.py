@@ -62,14 +62,15 @@ class TradovateCredentials:
 class TradovateAuth:
     """Manages Tradovate API authentication and token lifecycle."""
 
-    # Renew token when less than this many seconds remain
-    RENEW_BUFFER_SECONDS = 300      # 5 minutes before expiry
+    # OpenAPI advises renewing about 15 minutes before token expiry.
+    RENEW_BUFFER_SECONDS = 900
 
     def __init__(self, credentials: TradovateCredentials):
         self._creds = credentials
         self._token: Optional[TokenInfo] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._renewal_task: Optional[asyncio.Task] = None
+        self._auth_lock = asyncio.Lock()
 
     @property
     def token(self) -> Optional[TokenInfo]:
@@ -85,9 +86,22 @@ class TradovateAuth:
     def is_authenticated(self) -> bool:
         return self._token is not None and not self._token.is_expired
 
-    async def authenticate(self) -> TokenInfo:
-        """Perform initial authentication. Returns TokenInfo on success."""
-        if self._session is None:
+    async def authenticate(self, force: bool = False) -> TokenInfo:
+        """Perform full authentication. Thread-safe via lock.
+
+        Args:
+            force: Skip freshness check and always re-authenticate.
+                   Used after WS 401 rejection where the token may be
+                   revoked server-side despite not appearing expired locally.
+        """
+        async with self._auth_lock:
+            if not force and self._token and not self._token.is_expired:
+                return self._token
+            return await self._do_authenticate()
+
+    async def _do_authenticate(self) -> TokenInfo:
+        """Core auth logic — caller must hold _auth_lock."""
+        if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
 
         url = f"{self._creds.base_url}/auth/accesstokenrequest"
@@ -210,57 +224,72 @@ class TradovateAuth:
         """Renew the current access token without starting a new session.
 
         Uses /auth/renewAccessToken which extends the existing session.
-        Falls back to full re-auth if renewal fails.
+        Falls back to full re-auth if renewal fails or token is already expired.
         """
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
+        async with self._auth_lock:
+            # Another caller may have already refreshed
+            if (self._token and not self._token.is_expired
+                    and self._token.seconds_until_expiry > self.RENEW_BUFFER_SECONDS):
+                return self._token
 
-        url = f"{self._creds.base_url}/auth/renewAccessToken"
-        headers = {
-            "Authorization": f"Bearer {self._token.access_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+            # Renew endpoint requires a valid bearer token — skip if expired
+            if self._token is None or self._token.is_expired:
+                logger.info("Token already expired, performing full re-authentication")
+                return await self._do_authenticate()
 
-        async with self._session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                logger.warning("Token renewal returned HTTP %d, falling back to re-auth", resp.status)
-                return await self.authenticate()
-            data = await resp.json()
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession()
 
-        if data.get("errorText"):
-            logger.warning("Token renewal error: %s, falling back to re-auth", data["errorText"])
-            return await self.authenticate()
+            url = f"{self._creds.base_url}/auth/renewAccessToken"
+            headers = {
+                "Authorization": f"Bearer {self._token.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
 
-        new_token = data.get("accessToken", "")
-        if not new_token:
-            logger.warning("Token renewal returned no accessToken, falling back to re-auth")
-            return await self.authenticate()
-
-        expiration_str = data.get("expirationTime", "")
-        if expiration_str:
-            from datetime import datetime, timezone
             try:
-                exp_dt = datetime.fromisoformat(expiration_str.replace("Z", "+00:00"))
-                exp_unix = exp_dt.timestamp()
-            except (ValueError, TypeError):
+                async with self._session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.warning("Token renewal returned HTTP %d, falling back to re-auth", resp.status)
+                        return await self._do_authenticate()
+                    data = await resp.json()
+            except Exception as e:
+                logger.warning("Token renewal request failed: %s, falling back to re-auth", e)
+                return await self._do_authenticate()
+
+            if data.get("errorText"):
+                logger.warning("Token renewal error: %s, falling back to re-auth", data["errorText"])
+                return await self._do_authenticate()
+
+            new_token = data.get("accessToken", "")
+            if not new_token:
+                logger.warning("Token renewal returned no accessToken, falling back to re-auth")
+                return await self._do_authenticate()
+
+            expiration_str = data.get("expirationTime", "")
+            if expiration_str:
+                from datetime import datetime, timezone
+                try:
+                    exp_dt = datetime.fromisoformat(expiration_str.replace("Z", "+00:00"))
+                    exp_unix = exp_dt.timestamp()
+                except (ValueError, TypeError):
+                    exp_unix = time.time() + 86400
+            else:
                 exp_unix = time.time() + 86400
-        else:
-            exp_unix = time.time() + 86400
 
-        self._token = TokenInfo(
-            access_token=new_token,
-            md_access_token=self._token.md_access_token,
-            expiration_time=exp_unix,
-            user_id=data.get("userId", self._token.user_id),
-            name=data.get("name", self._token.name),
-        )
+            self._token = TokenInfo(
+                access_token=new_token,
+                md_access_token=self._token.md_access_token,
+                expiration_time=exp_unix,
+                user_id=data.get("userId", self._token.user_id),
+                name=data.get("name", self._token.name),
+            )
 
-        logger.info(
-            "Tradovate token renewed: expires_in=%.0fs",
-            self._token.seconds_until_expiry,
-        )
-        return self._token
+            logger.info(
+                "Tradovate token renewed: expires_in=%.0fs",
+                self._token.seconds_until_expiry,
+            )
+            return self._token
 
     async def _renewal_loop(self) -> None:
         """Background loop that renews token before it expires."""

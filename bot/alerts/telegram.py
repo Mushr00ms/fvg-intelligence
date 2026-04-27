@@ -193,11 +193,16 @@ class TelegramAlerter:
         )
         await self.send_queued("kill_switch", msg)
 
-    async def alert_connection_lost(self, downtime_seconds):
+    async def alert_connection_lost(self, downtime_seconds, source="connection"):
         """Send connection lost alert."""
+        try:
+            downtime = f"{float(downtime_seconds):.0f}s"
+        except (TypeError, ValueError):
+            downtime = str(downtime_seconds)
         msg = (
             "<b>CONNECTION LOST</b>\n\n"
-            f"Downtime: {downtime_seconds:.0f}s\n"
+            f"Source: {source}\n"
+            f"Downtime: {downtime}\n"
             "Attempting reconnect..."
         )
         await self.send(msg)

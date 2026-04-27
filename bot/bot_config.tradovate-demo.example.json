@@ -1,0 +1,15 @@
+{
+  "execution_backend": "ib_data_tradovate_exec",
+  "tradovate_environment": "demo",
+  "tradovate_account_spec": "",
+  "ib_host": "127.0.0.1",
+  "ib_port": 7497,
+  "ib_client_id": 1,
+  "paper_mode": true,
+  "dry_run": false,
+  "ticker": "NQ",
+  "exchange": "CME",
+  "currency": "USD",
+  "telegram_bot_token": "REPLACE_ME",
+  "telegram_chat_id": "REPLACE_ME"
+}
