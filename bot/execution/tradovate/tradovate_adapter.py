@@ -249,8 +249,34 @@ class TradovateAdapter(BrokerAdapter):
 
     async def _on_order_ws_reconnect(self) -> None:
         await self._resync_user_data()
+        await self._reconcile_order_status()
         for cb in self._reconnect_callbacks:
             await cb()
+
+    async def _reconcile_order_status(self) -> None:
+        """Check tracked orders via REST to detect fills missed during disconnect."""
+        for bracket_key, cbs in list(self._order_callbacks.items()):
+            tp_id = cbs.get("_tp_id")
+            sl_id = cbs.get("_sl_id")
+            manual_tp = cbs.get("_manual_tp_id")
+            manual_sl = cbs.get("_manual_sl_id")
+
+            for oid, handler_key in [
+                (tp_id, "on_tp_fill"), (manual_tp, "on_tp_fill"),
+                (sl_id, "on_sl_fill"), (manual_sl, "on_sl_fill"),
+            ]:
+                if not oid:
+                    continue
+                try:
+                    order = await self._rest._get("/order/item", {"id": int(oid)})
+                    if order.get("ordStatus") == "Filled":
+                        logger.info(
+                            "Reconciliation: order %s filled while disconnected", oid,
+                        )
+                        cbs[handler_key](order)
+                        break
+                except Exception as e:
+                    logger.debug("Reconcile order %s: %s", oid, e)
 
     async def _on_md_ws_reconnect(self) -> None:
         # Re-subscribe all active bar subscriptions
