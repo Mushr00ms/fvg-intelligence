@@ -1158,6 +1158,12 @@ class BotEngine:
             payload = {"source": "Tradovate order/account websocket"}
             if suppressed:
                 payload["suppressed"] = suppressed
+            reason = getattr(self.broker, "last_disconnect_reason", "")
+            if not reason:
+                exec_adapter = getattr(self.broker, "_exec", None)
+                reason = getattr(exec_adapter, "last_disconnect_reason", "")
+            if reason:
+                payload["last_disconnect_reason"] = reason
             self.logger.log("exec_reconnect", **payload)
         else:
             self._suppressed_exec_reconnects += 1

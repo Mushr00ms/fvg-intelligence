@@ -243,6 +243,10 @@ class TradovateAdapter(BrokerAdapter):
     def on_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._reconnect_callbacks.append(callback)
 
+    @property
+    def last_disconnect_reason(self) -> str:
+        return self._order_ws._last_disconnect_reason
+
     async def _on_order_ws_reconnect(self) -> None:
         await self._resync_user_data()
         for cb in self._reconnect_callbacks:

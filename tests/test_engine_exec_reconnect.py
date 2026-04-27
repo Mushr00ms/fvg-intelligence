@@ -25,6 +25,7 @@ def _make_engine():
     engine = BotEngine.__new__(BotEngine)
     engine.clock = _Clock()
     engine.logger = _Logger()
+    engine.broker = None
     engine.order_mgr = None
     engine.daily_state = None
     engine._disconnect_flatten_done = True

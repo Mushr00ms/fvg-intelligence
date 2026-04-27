@@ -70,6 +70,7 @@ class TradovateWebSocket:
         self._should_run = False
         self._last_close_code: Optional[int] = None
         self._last_close_reason: str = ""
+        self._last_disconnect_reason: str = ""
 
     @property
     def is_connected(self) -> bool:
@@ -278,9 +279,11 @@ class TradovateWebSocket:
 
     async def _receive_loop(self) -> None:
         """Main loop processing incoming WebSocket messages."""
+        disconnect_reason = "unknown"
         try:
             while self._should_run:
                 if self._ws is None or self._ws.closed:
+                    disconnect_reason = "ws_closed_externally"
                     break
 
                 msg = await self._ws.receive()
@@ -289,21 +292,28 @@ class TradovateWebSocket:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     keep_running = self._handle_text_frame(msg.data)
                     if not keep_running:
+                        disconnect_reason = (
+                            f"close_frame code={self._last_close_code} "
+                            f"reason={self._last_close_reason or 'none'}"
+                        )
                         break
                 elif msg.type == aiohttp.WSMsgType.CLOSED:
+                    disconnect_reason = "ws_msg_closed"
                     break
                 elif msg.type == aiohttp.WSMsgType.ERROR:
-                    logger.error("[%s] WebSocket error: %s", self._name, msg.data)
+                    disconnect_reason = f"ws_error: {msg.data}"
                     break
 
         except asyncio.CancelledError:
             return
         except Exception as e:
-            logger.error("[%s] Receive loop error: %s", self._name, e)
+            disconnect_reason = f"exception: {e}"
 
         # Connection lost — cancel heartbeat before reconnecting
         self._is_connected = False
         self._disconnect_time = time.time()
+        self._last_disconnect_reason = disconnect_reason
+        logger.warning("[%s] Disconnected: %s", self._name, disconnect_reason)
 
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
