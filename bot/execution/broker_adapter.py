@@ -64,6 +64,19 @@ class BracketOrderResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class FillSummary:
+    """Broker-native fills aggregated for one order."""
+    broker: str
+    order_id: str
+    quantity: int
+    avg_price: float
+    timestamp: Optional[datetime] = None
+    commission: float = 0.0
+    fee_complete: bool = False
+    raw: Any = field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Abstract Broker Adapter
 # ---------------------------------------------------------------------------
@@ -172,6 +185,18 @@ class BrokerAdapter(ABC):
     ) -> str:
         """Place a market order (used for flatten). Returns order ID."""
 
+    async def liquidate_position(
+        self,
+        contract: ContractInfo,
+    ) -> Optional[str]:
+        """Liquidate a position via broker-native close endpoint.
+
+        Returns order ID if a position was liquidated, None if no position
+        existed or the broker doesn't support native liquidation.
+        Subclasses that support native liquidation should override this.
+        """
+        return None
+
     @abstractmethod
     async def get_open_trades(self) -> List[OpenOrderSnapshot]:
         """Return all open/working trades from the broker."""
@@ -218,3 +243,11 @@ class BrokerAdapter(ABC):
 
     async def cancel_bracket_exits(self, entry_order_id: str) -> None:
         """Cancel TP + SL exits for a bracket. Default no-op (IB uses OCA)."""
+
+    async def get_order_fill_summary(self, order_id: str) -> Optional[FillSummary]:
+        """Return broker-native fill price/qty/fees for one order if supported."""
+        return None
+
+    async def reconcile_order_status(self) -> None:
+        """Poll broker order/fill state to catch missed execution events."""
+        return None

@@ -23,7 +23,7 @@ def _new_id():
 
 
 # State schema version — increment on breaking changes, add migration in state_manager.py
-STATE_VERSION = "1.2"
+STATE_VERSION = "1.3"
 
 
 def _migrate_order_id(d: dict, new_key: str, old_key: str) -> Optional[str]:
@@ -141,6 +141,7 @@ class OrderGroup:
     broker_entry_order_id: Optional[str] = None
     broker_tp_order_id: Optional[str] = None
     broker_sl_order_id: Optional[str] = None
+    broker_exit_order_id: Optional[str] = None
     submitted_at: Optional[str] = None
     filled_at: Optional[str] = None
     closed_at: Optional[str] = None
@@ -172,6 +173,7 @@ class OrderGroup:
             "broker_entry_order_id": self.broker_entry_order_id,
             "broker_tp_order_id": self.broker_tp_order_id,
             "broker_sl_order_id": self.broker_sl_order_id,
+            "broker_exit_order_id": self.broker_exit_order_id,
             "submitted_at": self.submitted_at,
             "filled_at": self.filled_at,
             "closed_at": self.closed_at,
@@ -206,6 +208,7 @@ class OrderGroup:
             broker_entry_order_id=_migrate_order_id(d, "broker_entry_order_id", "ib_entry_order_id"),
             broker_tp_order_id=_migrate_order_id(d, "broker_tp_order_id", "ib_tp_order_id"),
             broker_sl_order_id=_migrate_order_id(d, "broker_sl_order_id", "ib_sl_order_id"),
+            broker_exit_order_id=d.get("broker_exit_order_id"),
             submitted_at=d.get("submitted_at"),
             filled_at=d.get("filled_at"),
             closed_at=d.get("closed_at"),
@@ -307,7 +310,10 @@ class DailyState:
         order_id = str(broker_order_id)
         for og in self.pending_orders + self.open_positions:
             if order_id in (
-                og.broker_entry_order_id, og.broker_tp_order_id, og.broker_sl_order_id
+                og.broker_entry_order_id,
+                og.broker_tp_order_id,
+                og.broker_sl_order_id,
+                og.broker_exit_order_id,
             ):
                 return og
         return None

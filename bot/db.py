@@ -89,11 +89,25 @@ def init_db(db_path=None):
             daily_pnl_after REAL,
 
             -- Metadata
+            broker TEXT,
+            broker_entry_order_id TEXT,
+            broker_tp_order_id TEXT,
+            broker_sl_order_id TEXT,
+            broker_exit_order_id TEXT,
             strategy_id TEXT,
             mode TEXT DEFAULT 'PAPER',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    for column, definition in (
+        ("broker", "TEXT"),
+        ("broker_entry_order_id", "TEXT"),
+        ("broker_tp_order_id", "TEXT"),
+        ("broker_sl_order_id", "TEXT"),
+        ("broker_exit_order_id", "TEXT"),
+    ):
+        _ensure_column(conn, "trades", column, definition)
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS daily_stats (
@@ -194,6 +208,12 @@ def init_db(db_path=None):
 
     conn.commit()
     conn.close()
+
+
+def _ensure_column(conn, table, column, definition):
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 class TradeDB:

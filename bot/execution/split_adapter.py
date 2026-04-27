@@ -17,6 +17,7 @@ from bot.execution.broker_adapter import (
     BracketOrderResult,
     BrokerAdapter,
     ContractInfo,
+    FillSummary,
     TickData,
 )
 from bot.execution.execution_types import OpenOrderSnapshot, PositionSnapshot
@@ -191,11 +192,20 @@ class SplitAdapter(BrokerAdapter):
     async def place_market_order(self, contract: ContractInfo, side: str, qty: int) -> str:
         return await self._exec.place_market_order(self._exec_contract or contract, side, qty)
 
+    async def liquidate_position(self, contract: ContractInfo) -> Optional[str]:
+        return await self._exec.liquidate_position(self._exec_contract or contract)
+
     async def get_open_trades(self) -> List[OpenOrderSnapshot]:
         return await self._exec.get_open_trades()
 
     async def cancel_bracket_exits(self, entry_order_id: str) -> None:
         await self._exec.cancel_bracket_exits(entry_order_id)
+
+    async def get_order_fill_summary(self, order_id: str) -> Optional[FillSummary]:
+        return await self._exec.get_order_fill_summary(order_id)
+
+    async def reconcile_order_status(self) -> None:
+        await self._exec.reconcile_order_status()
 
     # ── Account → Tradovate ────────────────────────────────────────
 

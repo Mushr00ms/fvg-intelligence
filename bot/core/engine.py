@@ -23,7 +23,15 @@ from bot.bot_config import BotConfig
 from bot.clock import Clock
 from bot.bot_logging.bot_logger import BotLogger
 from bot.state.state_manager import StateManager
-from bot.state.trade_state import DailyState, CLOSE_CANCEL, CLOSE_EOD, CLOSE_REJECTED
+from bot.state.trade_state import (
+    DailyState,
+    CLOSE_CANCEL,
+    CLOSE_EOD,
+    CLOSE_FLATTEN,
+    CLOSE_REJECTED,
+    CLOSE_SL,
+    CLOSE_TP,
+)
 from bot.strategy.strategy_loader import StrategyLoader
 from bot.strategy.fvg_detector import ActiveFVGManager
 from bot.strategy.mitigation_scanner import scan_active_fvgs
@@ -173,6 +181,7 @@ class BotEngine:
 
         # 1. Load strategy
         self.strategy.load()
+        self._sync_risk_rules_from_strategy()
         self.fvg_mgr = ActiveFVGManager(self.strategy, self.config.min_fvg_size, self.logger)
 
         # 1b. Initialize HFOIV gate (optional — config in strategy meta)
@@ -612,6 +621,38 @@ class BotEngine:
 
         print("\nConnection test complete.")
         await self.broker.disconnect()
+
+    def _sync_risk_rules_from_strategy(self):
+        """Sync risk tier config from strategy meta → BotConfig.
+
+        The strategy's risk_rules are the source of truth for position sizing.
+        The backtester reads them directly; the live bot must mirror them into
+        BotConfig so calculate_setup → get_risk_pct_for_bucket uses the same values.
+        """
+        if not self.strategy or not self.strategy.strategy:
+            return
+        meta = self.strategy.strategy.get("meta", {})
+        rules = meta.get("risk_rules", {})
+        if not rules:
+            return
+
+        self.config.risk_small_pct = rules.get("small_risk_pct", self.config.risk_small_pct)
+        self.config.risk_medium_pct = rules.get("medium_risk_pct", self.config.risk_medium_pct)
+        self.config.risk_large_pct = rules.get("large_risk_pct", self.config.risk_large_pct)
+        if "small_buckets" in rules:
+            self.config.small_buckets = rules["small_buckets"]
+        if "large_buckets" in rules:
+            self.config.large_buckets = rules["large_buckets"]
+
+        self.logger.log(
+            "risk_rules_synced",
+            strategy=self.strategy.strategy_id,
+            small_pct=self.config.risk_small_pct,
+            medium_pct=self.config.risk_medium_pct,
+            large_pct=self.config.risk_large_pct,
+            small_buckets=self.config.small_buckets,
+            large_buckets=self.config.large_buckets,
+        )
 
     def _calendar_gate_allows_entry(self):
         """Check strategy hard calendar gates (e.g., witching filters)."""
@@ -1134,8 +1175,9 @@ class BotEngine:
         """Re-register WS fill callbacks for orders restored from persisted state.
 
         Without this, TP/SL fills arriving via WS are silently dropped because
-        _order_callbacks is empty after restart. That leaves stale local state
-        which can trigger a reverse market order at EOD flatten.
+        _order_callbacks is empty after restart.  The flatten path now uses
+        liquidatePosition + pre-flight position checks, but rehydrating
+        callbacks is still important to track fills for PnL accuracy.
         """
         if not self.order_mgr or not self.daily_state:
             return
@@ -1527,6 +1569,11 @@ class BotEngine:
                 target_price=order.target_price, risk_pts=order.risk_pts,
                 entry_time=order.submitted_at,
                 balance_before=round(balance, 2),
+                broker=self.config.execution_backend,
+                broker_entry_order_id=order.broker_entry_order_id,
+                broker_tp_order_id=order.broker_tp_order_id,
+                broker_sl_order_id=order.broker_sl_order_id,
+                broker_exit_order_id=order.broker_exit_order_id,
                 strategy_id=self.strategy.strategy_id,
                 mode="PAPER" if self.config.paper_mode else "LIVE",
             )
@@ -1590,6 +1637,7 @@ class BotEngine:
             while not self._shutdown:
                 await asyncio.sleep(self.config.strategy_reload_interval)
                 self.strategy.check_reload()
+                self._sync_risk_rules_from_strategy()
 
         async def periodic_clock_sync():
             while not self._shutdown:
@@ -1612,12 +1660,36 @@ class BotEngine:
                 if self.margin_tracker:
                     await self.margin_tracker.refresh_if_stale()
 
+        async def periodic_execution_reconcile():
+            while not self._shutdown:
+                await asyncio.sleep(2)
+                if not self.daily_state or not self.broker:
+                    continue
+                backend = getattr(self.config, "execution_backend", "")
+                if backend not in ("tradovate", "ib_data_tradovate_exec"):
+                    continue
+                has_exposure = bool(self.daily_state.open_positions) or any(
+                    getattr(o, "state", "") == "PARTIAL"
+                    for o in self.daily_state.pending_orders
+                )
+                if not has_exposure:
+                    continue
+                reconcile = getattr(self.broker, "reconcile_order_status", None)
+                if not reconcile:
+                    continue
+                try:
+                    await reconcile()
+                except Exception as e:
+                    self.logger.log("execution_reconcile_error", error=str(e))
+
         self._periodic_tasks.append(asyncio.ensure_future(periodic_save()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_strategy_check()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_clock_sync()))
         self._periodic_tasks.append(asyncio.ensure_future(periodic_alert_retry()))
         if self.margin_tracker:
             self._periodic_tasks.append(asyncio.ensure_future(periodic_margin_refresh()))
+        if getattr(self.config, "execution_backend", "") in ("tradovate", "ib_data_tradovate_exec"):
+            self._periodic_tasks.append(asyncio.ensure_future(periodic_execution_reconcile()))
 
     async def _eod_cancel(self):
         """Cancel all unfilled entry orders at configured EOD cancel time."""
@@ -1820,7 +1892,12 @@ class BotEngine:
                     format_telegram_report(result))
             return
 
-        # 4. Load live trades from DB (only closed trades with exit_reason)
+        # 4. Sync closed-trade accounting from broker-native fills before
+        # loading live trades. In Tradovate execution mode the broker fill
+        # list is the source of truth for prices and fees.
+        broker_sync_errors = await self._sync_closed_trades_from_broker_fills()
+
+        # 5. Load live trades from DB (only closed trades with exit_reason)
         live_trades = self.db.get_trades(date=today, limit=999)
         live_trades = [t for t in live_trades if t.get("exit_reason")]
 
@@ -1829,6 +1906,10 @@ class BotEngine:
         result = match_trades(live_trades, bt_trades, hfoiv_active=hfoiv_on)
         result.date = today
         result.kill_switch_active = self.daily_state.kill_switch_active
+        if broker_sync_errors:
+            shown = "; ".join(broker_sync_errors[:3])
+            extra = f" (+{len(broker_sync_errors) - 3} more)" if len(broker_sync_errors) > 3 else ""
+            result.error = f"Broker fill sync failed: {shown}{extra}"
         _stamp_daily(result)
 
         # 6. Tick-validate paper fills (skip in live mode — IB fills are real)
@@ -1868,6 +1949,152 @@ class BotEngine:
             msg = format_telegram_report(result, weekly_html,
                                          fills_garbage=fills_garbage)
             await self.telegram.alert_reconciliation(msg)
+
+    async def _sync_closed_trades_from_broker_fills(self):
+        """Correct today's closed trades using broker-native fill records."""
+        execution_backend = getattr(self.config, "execution_backend", "")
+        if execution_backend not in ("tradovate", "ib_data_tradovate_exec"):
+            return []
+        get_fill = getattr(self.broker, "get_order_fill_summary", None)
+        if not get_fill or not self.daily_state:
+            return []
+
+        errors = []
+        synced = False
+        for og in list(self.daily_state.closed_trades):
+            qty = og.filled_qty or og.target_qty
+            if qty <= 0 or og.close_reason in (CLOSE_CANCEL, CLOSE_REJECTED):
+                continue
+
+            entry_id = og.broker_entry_order_id
+            if not entry_id:
+                errors.append(f"{og.group_id}: missing broker order id")
+                continue
+
+            entry_fill = await get_fill(str(entry_id))
+            exit_id, exit_reason, exit_fill = await self._broker_exit_fill_for_closed_trade(
+                og, get_fill
+            )
+            if not entry_fill or entry_fill.avg_price <= 0:
+                errors.append(f"{og.group_id}: missing entry fill {entry_id}")
+                continue
+            if not exit_id:
+                errors.append(f"{og.group_id}: missing broker exit order id")
+                continue
+            if not exit_fill or exit_fill.avg_price <= 0:
+                errors.append(f"{og.group_id}: missing exit fill {exit_id}")
+                continue
+            if not entry_fill.fee_complete or not exit_fill.fee_complete:
+                errors.append(f"{og.group_id}: incomplete broker fill fees")
+                continue
+            if entry_fill.quantity != exit_fill.quantity:
+                errors.append(
+                    f"{og.group_id}: fill qty mismatch entry={entry_fill.quantity} "
+                    f"exit={exit_fill.quantity}"
+                )
+                continue
+
+            qty = exit_fill.quantity
+            entry_price = entry_fill.avg_price
+            exit_price = exit_fill.avg_price
+            pnl_pts = exit_price - entry_price if og.side == "BUY" else entry_price - exit_price
+            point_value = getattr(self.config, "point_value", 20.0)
+            gross_pnl = round(pnl_pts * qty * point_value, 2)
+            commission = round(entry_fill.commission + exit_fill.commission, 2)
+            net_pnl = round(gross_pnl - commission, 2)
+
+            delta = net_pnl - (og.realized_pnl or 0.0)
+            if abs(delta) > 0.005:
+                self.daily_state.realized_pnl = round(self.daily_state.realized_pnl + delta, 2)
+
+            og.filled_qty = qty
+            og.actual_entry_price = entry_price
+            og.actual_exit_price = exit_price
+            og.entry_commission = entry_fill.commission
+            if og.close_reason not in (CLOSE_TP, CLOSE_SL, CLOSE_EOD, CLOSE_FLATTEN):
+                og.close_reason = exit_reason
+            og.realized_pnl = net_pnl
+
+            balance_after = self.daily_state.start_balance + self.daily_state.realized_pnl
+            self.db.update_trade_exit(
+                og.group_id,
+                actual_entry_price=entry_price,
+                actual_exit_price=exit_price,
+                entry_slippage_pts=round(abs(entry_price - og.entry_price), 2),
+                stop_slippage_pts=(
+                    round(abs(exit_price - og.stop_price), 2)
+                    if og.close_reason == CLOSE_SL else 0
+                ),
+                exit_reason=og.close_reason,
+                pnl_pts=round(pnl_pts, 2),
+                gross_pnl=gross_pnl,
+                commission=commission,
+                net_pnl=net_pnl,
+                exit_time=(
+                    exit_fill.timestamp.isoformat()
+                    if exit_fill.timestamp else (og.closed_at or self.clock.now().isoformat())
+                ),
+                balance_after=round(balance_after, 2),
+                daily_pnl_after=round(self.daily_state.realized_pnl, 2),
+                broker_entry_order_id=og.broker_entry_order_id,
+                broker_tp_order_id=og.broker_tp_order_id,
+                broker_sl_order_id=og.broker_sl_order_id,
+                broker_exit_order_id=og.broker_exit_order_id,
+            )
+
+            self.logger.log(
+                "broker_fill_synced",
+                broker="tradovate",
+                group_id=og.group_id,
+                entry_order_id=entry_id,
+                exit_order_id=exit_id,
+                qty=qty,
+                entry=entry_price,
+                exit=exit_price,
+                commission=commission,
+                net_pnl=net_pnl,
+            )
+            synced = True
+
+        if errors:
+            self.logger.log("broker_fill_sync_error", count=len(errors), errors=errors[:5])
+        if synced:
+            self.state_mgr.save(self.daily_state, force=True)
+        return errors
+
+    async def _broker_exit_fill_for_closed_trade(self, og, get_fill):
+        for order_id, reason in self._broker_exit_order_candidates(og):
+            if not order_id:
+                continue
+            fill = await get_fill(str(order_id))
+            if fill and fill.avg_price > 0:
+                return order_id, reason, fill
+        return None, None, None
+
+    def _broker_exit_order_candidates(self, og):
+        candidates = []
+
+        def add(order_id, reason):
+            if order_id and order_id not in [oid for oid, _ in candidates]:
+                candidates.append((order_id, reason))
+
+        if og.close_reason == CLOSE_TP:
+            add(og.broker_tp_order_id, CLOSE_TP)
+            add(og.broker_sl_order_id, CLOSE_SL)
+            add(og.broker_exit_order_id, CLOSE_FLATTEN)
+        elif og.close_reason == CLOSE_SL:
+            add(og.broker_sl_order_id, CLOSE_SL)
+            add(og.broker_tp_order_id, CLOSE_TP)
+            add(og.broker_exit_order_id, CLOSE_FLATTEN)
+        elif og.close_reason in (CLOSE_EOD, CLOSE_FLATTEN):
+            add(og.broker_exit_order_id, og.close_reason)
+            add(og.broker_tp_order_id, CLOSE_TP)
+            add(og.broker_sl_order_id, CLOSE_SL)
+        else:
+            add(og.broker_exit_order_id, CLOSE_FLATTEN)
+            add(og.broker_tp_order_id, CLOSE_TP)
+            add(og.broker_sl_order_id, CLOSE_SL)
+        return candidates
 
     def _download_data_dir(self):
         """Return the bot/data/ directory path (creating if needed)."""

@@ -341,4 +341,13 @@ class StateManager:
             if self._logger:
                 self._logger.log("state_migrated", from_version="1.1", to_version="1.2")
 
+        if data.get("version") == "1.2":
+            # v1.3: Persist broker exit market-order id for flatten/EOD fills.
+            for key in ("pending_orders", "open_positions", "closed_trades", "suspended_orders"):
+                for og in data.get(key, []):
+                    og.setdefault("broker_exit_order_id", None)
+            data["version"] = "1.3"
+            if self._logger:
+                self._logger.log("state_migrated", from_version="1.2", to_version="1.3")
+
         return data

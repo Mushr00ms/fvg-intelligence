@@ -198,6 +198,37 @@ class OrderManager:
         og.broker_sl_order_id = sl_id
         self._state_mgr.save(daily_state)
 
+    def _adapter_fill_qty(self, order, default=0):
+        return int(order.get("filledQty", default) or default) if isinstance(order, dict) else default
+
+    def _adapter_fill_price(self, order):
+        if not isinstance(order, dict):
+            return 0.0
+        return float(order.get("avgFillPrice") or order.get("fillPrice") or order.get("price") or 0.0)
+
+    def _adapter_fill_commission(self, order):
+        return float(order.get("commission") or 0.0) if isinstance(order, dict) else 0.0
+
+    def _adapter_fill_time(self, order):
+        if isinstance(order, dict):
+            return order.get("timestamp") or self._now_iso()
+        return self._now_iso()
+
+    def _fail_safe_unverified_fill(self, og, daily_state, broker_order_id, reason):
+        """Stop trading if a broker says filled but no actual fill price is available."""
+        daily_state.kill_switch_active = True
+        daily_state.kill_switch_reason = f"unverified broker fill {broker_order_id}"
+        self._logger.log(
+            "critical_fill_unverified",
+            group_id=og.group_id,
+            broker_order_id=broker_order_id,
+            reason=reason,
+            action="kill_switch",
+        )
+        self._state_mgr.save(daily_state)
+        if self._on_kill_switch:
+            asyncio.ensure_future(self._on_kill_switch())
+
     def _on_entry_fill_adapter(self, order, og, daily_state):
         """Handle entry fill from adapter (Tradovate/split mode).
 
@@ -205,19 +236,24 @@ class OrderManager:
         partial fill handler (timer + child qty adjustment) instead of
         moving directly to OPEN.
         """
-        broker_qty = order.get("filledQty", 0) if isinstance(order, dict) else 0
+        broker_qty = self._adapter_fill_qty(order, 0)
         filled = broker_qty if broker_qty > 0 else og.target_qty
-        broker_price = order.get("avgFillPrice", 0) if isinstance(order, dict) else 0
-        avg_price = broker_price if broker_price > 0 else og.entry_price
+        avg_price = self._adapter_fill_price(order)
+        if avg_price <= 0:
+            self._fail_safe_unverified_fill(
+                og, daily_state, order.get("id") if isinstance(order, dict) else None,
+                "entry_fill_missing_price",
+            )
+            return
 
         if 0 < filled < og.target_qty:
             self._handle_partial_fill_adapter(order, og, daily_state, filled, avg_price)
             return
 
         og.filled_qty = filled
-        og.filled_at = self._now_iso()
+        og.filled_at = self._adapter_fill_time(order)
         og.actual_entry_price = avg_price
-        og.entry_commission = 0.0
+        og.entry_commission = self._adapter_fill_commission(order)
         daily_state.move_to_open(og.group_id)
         self._notify_order_resolved(released_qty=og.target_qty)
         self._state_mgr.save(daily_state)
@@ -234,6 +270,7 @@ class OrderManager:
         prior_filled = og.filled_qty or 0
         og.filled_qty = filled_qty
         og.actual_entry_price = avg_price
+        og.entry_commission = self._adapter_fill_commission(order)
         og.state = "PARTIAL"
         og.partial_fill_timer_start = og.partial_fill_timer_start or self._now_iso()
 
@@ -258,28 +295,39 @@ class OrderManager:
         """Handle TP fill from adapter."""
         if og.close_reason:
             return
-        og.close_reason = CLOSE_TP
-        self._cleanup_entry_remainder(og)
 
         qty = og.filled_qty or og.target_qty
+        fill_price = self._adapter_fill_price(order)
+        if fill_price <= 0:
+            self._fail_safe_unverified_fill(
+                og, daily_state, order.get("id") if isinstance(order, dict) else None,
+                "tp_fill_missing_price",
+            )
+            return
+        og.close_reason = CLOSE_TP
+        self._cleanup_entry_remainder(og)
+        entry_price = og.actual_entry_price or og.entry_price
         if og.side == "BUY":
-            pnl_pts = og.target_price - og.entry_price
+            pnl_pts = fill_price - entry_price
         else:
-            pnl_pts = og.entry_price - og.target_price
+            pnl_pts = entry_price - fill_price
         gross_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
-        commission = self._estimate_commission(qty)
+        commission = round(og.entry_commission + self._adapter_fill_commission(order), 2)
         net_pnl = round(gross_pnl - commission, 2)
 
-        og.actual_exit_price = og.target_price
+        og.actual_exit_price = fill_price
         daily_state.move_to_closed(og.group_id, CLOSE_TP, net_pnl)
 
         self._logger.log(
             "tp_filled", group_id=og.group_id, setup=og.setup,
-            side=og.side, entry_price=og.entry_price, exit_price=og.target_price,
+            side=og.side, entry_price=entry_price, exit_price=fill_price,
             qty=qty, pnl_pts=round(pnl_pts, 2), net_pnl=net_pnl,
             daily_realized=daily_state.realized_pnl,
         )
-        self._write_exit_db(og, og.target_price, "TP", pnl_pts, gross_pnl, commission, net_pnl, daily_state)
+        self._write_exit_db(
+            og, fill_price, "TP", pnl_pts, gross_pnl, commission, net_pnl,
+            daily_state, exit_time=self._adapter_fill_time(order),
+        )
         self._check_kill_switch(daily_state, "tp_fill")
         self._state_mgr.save(daily_state)
         self._notify_order_resolved(released_qty=0)
@@ -288,28 +336,41 @@ class OrderManager:
         """Handle SL fill from adapter."""
         if og.close_reason:
             return
-        og.close_reason = CLOSE_SL
-        self._cleanup_entry_remainder(og)
 
         qty = og.filled_qty or og.target_qty
+        fill_price = self._adapter_fill_price(order)
+        if fill_price <= 0:
+            self._fail_safe_unverified_fill(
+                og, daily_state, order.get("id") if isinstance(order, dict) else None,
+                "sl_fill_missing_price",
+            )
+            return
+        og.close_reason = CLOSE_SL
+        self._cleanup_entry_remainder(og)
+        entry_price = og.actual_entry_price or og.entry_price
         if og.side == "BUY":
-            pnl_pts = og.stop_price - og.entry_price
+            pnl_pts = fill_price - entry_price
         else:
-            pnl_pts = og.entry_price - og.stop_price
+            pnl_pts = entry_price - fill_price
         gross_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
-        commission = self._estimate_commission(qty)
+        commission = round(og.entry_commission + self._adapter_fill_commission(order), 2)
         net_pnl = round(gross_pnl - commission, 2)
 
-        og.actual_exit_price = og.stop_price
+        og.actual_exit_price = fill_price
         daily_state.move_to_closed(og.group_id, CLOSE_SL, net_pnl)
 
         self._logger.log(
             "sl_filled", group_id=og.group_id, setup=og.setup,
-            side=og.side, entry_price=og.entry_price, stop_price=og.stop_price,
-            exit_price=og.stop_price, qty=qty, pnl_pts=round(pnl_pts, 2),
+            side=og.side, entry_price=entry_price, stop_price=og.stop_price,
+            exit_price=fill_price, qty=qty, pnl_pts=round(pnl_pts, 2),
             net_pnl=net_pnl, daily_realized=daily_state.realized_pnl,
         )
-        self._write_exit_db(og, og.stop_price, "SL", pnl_pts, gross_pnl, commission, net_pnl, daily_state)
+        stop_slippage = round(abs(fill_price - og.stop_price), 2)
+        self._write_exit_db(
+            og, fill_price, "SL", pnl_pts, gross_pnl, commission, net_pnl,
+            daily_state, exit_time=self._adapter_fill_time(order),
+            stop_slippage=stop_slippage,
+        )
         self._check_kill_switch(daily_state, "sl_fill")
         self._state_mgr.save(daily_state)
         self._notify_order_resolved(released_qty=0)
@@ -325,7 +386,44 @@ class OrderManager:
         """Estimate round-trip commission for adapter mode (no IB fill data)."""
         return round(qty * 2.88 * 2, 2)
 
+    async def _wait_for_adapter_fill(self, order_id, attempts=20, delay=0.5):
+        """Poll adapter fill summary until a market/exit order has real fills."""
+        if not self._use_adapter or not order_id:
+            return None
+        for _ in range(attempts):
+            summary = await self._adapter.get_order_fill_summary(str(order_id))
+            if summary and summary.quantity > 0 and summary.avg_price > 0:
+                return summary
+            await asyncio.sleep(delay)
+        return None
+
     # ── Legacy IB bracket placement ────────────────────────────────
+
+    async def _detect_adapter_entry_fill_after_cancel(self, og, reason):
+        """Detect a Tradovate entry fill that raced with a cutoff cancel."""
+        if not self._use_adapter or not og.broker_entry_order_id or og.filled_qty:
+            return False
+        fill = await self._wait_for_adapter_fill(
+            og.broker_entry_order_id, attempts=6, delay=0.5
+        )
+        if fill is None or fill.avg_price <= 0 or fill.quantity <= 0:
+            return False
+
+        og.filled_qty = min(fill.quantity, og.target_qty)
+        og.actual_entry_price = fill.avg_price
+        og.entry_commission = fill.commission
+        og.filled_at = fill.timestamp.isoformat() if fill.timestamp else self._now_iso()
+        og.state = "PARTIAL" if og.filled_qty < og.target_qty else "FILLED"
+        self._logger.log(
+            "cutoff_entry_fill_detected",
+            group_id=og.group_id,
+            reason=reason,
+            broker_entry_order_id=og.broker_entry_order_id,
+            qty=og.filled_qty,
+            avg_price=fill.avg_price,
+            action="flatten_immediately",
+        )
+        return True
 
     async def _place_bracket_ib(self, og, daily_state):
         """Place bracket through direct IB connection (legacy path)."""
@@ -629,6 +727,9 @@ class OrderManager:
                 if broker_id:
                     await self._cancel_single_order(broker_id)
 
+            if self._use_adapter and og.state == "SUBMITTED" and not og.filled_qty:
+                await self._detect_adapter_entry_fill_after_cancel(og, reason)
+
         timer = self._partial_timers.pop(og.group_id, None)
         if timer and not timer.done():
             timer.cancel()
@@ -642,17 +743,62 @@ class OrderManager:
                 if hasattr(self._adapter, 'cancel_bracket_exits'):
                     await self._adapter.cancel_bracket_exits(og.broker_entry_order_id)
                     await asyncio.sleep(0.3)
+
+                # Pre-flight: verify broker position exists before reverse order
+                broker_has_position = False
+                try:
+                    positions = await self._adapter.get_positions()
+                    for pos in positions:
+                        if pos.quantity > 0:
+                            broker_has_position = True
+                            break
+                except Exception:
+                    broker_has_position = True  # fail-open
+
+                if not broker_has_position:
+                    self._logger.log("partial_flatten_skipped_no_broker_position",
+                                     group_id=og.group_id, filled=filled)
+                    daily_state.move_to_closed(og.group_id, reason, 0.0)
+                    self._state_mgr.save(daily_state)
+                    self._notify_order_resolved(released_qty=max(0, og.target_qty - filled))
+                    return
+
                 from bot.execution.broker_adapter import ContractInfo
                 ci = ContractInfo(symbol=self._config.ticker, broker_contract_id="",
                                   expiry="", exchange=self._config.exchange)
-                await self._adapter.place_market_order(ci, reverse_side, filled)
+                exit_order_id = await self._adapter.place_market_order(ci, reverse_side, filled)
+                og.broker_exit_order_id = exit_order_id
+                fill = await self._wait_for_adapter_fill(exit_order_id)
+                if fill and fill.avg_price > 0:
+                    entry_price = og.actual_entry_price or og.entry_price
+                    pnl_pts = (
+                        fill.avg_price - entry_price
+                        if og.side == "BUY" else entry_price - fill.avg_price
+                    )
+                    gross_pnl = round(pnl_pts * filled * POINT_VALUE, 2)
+                    commission = round(og.entry_commission + fill.commission, 2)
+                    net_pnl = round(gross_pnl - commission, 2)
+                    og.actual_exit_price = fill.avg_price
+                    daily_state.move_to_closed(og.group_id, reason, net_pnl)
+                    self._write_exit_db(
+                        og, fill.avg_price, reason, pnl_pts, gross_pnl, commission,
+                        net_pnl, daily_state,
+                        exit_time=fill.timestamp.isoformat() if fill.timestamp else self._now_iso(),
+                    )
+                else:
+                    self._fail_safe_unverified_fill(
+                        og, daily_state, exit_order_id, "partial_flatten_fill_missing_price"
+                    )
+                    daily_state.move_to_closed(og.group_id, reason, 0.0)
                 self._logger.log("partial_fill_flattened", group_id=og.group_id,
                                  qty=filled, reason=reason)
 
         unreleased = max(0, og.target_qty - filled)
-        daily_state.move_to_closed(og.group_id, reason)
+        if og.state != "CLOSED":
+            daily_state.move_to_closed(og.group_id, reason)
         self._logger.log("order_cancelled", group_id=og.group_id, reason=reason,
                          flattened_qty=filled)
+        self._state_mgr.save(daily_state)
         self._notify_order_resolved(released_qty=unreleased)
 
     async def cancel_all_pending(self, daily_state, reason=CLOSE_EOD):
@@ -689,29 +835,78 @@ class OrderManager:
                 await self._adapter.cancel_bracket_exits(og.broker_entry_order_id)
                 await asyncio.sleep(0.5)
 
-            reverse_side = "SELL" if og.side == "BUY" else "BUY"
+                # Pre-flight: verify broker actually holds a position before
+                # placing any exit order.  If TP/SL already filled (callback
+                # missed), the position is flat — a blind reverse market order
+                # would OPEN a new position instead of closing one.
+                broker_has_position = False
+                try:
+                    positions = await self._adapter.get_positions()
+                    for pos in positions:
+                        if pos.quantity > 0:
+                            broker_has_position = True
+                            break
+                except Exception as e:
+                    self._logger.log("flatten_position_check_error",
+                                     group_id=og.group_id, error=str(e))
+                    broker_has_position = True  # fail-open: try to flatten
 
-            if self._use_adapter:
+                if not broker_has_position:
+                    self._logger.log("flatten_skipped_no_broker_position",
+                                     group_id=og.group_id, side=og.side,
+                                     qty=qty, reason=reason)
+                    daily_state.move_to_closed(og.group_id, reason, 0.0)
+                    self._state_mgr.save(daily_state)
+                    return
+
+                # Use broker-native liquidation (idempotent — can't accidentally
+                # open a new position if state is stale).
                 from bot.execution.broker_adapter import ContractInfo
                 ci = ContractInfo(symbol=self._config.ticker, broker_contract_id="",
                                   expiry="", exchange=self._config.exchange)
-                await self._adapter.place_market_order(ci, reverse_side, qty)
-                # Estimate P&L for adapter mode
+                exit_order_id = await self._adapter.liquidate_position(ci)
+
+                if not exit_order_id:
+                    # Broker reports no position to liquidate (race with
+                    # pre-flight check) — close in state only.
+                    self._logger.log("flatten_liquidate_noop",
+                                     group_id=og.group_id, reason=reason)
+                    daily_state.move_to_closed(og.group_id, reason, 0.0)
+                    self._state_mgr.save(daily_state)
+                    return
+
+                og.broker_exit_order_id = exit_order_id
+                fill = await self._wait_for_adapter_fill(exit_order_id)
+                if fill is None or fill.avg_price <= 0:
+                    self._fail_safe_unverified_fill(
+                        og, daily_state, exit_order_id, "flatten_fill_missing_price"
+                    )
+                    return
+                entry_price = og.actual_entry_price or og.entry_price
                 if og.side == "BUY":
-                    pnl_pts = og.stop_price - og.entry_price
+                    pnl_pts = fill.avg_price - entry_price
                 else:
-                    pnl_pts = og.entry_price - og.stop_price
-                est_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
-                og.actual_exit_price = og.stop_price
-                daily_state.move_to_closed(og.group_id, reason, est_pnl)
+                    pnl_pts = entry_price - fill.avg_price
+                gross_pnl = round(pnl_pts * qty * POINT_VALUE, 2)
+                commission = round(og.entry_commission + fill.commission, 2)
+                net_pnl = round(gross_pnl - commission, 2)
+                og.actual_exit_price = fill.avg_price
+                daily_state.move_to_closed(og.group_id, reason, net_pnl)
                 self._logger.log(
                     "eod_exit", group_id=og.group_id, setup=og.setup,
-                    side=og.side, entry_price=og.entry_price,
-                    exit_price=og.stop_price, exit_reason=reason,
-                    qty=qty, net_pnl=est_pnl, note="estimated (adapter)",
+                    side=og.side, entry_price=entry_price,
+                    exit_price=fill.avg_price, exit_reason=reason,
+                    qty=qty, pnl_pts=round(pnl_pts, 2), gross_pnl=gross_pnl,
+                    commission=commission, net_pnl=net_pnl,
+                )
+                self._write_exit_db(
+                    og, fill.avg_price, reason, pnl_pts, gross_pnl, commission,
+                    net_pnl, daily_state,
+                    exit_time=fill.timestamp.isoformat() if fill.timestamp else self._now_iso(),
                 )
                 self._state_mgr.save(daily_state)
             else:
+                reverse_side = "SELL" if og.side == "BUY" else "BUY"
                 from ib_async import MarketOrder
                 mkt_order = MarketOrder(action=reverse_side, totalQuantity=qty)
                 flatten_trade = self._conn.ib.placeOrder(self._contract, mkt_order)
@@ -932,7 +1127,7 @@ class OrderManager:
             if self._on_kill_switch:
                 asyncio.ensure_future(self._on_kill_switch())
 
-    def _write_exit_db(self, og, exit_price, reason, pnl_pts, gross_pnl, commission, net_pnl, daily_state, duration_str="", stop_slippage=0):
+    def _write_exit_db(self, og, exit_price, reason, pnl_pts, gross_pnl, commission, net_pnl, daily_state, duration_str="", stop_slippage=0, exit_time=None):
         if not self._db:
             return
         balance_after = daily_state.start_balance + daily_state.realized_pnl
@@ -952,7 +1147,11 @@ class OrderManager:
             exit_reason=reason,
             pnl_pts=round(pnl_pts, 2),
             gross_pnl=gross_pnl, commission=commission, net_pnl=net_pnl,
-            exit_time=self._now_iso(), duration_seconds=dur_sec,
+            exit_time=exit_time or self._now_iso(), duration_seconds=dur_sec,
             balance_after=round(balance_after, 2),
             daily_pnl_after=round(daily_state.realized_pnl, 2),
+            broker_entry_order_id=og.broker_entry_order_id,
+            broker_tp_order_id=og.broker_tp_order_id,
+            broker_sl_order_id=og.broker_sl_order_id,
+            broker_exit_order_id=og.broker_exit_order_id,
         )

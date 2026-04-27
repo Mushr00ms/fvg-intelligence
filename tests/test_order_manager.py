@@ -20,6 +20,7 @@ import pytest
 import pytz
 
 from bot.execution.order_manager import OrderManager
+from bot.execution.broker_adapter import FillSummary
 from bot.state.trade_state import (
     DailyState, OrderGroup, _new_id,
     CLOSE_TP, CLOSE_SL, CLOSE_REJECTED,
@@ -151,6 +152,8 @@ class _FakeIBConn:
 class _FakeConfig:
     dry_run: bool = False
     partial_fill_timeout: int = 300
+    ticker: str = "NQ"
+    exchange: str = "CME"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -273,6 +276,90 @@ class TestStateSaveAfterFill:
 
 
 # ── Fix 2: TP/SL race condition ─────────────────────────────────────────────
+
+
+class _CutoffRaceAdapter:
+    is_connected = True
+    disconnect_seconds = 0.0
+
+    def __init__(self):
+        self.cancelled = []
+        self.market_orders = []
+        self.fills = {
+            "entry-1": FillSummary(
+                "tradovate", "entry-1", 1, 20000.0,
+                commission=1.0, fee_complete=True,
+            ),
+            "exit-1": FillSummary(
+                "tradovate", "exit-1", 1, 19995.0,
+                commission=1.0, fee_complete=True,
+            ),
+        }
+
+    async def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+
+    async def cancel_bracket_exits(self, entry_order_id):
+        self.cancelled.append(f"bracket:{entry_order_id}")
+
+    async def place_market_order(self, contract, side, qty):
+        self.market_orders.append((side, qty))
+        return "exit-1"
+
+    async def get_order_fill_summary(self, order_id):
+        return self.fills.get(str(order_id))
+
+
+def _make_adapter_mgr(adapter, config=None, state_mgr=None, clock=None, logger=None):
+    mgr = OrderManager.__new__(OrderManager)
+    mgr._contract = object()
+    mgr._state_mgr = state_mgr or _TrackingStateMgr()
+    mgr._logger = logger or _CaptureLogger()
+    mgr._config = config or _FakeConfig()
+    mgr._clock = clock or _FakeClock()
+    mgr._db = None
+    mgr._on_kill_switch = None
+    mgr._on_order_resolved = None
+    mgr._partial_timers = {}
+    mgr._adjustment_lock = asyncio.Lock()
+    mgr._loop = None
+    mgr._adapter = adapter
+    mgr._conn = None
+    mgr._use_adapter = True
+    return mgr
+
+
+class TestCutoffCancelRace:
+    def test_entry_fill_racing_cutoff_cancel_is_flattened(self):
+        adapter = _CutoffRaceAdapter()
+        logger = _CaptureLogger()
+        state_mgr = _TrackingStateMgr()
+        mgr = _make_adapter_mgr(adapter, logger=logger, state_mgr=state_mgr)
+        daily = _make_daily()
+        og = _make_og(
+            group_id="race",
+            side="BUY",
+            target_qty=1,
+            broker_entry_order_id="entry-1",
+            broker_tp_order_id="tp-1",
+            broker_sl_order_id="sl-1",
+            state="SUBMITTED",
+        )
+        daily.pending_orders.append(og)
+
+        _run(mgr.cancel_order_group(og, daily, "EOD"))
+
+        assert adapter.cancelled[:3] == ["entry-1", "tp-1", "sl-1"]
+        assert adapter.market_orders == [("SELL", 1)]
+        assert daily.pending_orders == []
+        assert len(daily.closed_trades) == 1
+        closed = daily.closed_trades[0]
+        assert closed.close_reason == "EOD"
+        assert closed.actual_entry_price == 20000.0
+        assert closed.actual_exit_price == 19995.0
+        assert closed.realized_pnl == -102.0
+        assert logger.events("cutoff_entry_fill_detected")
+        assert state_mgr.save_count >= 1
 
 
 class TestTPSLRace:

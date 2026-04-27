@@ -300,6 +300,22 @@ class TradovateRestClient:
             return versions[-1]
         return await self._get("/orderVersion/item", {"id": order_id})
 
+    async def list_fills(self) -> List[Dict[str, Any]]:
+        """Return all fills visible to the authenticated account."""
+        return await self._get("/fill/list")
+
+    async def list_fill_fees(self) -> List[Dict[str, Any]]:
+        """Return fill fee records visible to the authenticated account."""
+        return await self._get("/fillFee/list")
+
+    async def get_order_fills(self, order_id: int) -> List[Dict[str, Any]]:
+        """Return fills for a single broker order id."""
+        fills = await self.list_fills()
+        return [
+            f for f in (fills or [])
+            if str(f.get("orderId")) == str(order_id) and f.get("active", True)
+        ]
+
     async def liquidate_position(
         self, account_id: int, contract_id: int, admin: bool = False
     ) -> Dict[str, Any]:

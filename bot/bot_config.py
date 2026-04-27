@@ -47,7 +47,7 @@ class BotConfig:
     currency: str = "USD"
 
     # Strategy
-    strategy_dir: str = ""          # Path to logic/strategies/ (auto-detected)
+    strategy_dir: str = ""          # Path to bot/strategies/ (auto-detected)
     min_fvg_size: float = 0.25      # Minimum FVG size in points
 
     # Risk Management — 3-tier Kelly-inspired sizing
@@ -155,7 +155,7 @@ class BotConfig:
                 self.ib_host = detected
 
         if not self.strategy_dir:
-            self.strategy_dir = os.path.join(project_dir, "logic", "strategies")
+            self.strategy_dir = os.path.join(project_dir, "bot", "strategies")
         if not self.state_dir:
             self.state_dir = os.path.join(bot_dir, "bot_state")
         if not self.log_dir:
@@ -249,9 +249,9 @@ _ENV_MAP = {
 
 def load_bot_config(config_path=None):
     """
-    Load bot configuration from JSON file + environment variable overrides.
+    Load bot configuration from JSON file + secret store + env var overrides.
 
-    Priority: env vars > config file > dataclass defaults
+    Priority: env vars > config file > secret store > dataclass defaults
     """
     kwargs = {}
 
@@ -266,6 +266,17 @@ def load_bot_config(config_path=None):
         val = os.environ.get(env_key)
         if val is not None:
             kwargs[field_name] = converter(val)
+
+    # 3. Load telegram creds from secret store if not already set
+    if not kwargs.get("telegram_bot_token") or not kwargs.get("telegram_chat_id"):
+        try:
+            from bot.secret_store import SecretStore
+            tg = SecretStore().load_telegram()
+            if tg:
+                kwargs.setdefault("telegram_bot_token", tg.bot_token)
+                kwargs.setdefault("telegram_chat_id", tg.chat_id)
+        except Exception:
+            pass
 
     return BotConfig(**kwargs)
 

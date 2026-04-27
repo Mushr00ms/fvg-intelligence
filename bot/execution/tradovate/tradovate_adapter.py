@@ -23,6 +23,7 @@ from bot.execution.broker_adapter import (
     BracketOrderResult,
     BrokerAdapter,
     ContractInfo,
+    FillSummary,
     TickData,
 )
 from bot.execution.execution_types import (
@@ -113,6 +114,9 @@ class TradovateAdapter(BrokerAdapter):
 
         # Lock for manual exit placement (prevents duplicate OCOs from rapid fills)
         self._manual_exit_lock = asyncio.Lock()
+
+        # Order lifecycle callbacks keyed by entry order id.
+        self._order_callbacks: Dict[str, Dict] = {}
 
     # ── Connection ──────────────────────────────────────────────────────
 
@@ -243,6 +247,15 @@ class TradovateAdapter(BrokerAdapter):
     def on_reconnect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._reconnect_callbacks.append(callback)
 
+    def _schedule(self, coro) -> None:
+        """Schedule a coroutine from sync broker callbacks."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+            return
+        loop.create_task(coro)
+
     @property
     def last_disconnect_reason(self) -> str:
         return self._order_ws._last_disconnect_reason
@@ -253,9 +266,17 @@ class TradovateAdapter(BrokerAdapter):
         for cb in self._reconnect_callbacks:
             await cb()
 
+    async def reconcile_order_status(self) -> None:
+        """Public broker-status poll used by the engine while exposure is open."""
+        await self._reconcile_order_status()
+
     async def _reconcile_order_status(self) -> None:
-        """Check tracked orders via REST to detect fills missed during disconnect."""
+        """Check tracked exits via REST/fill-list to detect missed fill events."""
+        if not self._rest:
+            return
         for bracket_key, cbs in list(self._order_callbacks.items()):
+            if cbs.get("_exit_handled"):
+                continue
             tp_id = cbs.get("_tp_id")
             sl_id = cbs.get("_sl_id")
             manual_tp = cbs.get("_manual_tp_id")
@@ -268,12 +289,23 @@ class TradovateAdapter(BrokerAdapter):
                 if not oid:
                     continue
                 try:
+                    order = {}
+                    filled = False
                     order = await self._rest._get("/order/item", {"id": int(oid)})
                     if order.get("ordStatus") == "Filled":
-                        logger.info(
-                            "Reconciliation: order %s filled while disconnected", oid,
+                        filled = True
+                    else:
+                        summary = await self.get_order_fill_summary(str(oid))
+                        filled = bool(
+                            summary and summary.quantity > 0 and summary.avg_price > 0
                         )
-                        cbs[handler_key](order)
+
+                    if filled:
+                        logger.info("Reconciliation: exit order %s filled", oid)
+                        cbs["_exit_handled"] = True
+                        await self._dispatch_fill_callback(
+                            bracket_key, handler_key, int(oid), fallback=order
+                        )
                         break
                 except Exception as e:
                     logger.debug("Reconcile order %s: %s", oid, e)
@@ -356,8 +388,6 @@ class TradovateAdapter(BrokerAdapter):
 
     # ── Order Event Dispatch ────────────────────────────────────────────
 
-    _order_callbacks: Dict[str, Dict] = {}
-
     def _on_execution_report(self, er: Dict) -> None:
         """Handle Trade execution reports for partial/full fill tracking."""
         order_id = er.get("orderId")
@@ -385,7 +415,9 @@ class TradovateAdapter(BrokerAdapter):
                     cbs["_fill_handled"] = True
                     asyncio.ensure_future(
                         self._cancel_manual_exits(bracket_key))
-                    cbs["on_entry_fill"](fill_data)
+                    self._schedule(self._dispatch_fill_callback(
+                        bracket_key, "on_entry_fill", order_id, fallback=fill_data
+                    ))
             elif cum_qty > (cbs.get("_last_cum_qty") or 0):
                 # Partial fill — need manual protective exits
                 cbs["_last_cum_qty"] = cum_qty
@@ -395,8 +427,76 @@ class TradovateAdapter(BrokerAdapter):
                 )
                 asyncio.ensure_future(
                     self._ensure_manual_exits(bracket_key, cum_qty))
-                cbs["on_entry_fill"](fill_data)
+                self._schedule(self._dispatch_fill_callback(
+                    bracket_key, "on_entry_fill", order_id, fallback=fill_data
+                ))
             break
+
+    async def _dispatch_fill_callback(
+        self,
+        bracket_key: str,
+        handler_key: str,
+        order_id: int,
+        fallback: Optional[Dict] = None,
+    ) -> None:
+        """Dispatch a fill callback using broker fill records when available."""
+        cbs = self._order_callbacks.get(bracket_key)
+        if not cbs:
+            return
+
+        payload = await self._filled_order_payload(order_id, fallback=fallback)
+        if not payload.get("avgFillPrice"):
+            logger.error(
+                "Broker fill price unavailable for order %s; accounting will fail safe",
+                order_id,
+            )
+            if handler_key in ("on_tp_fill", "on_sl_fill"):
+                cbs["_exit_handled"] = False
+        cbs[handler_key](payload)
+
+    async def _filled_order_payload(
+        self,
+        order_id: int,
+        fallback: Optional[Dict] = None,
+        attempts: int = 10,
+        delay: float = 0.5,
+    ) -> Dict:
+        """Build a callback payload from Tradovate fill/list data."""
+        fallback = dict(fallback or {})
+        if not self._rest:
+            fallback.setdefault("id", str(order_id))
+            fallback.setdefault("filledQty", 0)
+            fallback.setdefault("avgFillPrice", 0.0)
+            fallback["fillUnavailable"] = not bool(fallback.get("avgFillPrice"))
+            return fallback
+
+        summary = None
+        usable_summary = None
+        for _ in range(max(1, attempts)):
+            summary = await self.get_order_fill_summary(str(order_id))
+            if summary and summary.quantity > 0 and summary.avg_price > 0:
+                usable_summary = summary
+                if summary.fee_complete:
+                    break
+            await asyncio.sleep(delay)
+
+        summary = usable_summary
+        if summary and summary.quantity > 0 and summary.avg_price > 0:
+            return {
+                "id": str(order_id),
+                "filledQty": summary.quantity,
+                "avgFillPrice": summary.avg_price,
+                "commission": summary.commission,
+                "feeComplete": summary.fee_complete,
+                "timestamp": summary.timestamp.isoformat() if summary.timestamp else None,
+                "rawFills": summary.raw,
+            }
+
+        fallback.setdefault("id", str(order_id))
+        fallback.setdefault("filledQty", 0)
+        fallback.setdefault("avgFillPrice", 0.0)
+        fallback["fillUnavailable"] = True
+        return fallback
 
     async def _ensure_manual_exits(self, bracket_key: str, filled_qty: int) -> None:
         """Place or update manual OCO exits for a partially filled OSO entry.
@@ -495,12 +595,22 @@ class TradovateAdapter(BrokerAdapter):
                     cbs["_fill_handled"] = True
                     asyncio.ensure_future(
                         self._cancel_manual_exits(bracket_key))
-                    cbs["on_entry_fill"]({"filledQty": cbs.get("_target_qty", 0),
-                                          "avgFillPrice": 0, "id": order_id})
+                    self._schedule(self._dispatch_fill_callback(
+                        bracket_key, "on_entry_fill", order_id,
+                        fallback={"filledQty": cbs.get("_target_qty", 0), "id": order_id},
+                    ))
             elif order_id in (tp_id, manual_tp) and status == "Filled":
-                cbs["on_tp_fill"](order)
+                if not cbs.get("_exit_handled"):
+                    cbs["_exit_handled"] = True
+                    self._schedule(self._dispatch_fill_callback(
+                        bracket_key, "on_tp_fill", order_id, fallback=order
+                    ))
             elif order_id in (sl_id, manual_sl) and status == "Filled":
-                cbs["on_sl_fill"](order)
+                if not cbs.get("_exit_handled"):
+                    cbs["_exit_handled"] = True
+                    self._schedule(self._dispatch_fill_callback(
+                        bracket_key, "on_sl_fill", order_id, fallback=order
+                    ))
 
             all_ids = {entry_id, tp_id, sl_id, manual_tp, manual_sl} - {None}
             if order_id in all_ids:
@@ -540,6 +650,7 @@ class TradovateAdapter(BrokerAdapter):
             "_last_cum_qty": filled_qty,
             "_manual_tp_id": None,
             "_manual_sl_id": None,
+            "_exit_handled": False,
         }
 
     # ── Contract Resolution ─────────────────────────────────────────────
@@ -869,6 +980,7 @@ class TradovateAdapter(BrokerAdapter):
                 "_reverse_action": reverse_action,
                 "_tp_price": tp_price,
                 "_sl_price": sl_price,
+                "_exit_handled": False,
             }
             self._order_callbacks[bracket_key] = cbs
 
@@ -913,7 +1025,9 @@ class TradovateAdapter(BrokerAdapter):
                     if not cbs.get("_fill_handled"):
                         cbs["_fill_handled"] = True
                         logger.info("Entry %s filled (poll backup)", entry_id)
-                        cbs["on_entry_fill"](order)
+                        await self._dispatch_fill_callback(
+                            bracket_key, "on_entry_fill", int(entry_id), fallback=order
+                        )
                     return
                 if status in ("Cancelled", "Rejected"):
                     logger.warning("Entry %s %s", entry_id, status)
@@ -990,8 +1104,96 @@ class TradovateAdapter(BrokerAdapter):
         )
         return str(result.get("orderId", ""))
 
+    async def liquidate_position(self, contract: ContractInfo) -> Optional[str]:
+        contract_id = None
+        if contract.broker_contract_id:
+            contract_id = int(contract.broker_contract_id)
+        else:
+            for cid, pos in self._positions.items():
+                if pos.get("netPos", 0) != 0:
+                    contract_id = cid
+                    break
+
+        if contract_id is None:
+            logger.info("liquidate_position: no contract ID / no open position")
+            return None
+
+        net_pos = self._positions.get(contract_id, {}).get("netPos", 0)
+        if net_pos == 0:
+            logger.info("liquidate_position: netPos=0 for contract %s", contract_id)
+            return None
+
+        try:
+            result = await self._rest.liquidate_position(self._account_id, contract_id)
+            order_id = str(result.get("orderId", ""))
+            logger.info("liquidate_position: contract=%s orderId=%s", contract_id, order_id)
+            return order_id or None
+        except Exception as e:
+            logger.error("liquidate_position failed: %s", e)
+            return None
+
     async def get_open_trades(self) -> List[OpenOrderSnapshot]:
         return await self.get_open_orders()
+
+    async def get_order_fill_summary(self, order_id: str) -> Optional[FillSummary]:
+        """Return actual Tradovate fill price, quantity, timestamp, and fees."""
+        if not self._rest:
+            return None
+        try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return None
+
+        fills = await self._rest.get_order_fills(oid)
+        if not fills:
+            return None
+
+        total_qty = sum(int(f.get("qty") or 0) for f in fills)
+        if total_qty <= 0:
+            return None
+
+        gross_price = sum(
+            int(f.get("qty") or 0) * float(f.get("price") or 0.0)
+            for f in fills
+        )
+        avg_price = gross_price / total_qty
+
+        timestamps = [
+            ts for ts in (_parse_tradovate_timestamp(f.get("timestamp")) for f in fills)
+            if ts is not None
+        ]
+        timestamp = max(timestamps) if timestamps else None
+
+        fees_by_fill_id = {}
+        try:
+            fill_fees = await self._rest.list_fill_fees()
+            fees_by_fill_id = {
+                str(fee.get("id")): fee
+                for fee in (fill_fees or [])
+                if fee.get("id") is not None
+            }
+        except Exception as e:
+            logger.warning("Unable to load Tradovate fill fees: %s", e)
+
+        commission = 0.0
+        fee_complete = True
+        for fill in fills:
+            fee = fees_by_fill_id.get(str(fill.get("id")))
+            if fee is None:
+                fee_complete = False
+                continue
+            commission += _tradovate_fee_total(fee)
+
+        return FillSummary(
+            broker="tradovate",
+            order_id=str(oid),
+            quantity=total_qty,
+            avg_price=round(avg_price, 10),
+            timestamp=timestamp,
+            commission=round(commission, 2),
+            fee_complete=fee_complete,
+            raw={"fills": fills, "fees": fees_by_fill_id},
+        )
 
     # ── Account Data ────────────────────────────────────────────────────
 
@@ -1073,6 +1275,34 @@ class TradovateAdapter(BrokerAdapter):
 
 
 # ── Internal Types ──────────────────────────────────────────────────────
+
+def _parse_tradovate_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ET)
+
+
+def _tradovate_fee_total(fee: Dict[str, Any]) -> float:
+    keys = (
+        "clearingFee",
+        "exchangeFee",
+        "nfaFee",
+        "brokerageFee",
+        "ipFee",
+        "commission",
+        "orderRoutingFee",
+    )
+    return round(sum(float(fee.get(k) or 0.0) for k in keys), 2)
+
 
 class _BarSubscription:
     """Tracks an active bar data subscription."""

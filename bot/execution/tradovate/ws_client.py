@@ -401,24 +401,22 @@ class TradovateWebSocket:
     # ── Heartbeat ───────────────────────────────────────────────────────
 
     async def _heartbeat_loop(self) -> None:
-        """Send heartbeat frames to keep the connection alive."""
+        """Send Tradovate application heartbeats to keep the connection alive."""
         try:
             while self._should_run:
                 await asyncio.sleep(self.HEARTBEAT_INTERVAL)
                 if not self._ws or self._ws.closed:
                     break
-                elapsed = time.time() - self._last_message_time
-                if elapsed >= self.HEARTBEAT_INTERVAL:
+                try:
+                    await self._ws.send_str("[]")
+                except Exception as e:
+                    logger.warning("[%s] Heartbeat send failed: %s", self._name, e)
                     try:
-                        await self._ws.send_str("[]")
-                    except Exception as e:
-                        logger.warning("[%s] Heartbeat send failed: %s", self._name, e)
-                        try:
-                            if self._ws and not self._ws.closed:
-                                await self._ws.close()
-                        except Exception:
-                            pass
-                        break
+                        if self._ws and not self._ws.closed:
+                            await self._ws.close()
+                    except Exception:
+                        pass
+                    break
         except asyncio.CancelledError:
             return
 

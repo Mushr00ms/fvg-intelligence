@@ -191,6 +191,30 @@ class TestWebSocketFrameParsing:
         ws._handle_text_frame("a" + json.dumps([{"test": 2}]))
         assert len(received) == 1  # No new items
 
+    def test_heartbeat_loop_sends_even_after_recent_inbound_message(self):
+        ws = self._make_ws()
+        ws.HEARTBEAT_INTERVAL = 0.01
+        ws._should_run = True
+        ws._last_message_time = 999999999999.0
+        sent = []
+
+        class FakeSocket:
+            closed = False
+
+            async def send_str(self, message):
+                sent.append(message)
+                ws._should_run = False
+
+        ws._ws = FakeSocket()
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(asyncio.wait_for(ws._heartbeat_loop(), timeout=1))
+        finally:
+            loop.close()
+
+        assert sent == ["[]"]
+
 
 class TestTradovateAuthSpecAlignment:
     """Test auth behavior expected by the local OpenAPI spec."""
@@ -351,11 +375,12 @@ class TestStateMigration:
 
         migrated = sm._migrate_state(v11_data, "1.1")
 
-        assert migrated["version"] == "1.2"
+        assert migrated["version"] == "1.3"
         og = migrated["pending_orders"][0]
         assert og["broker_entry_order_id"] == "100"
         assert og["broker_tp_order_id"] == "101"
         assert og["broker_sl_order_id"] == "102"
+        assert og["broker_exit_order_id"] is None
         # Old keys removed
         assert "ib_entry_order_id" not in og
         assert "ib_tp_order_id" not in og
@@ -392,7 +417,7 @@ class TestStateMigration:
         assert og["broker_tp_order_id"] is None
         assert og["broker_sl_order_id"] is None
 
-    def test_v10_migrates_all_the_way_to_v12(self):
+    def test_v10_migrates_all_the_way_to_v13(self):
         from bot.state.state_manager import StateManager
         import tempfile
 
@@ -418,10 +443,11 @@ class TestStateMigration:
 
         migrated = sm._migrate_state(v10_data, "1.0")
 
-        assert migrated["version"] == "1.2"
+        assert migrated["version"] == "1.3"
         assert "suspended_orders" in migrated
         og = migrated["pending_orders"][0]
         assert og["broker_entry_order_id"] == "50"
+        assert og["broker_exit_order_id"] is None
         assert og.get("suspended_at") is None
 
     def test_order_group_from_dict_backward_compat(self):
@@ -620,6 +646,80 @@ class TestOrderEventDispatch:
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. SECRETS STORE
 # ══════════════════════════════════════════════════════════════════════════════
+
+    def test_reconcile_detects_tp_fill_from_fill_list(self):
+        from bot.execution.broker_adapter import FillSummary
+
+        adapter = self._make_adapter()
+        fills = {"tp": []}
+
+        class Rest:
+            async def _get(self, path, params):
+                return {"id": params["id"], "ordStatus": "Working"}
+
+        async def get_fill(order_id):
+            if order_id == "101":
+                return FillSummary(
+                    broker="tradovate",
+                    order_id="101",
+                    quantity=1,
+                    avg_price=27397.0,
+                    commission=1.44,
+                    fee_complete=True,
+                )
+            return None
+
+        adapter._rest = Rest()
+        adapter.get_order_fill_summary = get_fill
+        adapter._order_callbacks["strat_1"] = {
+            "on_entry_fill": lambda o: None,
+            "on_tp_fill": lambda o: fills["tp"].append(o),
+            "on_sl_fill": lambda o: None,
+            "on_status_change": lambda o: None,
+            "_entry_id": 100,
+            "_tp_id": 101,
+            "_sl_id": 102,
+            "_fill_handled": True,
+            "_target_qty": 1,
+            "_manual_tp_id": None,
+            "_manual_sl_id": None,
+            "_exit_handled": False,
+        }
+
+        asyncio.run(adapter.reconcile_order_status())
+
+        assert len(fills["tp"]) == 1
+        assert fills["tp"][0]["avgFillPrice"] == 27397.0
+        assert adapter._order_callbacks["strat_1"]["_exit_handled"] is True
+
+    def test_reconcile_does_not_dispatch_exit_twice(self):
+        adapter = self._make_adapter()
+        fills = {"tp": []}
+
+        class Rest:
+            async def _get(self, path, params):
+                return {"id": params["id"], "ordStatus": "Filled"}
+
+        adapter._rest = Rest()
+        adapter._order_callbacks["strat_1"] = {
+            "on_entry_fill": lambda o: None,
+            "on_tp_fill": lambda o: fills["tp"].append(o),
+            "on_sl_fill": lambda o: None,
+            "on_status_change": lambda o: None,
+            "_entry_id": 100,
+            "_tp_id": 101,
+            "_sl_id": 102,
+            "_fill_handled": True,
+            "_target_qty": 1,
+            "_manual_tp_id": None,
+            "_manual_sl_id": None,
+            "_exit_handled": True,
+        }
+
+        asyncio.run(adapter.reconcile_order_status())
+
+        assert fills["tp"] == []
+
 
 class TestSecretStore:
     """Test SecretStore SSM path construction and env var fallback."""
