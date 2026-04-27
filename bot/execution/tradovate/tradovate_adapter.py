@@ -284,9 +284,14 @@ class TradovateAdapter(BrokerAdapter):
             await self._resubscribe_bars(sub)
 
     async def _force_reauth(self) -> None:
-        """Force full re-authentication. Called by WS reconnect on 401."""
-        logger.info("Forcing Tradovate re-authentication for WS reconnect")
-        await self._auth.authenticate(force=True)
+        """Force token renewal for WS reconnect.
+
+        Uses renewAccessToken (not accessTokenRequest) to avoid creating
+        a new session — Tradovate limits to 2 concurrent sessions and
+        kills the oldest WS connections when a 3rd is created.
+        """
+        logger.info("Forcing Tradovate token renewal for WS reconnect")
+        await self._auth.renew_token()
 
     # ── User Sync ───────────────────────────────────────────────────────
 

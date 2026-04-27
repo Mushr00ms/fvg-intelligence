@@ -224,7 +224,9 @@ class TradovateAuth:
         """Renew the current access token without starting a new session.
 
         Uses /auth/renewAccessToken which extends the existing session.
-        Falls back to full re-auth if renewal fails or token is already expired.
+        Only falls back to accessTokenRequest (new session) when the token
+        is truly expired — Tradovate limits concurrent sessions to 2 and
+        kills the oldest WS connections when a 3rd session is created.
         """
         async with self._auth_lock:
             # Another caller may have already refreshed
@@ -232,9 +234,11 @@ class TradovateAuth:
                     and self._token.seconds_until_expiry > self.RENEW_BUFFER_SECONDS):
                 return self._token
 
-            # Renew endpoint requires a valid bearer token — skip if expired
+            # Token expired — renewal endpoint needs a valid bearer token,
+            # so we must create a new session. This is the ONLY acceptable
+            # place to call accessTokenRequest after startup.
             if self._token is None or self._token.is_expired:
-                logger.info("Token already expired, performing full re-authentication")
+                logger.info("Token expired, creating new session via accessTokenRequest")
                 return await self._do_authenticate()
 
             if self._session is None or self._session.closed:
@@ -250,21 +254,24 @@ class TradovateAuth:
             try:
                 async with self._session.get(url, headers=headers) as resp:
                     if resp.status != 200:
-                        logger.warning("Token renewal returned HTTP %d, falling back to re-auth", resp.status)
-                        return await self._do_authenticate()
+                        text = await resp.text()
+                        raise AuthenticationError(
+                            f"Token renewal returned HTTP {resp.status}: {text}"
+                        )
                     data = await resp.json()
+            except AuthenticationError:
+                raise
             except Exception as e:
-                logger.warning("Token renewal request failed: %s, falling back to re-auth", e)
-                return await self._do_authenticate()
+                raise AuthenticationError(f"Token renewal request failed: {e}")
 
             if data.get("errorText"):
-                logger.warning("Token renewal error: %s, falling back to re-auth", data["errorText"])
-                return await self._do_authenticate()
+                raise AuthenticationError(
+                    f"Token renewal error: {data['errorText']}"
+                )
 
             new_token = data.get("accessToken", "")
             if not new_token:
-                logger.warning("Token renewal returned no accessToken, falling back to re-auth")
-                return await self._do_authenticate()
+                raise AuthenticationError("Token renewal returned no accessToken")
 
             expiration_str = data.get("expirationTime", "")
             if expiration_str:
